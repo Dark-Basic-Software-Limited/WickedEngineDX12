@@ -92,7 +92,7 @@
 // After version 0.59.11, namespaces were refactored into nested namespaces under the wi:: root namespace.
 // To allow compatibility with older user code, the backwards compatibility definitions are included below.
 // If you need backwards compatibility features, define the following before including this file:
-//#define WICKEDENGINE_BACKWARDS_COMPATIBILITY_0_59
+#define WICKEDENGINE_BACKWARDS_COMPATIBILITY_0_59 // GameGuru MAX DX12 uses this ;)
 #ifdef WICKEDENGINE_BACKWARDS_COMPATIBILITY_0_59
 
 using namespace wi;

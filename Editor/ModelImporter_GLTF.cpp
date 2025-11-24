@@ -141,7 +141,7 @@ namespace wi::tinygltf
 struct LoaderState
 {
 	std::string name;
-	tinygltf::Model gltfModel;
+	wi::tinygltf::Model gltfModel;
 	Scene* scene;
 	wi::unordered_map<int, Entity> entityMap;  // node -> entity
 	std::unordered_multimap<int, Entity> punctualLightMap;  // KHR_lights_punctual -> entities
@@ -157,10 +157,10 @@ void Import_Extension_VRM(LoaderState& state);
 void Import_Extension_VRMC(LoaderState& state);
 void VRM_ToonMaterialCustomize(const std::string& name, MaterialComponent& material);
 void Import_VRMC_Bone(LoaderState& state, Entity boneEntity, const std::string& boneName);
-void Import_Mixamo_Bone(LoaderState& state, Entity boneEntity, const tinygltf::Node& node);
-void Import_Makehuman_Bone(LoaderState& state, Entity boneEntity, const tinygltf::Node& node);
+void Import_Mixamo_Bone(LoaderState& state, Entity boneEntity, const wi::tinygltf::Node& node);
+void Import_Makehuman_Bone(LoaderState& state, Entity boneEntity, const wi::tinygltf::Node& node);
 
-static void ImportMetadata(LoaderState& state, Entity entity, const tinygltf::Value& extras)
+static void ImportMetadata(LoaderState& state, Entity entity, const wi::tinygltf::Value& extras)
 {
 	if (extras.IsObject())
 	{
@@ -171,21 +171,21 @@ static void ImportMetadata(LoaderState& state, Entity entity, const tinygltf::Va
 			auto& value = extras.Get(key);
 			switch (value.Type())
 			{
-			case tinygltf::Type::BOOL_TYPE:
+			case wi::tinygltf::Type::BOOL_TYPE:
 				metadata.bool_values.set(key, value.Get<bool>());
 				break;
-			case tinygltf::Type::INT_TYPE:
+			case wi::tinygltf::Type::INT_TYPE:
 				metadata.int_values.set(key, value.Get<int>());
 				break;
-			case tinygltf::Type::REAL_TYPE:
+			case wi::tinygltf::Type::REAL_TYPE:
 				metadata.float_values.set(key, float(value.Get<double>()));
 				break;
-			case tinygltf::Type::STRING_TYPE:
+			case wi::tinygltf::Type::STRING_TYPE:
 				metadata.string_values.set(key, value.Get<std::string>());
 				break;
 			default:
 				json j;
-				tinygltf::ValueToJson(value, &j);
+				wi::tinygltf::ValueToJson(value, &j);
 				metadata.string_values.set(key, j.dump());
 			}
 		}
@@ -517,11 +517,11 @@ void ImportModel_GLTF(const std::string& fileName, Scene& scene)
 	std::string name = wi::helper::GetFileNameFromPath(fileName);
 	std::string extension = wi::helper::toUpper(wi::helper::GetExtensionFromFileName(name));
 
-	tinygltf::TinyGLTF loader;
+	wi::tinygltf::TinyGLTF loader;
 	std::string err;
 	std::string warn;
 
-	tinygltf::FsCallbacks callbacks;
+	wi::tinygltf::FsCallbacks callbacks;
 	callbacks.ReadWholeFile = wi::tinygltf::ReadWholeFile;
 	callbacks.WriteWholeFile = wi::tinygltf::WriteWholeFile;
 	callbacks.FileExists = wi::tinygltf::FileExists;
@@ -543,7 +543,7 @@ void ImportModel_GLTF(const std::string& fileName, Scene& scene)
 
 	if (ret)
 	{
-		std::string basedir = tinygltf::GetBaseDir(fileName);
+		std::string basedir = wi::tinygltf::GetBaseDir(fileName);
 
 		if (!extension.compare("GLTF"))
 		{
@@ -1050,9 +1050,9 @@ void ImportModel_GLTF(const std::string& fileName, Scene& scene)
 			if (prim.indices >= 0)
 			{
 				// Fill indices:
-				const tinygltf::Accessor& accessor = state.gltfModel.accessors[prim.indices];
-				const tinygltf::BufferView& bufferView = state.gltfModel.bufferViews[accessor.bufferView];
-				const tinygltf::Buffer& buffer = state.gltfModel.buffers[bufferView.buffer];
+				const wi::tinygltf::Accessor& accessor = state.gltfModel.accessors[prim.indices];
+				const wi::tinygltf::BufferView& bufferView = state.gltfModel.bufferViews[accessor.bufferView];
+				const wi::tinygltf::Buffer& buffer = state.gltfModel.buffers[bufferView.buffer];
 
 				int stride = accessor.ByteStride(bufferView);
 				size_t indexCount = AlignTo(accessor.count, size_t(3)); // there was a model with invalid index count, this is a safety fix for it
@@ -1101,9 +1101,9 @@ void ImportModel_GLTF(const std::string& fileName, Scene& scene)
 				const std::string& attr_name = attr.first;
 				int attr_data = attr.second;
 
-				const tinygltf::Accessor& accessor = state.gltfModel.accessors[attr_data];
-				const tinygltf::BufferView& bufferView = state.gltfModel.bufferViews[accessor.bufferView];
-				const tinygltf::Buffer& buffer = state.gltfModel.buffers[bufferView.buffer];
+				const wi::tinygltf::Accessor& accessor = state.gltfModel.accessors[attr_data];
+				const wi::tinygltf::BufferView& bufferView = state.gltfModel.bufferViews[accessor.bufferView];
+				const wi::tinygltf::Buffer& buffer = state.gltfModel.buffers[bufferView.buffer];
 
 				int stride = accessor.ByteStride(bufferView);
 				size_t vertexCount = accessor.count;
@@ -1137,10 +1137,10 @@ void ImportModel_GLTF(const std::string& fileName, Scene& scene)
 					if (accessor.sparse.isSparse)
 					{
 						auto& sparse = accessor.sparse;
-						const tinygltf::BufferView& sparse_indices_view = state.gltfModel.bufferViews[sparse.indices.bufferView];
-						const tinygltf::BufferView& sparse_values_view = state.gltfModel.bufferViews[sparse.values.bufferView];
-						const tinygltf::Buffer& sparse_indices_buffer = state.gltfModel.buffers[sparse_indices_view.buffer];
-						const tinygltf::Buffer& sparse_values_buffer = state.gltfModel.buffers[sparse_values_view.buffer];
+						const wi::tinygltf::BufferView& sparse_indices_view = state.gltfModel.bufferViews[sparse.indices.bufferView];
+						const wi::tinygltf::BufferView& sparse_values_view = state.gltfModel.bufferViews[sparse.values.bufferView];
+						const wi::tinygltf::Buffer& sparse_indices_buffer = state.gltfModel.buffers[sparse_indices_view.buffer];
+						const wi::tinygltf::Buffer& sparse_values_buffer = state.gltfModel.buffers[sparse_values_view.buffer];
 						const uint8_t* sparse_indices_data = sparse_indices_buffer.data.data() + sparse.indices.byteOffset + sparse_indices_view.byteOffset;
 						const uint8_t* sparse_values_data = sparse_values_buffer.data.data() + sparse.values.byteOffset + sparse_values_view.byteOffset;
 						switch (sparse.indices.componentType)
@@ -1178,10 +1178,10 @@ void ImportModel_GLTF(const std::string& fileName, Scene& scene)
 					if (accessor.sparse.isSparse)
 					{
 						auto& sparse = accessor.sparse;
-						const tinygltf::BufferView& sparse_indices_view = state.gltfModel.bufferViews[sparse.indices.bufferView];
-						const tinygltf::BufferView& sparse_values_view = state.gltfModel.bufferViews[sparse.values.bufferView];
-						const tinygltf::Buffer& sparse_indices_buffer = state.gltfModel.buffers[sparse_indices_view.buffer];
-						const tinygltf::Buffer& sparse_values_buffer = state.gltfModel.buffers[sparse_values_view.buffer];
+						const wi::tinygltf::BufferView& sparse_indices_view = state.gltfModel.bufferViews[sparse.indices.bufferView];
+						const wi::tinygltf::BufferView& sparse_values_view = state.gltfModel.bufferViews[sparse.values.bufferView];
+						const wi::tinygltf::Buffer& sparse_indices_buffer = state.gltfModel.buffers[sparse_indices_view.buffer];
+						const wi::tinygltf::Buffer& sparse_values_buffer = state.gltfModel.buffers[sparse_values_view.buffer];
 						const uint8_t* sparse_indices_data = sparse_indices_buffer.data.data() + sparse.indices.byteOffset + sparse_indices_view.byteOffset;
 						const uint8_t* sparse_values_data = sparse_values_buffer.data.data() + sparse.values.byteOffset + sparse_values_view.byteOffset;
 						switch (sparse.indices.componentType)
@@ -1488,17 +1488,17 @@ void ImportModel_GLTF(const std::string& fileName, Scene& scene)
 					const std::string& attr_name = attr.first;
 					int attr_data = attr.second;
 
-					const tinygltf::Accessor& accessor = state.gltfModel.accessors[attr_data];
+					const wi::tinygltf::Accessor& accessor = state.gltfModel.accessors[attr_data];
 
 					if (!attr_name.compare("POSITION"))
 					{
 						if (accessor.sparse.isSparse)
 						{
 							auto& sparse = accessor.sparse;
-							const tinygltf::BufferView& sparse_indices_view = state.gltfModel.bufferViews[sparse.indices.bufferView];
-							const tinygltf::BufferView& sparse_values_view = state.gltfModel.bufferViews[sparse.values.bufferView];
-							const tinygltf::Buffer& sparse_indices_buffer = state.gltfModel.buffers[sparse_indices_view.buffer];
-							const tinygltf::Buffer& sparse_values_buffer = state.gltfModel.buffers[sparse_values_view.buffer];
+							const wi::tinygltf::BufferView& sparse_indices_view = state.gltfModel.bufferViews[sparse.indices.bufferView];
+							const wi::tinygltf::BufferView& sparse_values_view = state.gltfModel.bufferViews[sparse.values.bufferView];
+							const wi::tinygltf::Buffer& sparse_indices_buffer = state.gltfModel.buffers[sparse_indices_view.buffer];
+							const wi::tinygltf::Buffer& sparse_values_buffer = state.gltfModel.buffers[sparse_values_view.buffer];
 							const uint8_t* sparse_indices_data = sparse_indices_buffer.data.data() + sparse.indices.byteOffset + sparse_indices_view.byteOffset;
 							const uint8_t* sparse_values_data = sparse_values_buffer.data.data() + sparse.values.byteOffset + sparse_values_view.byteOffset;
 							morph_target.vertex_positions.resize(sparse.count);
@@ -1532,8 +1532,8 @@ void ImportModel_GLTF(const std::string& fileName, Scene& scene)
 						}
 						else
 						{
-							const tinygltf::BufferView& bufferView = state.gltfModel.bufferViews[accessor.bufferView];
-							const tinygltf::Buffer& buffer = state.gltfModel.buffers[bufferView.buffer];
+							const wi::tinygltf::BufferView& bufferView = state.gltfModel.bufferViews[accessor.bufferView];
+							const wi::tinygltf::Buffer& buffer = state.gltfModel.buffers[bufferView.buffer];
 
 							int stride = accessor.ByteStride(bufferView);
 							size_t vertexCount = accessor.count;
@@ -1552,10 +1552,10 @@ void ImportModel_GLTF(const std::string& fileName, Scene& scene)
 						if (accessor.sparse.isSparse)
 						{
 							auto& sparse = accessor.sparse;
-							const tinygltf::BufferView& sparse_indices_view = state.gltfModel.bufferViews[sparse.indices.bufferView];
-							const tinygltf::BufferView& sparse_values_view = state.gltfModel.bufferViews[sparse.values.bufferView];
-							const tinygltf::Buffer& sparse_indices_buffer = state.gltfModel.buffers[sparse_indices_view.buffer];
-							const tinygltf::Buffer& sparse_values_buffer = state.gltfModel.buffers[sparse_values_view.buffer];
+							const wi::tinygltf::BufferView& sparse_indices_view = state.gltfModel.bufferViews[sparse.indices.bufferView];
+							const wi::tinygltf::BufferView& sparse_values_view = state.gltfModel.bufferViews[sparse.values.bufferView];
+							const wi::tinygltf::Buffer& sparse_indices_buffer = state.gltfModel.buffers[sparse_indices_view.buffer];
+							const wi::tinygltf::Buffer& sparse_values_buffer = state.gltfModel.buffers[sparse_values_view.buffer];
 							const uint8_t* sparse_indices_data = sparse_indices_buffer.data.data() + sparse.indices.byteOffset + sparse_indices_view.byteOffset;
 							const uint8_t* sparse_values_data = sparse_values_buffer.data.data() + sparse.values.byteOffset + sparse_values_view.byteOffset;
 							morph_target.vertex_normals.resize(sparse.count);
@@ -1589,8 +1589,8 @@ void ImportModel_GLTF(const std::string& fileName, Scene& scene)
 						}
 						else
 						{
-							const tinygltf::BufferView& bufferView = state.gltfModel.bufferViews[accessor.bufferView];
-							const tinygltf::Buffer& buffer = state.gltfModel.buffers[bufferView.buffer];
+							const wi::tinygltf::BufferView& bufferView = state.gltfModel.bufferViews[accessor.bufferView];
+							const wi::tinygltf::Buffer& buffer = state.gltfModel.buffers[bufferView.buffer];
 
 							int stride = accessor.ByteStride(bufferView);
 							size_t vertexCount = accessor.count;
@@ -1635,9 +1635,9 @@ void ImportModel_GLTF(const std::string& fileName, Scene& scene)
 
 		if (skin.inverseBindMatrices >= 0)
 		{
-			const tinygltf::Accessor &accessor = state.gltfModel.accessors[skin.inverseBindMatrices];
-			const tinygltf::BufferView &bufferView = state.gltfModel.bufferViews[accessor.bufferView];
-			const tinygltf::Buffer &buffer = state.gltfModel.buffers[bufferView.buffer];
+			const wi::tinygltf::Accessor &accessor = state.gltfModel.accessors[skin.inverseBindMatrices];
+			const wi::tinygltf::BufferView &bufferView = state.gltfModel.bufferViews[accessor.bufferView];
+			const wi::tinygltf::Buffer &buffer = state.gltfModel.buffers[bufferView.buffer];
 			armature.inverseBindMatrices.resize(accessor.count);
 			memcpy(armature.inverseBindMatrices.data(), &buffer.data[accessor.byteOffset + bufferView.byteOffset], accessor.count * sizeof(XMFLOAT4X4));
 		}
@@ -1649,7 +1649,7 @@ void ImportModel_GLTF(const std::string& fileName, Scene& scene)
 	}
 
 	// Create transform hierarchy, assign objects, meshes, armatures, cameras:
-	const tinygltf::Scene &gltfScene = state.gltfModel.scenes[std::max(0, state.gltfModel.defaultScene)];
+	const wi::tinygltf::Scene &gltfScene = state.gltfModel.scenes[std::max(0, state.gltfModel.defaultScene)];
 	for (size_t i = 0; i < gltfScene.nodes.size(); i++)
 	{
 		LoadNode(gltfScene.nodes[i], state.rootEntity, state);
@@ -1725,9 +1725,9 @@ void ImportModel_GLTF(const std::string& fileName, Scene& scene)
 
 			// AnimationSampler input = keyframe times
 			{
-				const tinygltf::Accessor& accessor = state.gltfModel.accessors[sam.input];
-				const tinygltf::BufferView& bufferView = state.gltfModel.bufferViews[accessor.bufferView];
-				const tinygltf::Buffer& buffer = state.gltfModel.buffers[bufferView.buffer];
+				const wi::tinygltf::Accessor& accessor = state.gltfModel.accessors[sam.input];
+				const wi::tinygltf::BufferView& bufferView = state.gltfModel.bufferViews[accessor.bufferView];
+				const wi::tinygltf::Buffer& buffer = state.gltfModel.buffers[bufferView.buffer];
 
 				assert(accessor.componentType == TINYGLTF_COMPONENT_TYPE_FLOAT);
 
@@ -1752,9 +1752,9 @@ void ImportModel_GLTF(const std::string& fileName, Scene& scene)
 
 			// AnimationSampler output = keyframe data
 			{
-				const tinygltf::Accessor& accessor = state.gltfModel.accessors[sam.output];
-				const tinygltf::BufferView& bufferView = state.gltfModel.bufferViews[accessor.bufferView];
-				const tinygltf::Buffer& buffer = state.gltfModel.buffers[bufferView.buffer];
+				const wi::tinygltf::Accessor& accessor = state.gltfModel.accessors[sam.output];
+				const wi::tinygltf::BufferView& bufferView = state.gltfModel.bufferViews[accessor.bufferView];
+				const wi::tinygltf::Buffer& buffer = state.gltfModel.buffers[bufferView.buffer];
 
 				int stride = accessor.ByteStride(bufferView);
 				size_t count = accessor.count;
@@ -3335,7 +3335,7 @@ void Import_VRMC_Bone(LoaderState& state, Entity boneID, const std::string& bone
 	}
 }
 
-void Import_Mixamo_Bone(LoaderState& state, Entity boneEntity, const tinygltf::Node& node)
+void Import_Mixamo_Bone(LoaderState& state, Entity boneEntity, const wi::tinygltf::Node& node)
 {
 	auto get_humanoid = [&]() -> HumanoidComponent& {
 		HumanoidComponent* component = state.scene->humanoids.GetComponent(state.rootEntity);
@@ -3556,7 +3556,7 @@ void Import_Mixamo_Bone(LoaderState& state, Entity boneEntity, const tinygltf::N
 	}
 }
 
-void Import_Makehuman_Bone(LoaderState& state, Entity boneEntity, const tinygltf::Node& node)
+void Import_Makehuman_Bone(LoaderState& state, Entity boneEntity, const wi::tinygltf::Node& node)
 {
 	auto get_humanoid = [&]() -> HumanoidComponent& {
 		HumanoidComponent* component = state.scene->humanoids.GetComponent(state.rootEntity);
@@ -3778,7 +3778,7 @@ void Import_Makehuman_Bone(LoaderState& state, Entity boneEntity, const tinygltf
 }
 
 template<typename T>
-inline void _ExportHelper_valuetobuf(const T& input, tinygltf::Buffer& buffer_builder, size_t& buf_i)
+inline void _ExportHelper_valuetobuf(const T& input, wi::tinygltf::Buffer& buffer_builder, size_t& buf_i)
 {
 	const size_t _right = buf_i + sizeof(input);
 	if (_right > buffer_builder.data.size())
@@ -3789,23 +3789,23 @@ inline void _ExportHelper_valuetobuf(const T& input, tinygltf::Buffer& buffer_bu
 	buf_i = _right;
 }
 
-inline tinygltf::Value _ExportHelper_tovalue(float input)
+inline wi::tinygltf::Value _ExportHelper_tovalue(float input)
 {
-	return tinygltf::Value(input);
+	return wi::tinygltf::Value(input);
 }
 
-inline tinygltf::Value _ExportHelper_tovalue(XMFLOAT3 input)
+inline wi::tinygltf::Value _ExportHelper_tovalue(XMFLOAT3 input)
 {
-	auto value_builder = tinygltf::Value(tinygltf::Value::Array({
-		tinygltf::Value(input.x), tinygltf::Value(input.y), tinygltf::Value(input.z)
+	auto value_builder = wi::tinygltf::Value(wi::tinygltf::Value::Array({
+		wi::tinygltf::Value(input.x), wi::tinygltf::Value(input.y), wi::tinygltf::Value(input.z)
 	}));
 	return value_builder;
 }
 
-inline tinygltf::Value _ExportHelper_tovalue(XMFLOAT4 input)
+inline wi::tinygltf::Value _ExportHelper_tovalue(XMFLOAT4 input)
 {
-	auto value_builder = tinygltf::Value(tinygltf::Value::Array({
-		tinygltf::Value(input.x), tinygltf::Value(input.y), tinygltf::Value(input.z), tinygltf::Value(input.w)
+	auto value_builder = wi::tinygltf::Value(wi::tinygltf::Value::Array({
+		wi::tinygltf::Value(input.x), wi::tinygltf::Value(input.y), wi::tinygltf::Value(input.z), wi::tinygltf::Value(input.w)
 	}));
 	return value_builder;
 }
@@ -3832,13 +3832,13 @@ inline std::string _ExportHelper_GetOriginalTexture(std::string texture_file)
 	return texture_file;
 }
 
-inline tinygltf::TextureInfo _ExportHelper_StoreMaterialTexture(LoaderState& state, const std::string& gltf_dir, const MaterialComponent& material, MaterialComponent::TEXTURESLOT slot)
+inline wi::tinygltf::TextureInfo _ExportHelper_StoreMaterialTexture(LoaderState& state, const std::string& gltf_dir, const MaterialComponent& material, MaterialComponent::TEXTURESLOT slot)
 {
 	const MaterialComponent::TextureMap& textureSlot = material.textures[slot];
 
 	std::string texture_file = textureSlot.name;
 
-	tinygltf::TextureInfo textureinfo_builder;
+	wi::tinygltf::TextureInfo textureinfo_builder;
 	int texture_index = -1;
 	auto find_texture_id = state.textureMap.find(texture_file);
 
@@ -3865,7 +3865,7 @@ inline tinygltf::TextureInfo _ExportHelper_StoreMaterialTexture(LoaderState& sta
 
 		int image_bufferView_index = 0;
 
-		tinygltf::Buffer buffer_builder;
+		wi::tinygltf::Buffer buffer_builder;
 		int buffer_index = (int)state.gltfModel.buffers.size();
 		wi::vector<uint8_t> texturedata;
 		size_t buffer_size = 0;
@@ -3916,13 +3916,13 @@ inline tinygltf::TextureInfo _ExportHelper_StoreMaterialTexture(LoaderState& sta
 		}
 		state.gltfModel.buffers.push_back(buffer_builder);
 			
-		tinygltf::BufferView bufferView_builder;
+		wi::tinygltf::BufferView bufferView_builder;
 		image_bufferView_index = (int)state.gltfModel.bufferViews.size();
 		bufferView_builder.buffer = buffer_index;
 		bufferView_builder.byteLength = buffer_size;
 		state.gltfModel.bufferViews.push_back(bufferView_builder);
 
-		tinygltf::Image image_builder;
+		wi::tinygltf::Image image_builder;
 		//image_builder.uri = texture_file;
 		image_builder.bufferView = image_bufferView_index;
 		image_builder.mimeType = mime_type;
@@ -3931,7 +3931,7 @@ inline tinygltf::TextureInfo _ExportHelper_StoreMaterialTexture(LoaderState& sta
 		wi::helper::MakePathRelative(gltf_dir, texture_file);
 		state.gltfModel.images.push_back(image_builder);
 
-		tinygltf::Texture texture_builder;
+		wi::tinygltf::Texture texture_builder;
 		texture_index = (int)state.gltfModel.textures.size();
 		texture_builder.source = image_index;
 		state.gltfModel.textures.push_back(texture_builder);
@@ -3951,9 +3951,9 @@ inline tinygltf::TextureInfo _ExportHelper_StoreMaterialTexture(LoaderState& sta
 
 void ExportModel_GLTF(const std::string& filename, Scene& scene)
 {
-	tinygltf::TinyGLTF writer;
+	wi::tinygltf::TinyGLTF writer;
 
-	tinygltf::FsCallbacks callbacks;
+	wi::tinygltf::FsCallbacks callbacks;
 	callbacks.ReadWholeFile = wi::tinygltf::ReadWholeFile;
 	callbacks.WriteWholeFile = wi::tinygltf::WriteWholeFile;
 	callbacks.FileExists = wi::tinygltf::FileExists;
@@ -4085,7 +4085,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 		auto materialEntity = wiscene.materials.GetEntity(mt_id);
 		auto nameComponent = wiscene.names.GetComponent(materialEntity);
 
-		tinygltf::Material material_builder;
+		wi::tinygltf::Material material_builder;
 
 		if(nameComponent != nullptr)
 		{
@@ -4176,23 +4176,23 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 		// Values
 		if (material.shaderType == wi::scene::MaterialComponent::SHADERTYPE_UNLIT)
 		{
-			material_builder.extensions["KHR_materials_unlit"] = tinygltf::Value();
+			material_builder.extensions["KHR_materials_unlit"] = wi::tinygltf::Value();
 		}
 
 		if (material.GetEmissiveStrength() != 1.0f)
 		{
-			tinygltf::Value::Object KHR_materials_emissive_strength_builder = {
-				{"emissiveStrength", tinygltf::Value(double(material.GetEmissiveStrength()))}
+			wi::tinygltf::Value::Object KHR_materials_emissive_strength_builder = {
+				{"emissiveStrength", wi::tinygltf::Value(double(material.GetEmissiveStrength()))}
 			};
-			material_builder.extensions["KHR_materials_emissive_strength"] = tinygltf::Value(KHR_materials_emissive_strength_builder);
+			material_builder.extensions["KHR_materials_emissive_strength"] = wi::tinygltf::Value(KHR_materials_emissive_strength_builder);
 		}
 
 		// Transmission extension (KHR_materials_transmission)
 		// Values
 		if (material.transmission > 0 || material.textures[wi::scene::MaterialComponent::TRANSMISSIONMAP].resource.IsValid())
 		{
-			tinygltf::Value::Object KHR_materials_transmission_builder = {
-				{"transmissionFactor", tinygltf::Value(double(material.transmission))}
+			wi::tinygltf::Value::Object KHR_materials_transmission_builder = {
+				{"transmissionFactor", wi::tinygltf::Value(double(material.transmission))}
 			};
 			// Textures
 			if (material.textures[wi::scene::MaterialComponent::TRANSMISSIONMAP].resource.IsValid())
@@ -4203,31 +4203,31 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 					material,
 					wi::scene::MaterialComponent::TRANSMISSIONMAP
 				);
-				KHR_materials_transmission_builder["transmissionTexture"] = tinygltf::Value({
-						{"index",tinygltf::Value(transmissionTexInfo_pre.index)},
-						{"texCoord",tinygltf::Value(transmissionTexInfo_pre.texCoord)}
+				KHR_materials_transmission_builder["transmissionTexture"] = wi::tinygltf::Value({
+						{"index",wi::tinygltf::Value(transmissionTexInfo_pre.index)},
+						{"texCoord",wi::tinygltf::Value(transmissionTexInfo_pre.texCoord)}
 					});
 			}
-			material_builder.extensions["KHR_materials_transmission"] = tinygltf::Value(KHR_materials_transmission_builder);
+			material_builder.extensions["KHR_materials_transmission"] = wi::tinygltf::Value(KHR_materials_transmission_builder);
 		}
 
 		// Specular-glosiness extension (KHR_materials_pbrSpecularGlossiness)
 		if(material.IsUsingSpecularGlossinessWorkflow())
 		{
 			// Values
-			tinygltf::Value::Object KHR_materials_pbrSpecularGlossiness_builder = {
-				{"diffuseFactor", tinygltf::Value({
-					tinygltf::Value(double(material.baseColor.x)),
-					tinygltf::Value(double(material.baseColor.y)),
-					tinygltf::Value(double(material.baseColor.z)),
-					tinygltf::Value(double(material.baseColor.w))
+			wi::tinygltf::Value::Object KHR_materials_pbrSpecularGlossiness_builder = {
+				{"diffuseFactor", wi::tinygltf::Value({
+					wi::tinygltf::Value(double(material.baseColor.x)),
+					wi::tinygltf::Value(double(material.baseColor.y)),
+					wi::tinygltf::Value(double(material.baseColor.z)),
+					wi::tinygltf::Value(double(material.baseColor.w))
 				})},
-				{"specularFactor", tinygltf::Value({
-					tinygltf::Value(double(material.specularColor.x)),
-					tinygltf::Value(double(material.specularColor.y)),
-					tinygltf::Value(double(material.specularColor.z))
+				{"specularFactor", wi::tinygltf::Value({
+					wi::tinygltf::Value(double(material.specularColor.x)),
+					wi::tinygltf::Value(double(material.specularColor.y)),
+					wi::tinygltf::Value(double(material.specularColor.z))
 				})},
-				{"glossinessFactor", tinygltf::Value(double(material.roughness))}
+				{"glossinessFactor", wi::tinygltf::Value(double(material.roughness))}
 			};
 			// Textures
 			if(material.textures[MaterialComponent::BASECOLORMAP].resource.IsValid())
@@ -4238,9 +4238,9 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 					material,
 					wi::scene::MaterialComponent::BASECOLORMAP
 				);
-				KHR_materials_pbrSpecularGlossiness_builder["diffuseTexture"] = tinygltf::Value({
-						{"index",tinygltf::Value(diffuseTexInfo_pre.index)},
-						{"texCoord",tinygltf::Value(diffuseTexInfo_pre.texCoord)}
+				KHR_materials_pbrSpecularGlossiness_builder["diffuseTexture"] = wi::tinygltf::Value({
+						{"index",wi::tinygltf::Value(diffuseTexInfo_pre.index)},
+						{"texCoord",wi::tinygltf::Value(diffuseTexInfo_pre.texCoord)}
 					});
 			}
 			if(material.textures[MaterialComponent::SURFACEMAP].resource.IsValid())
@@ -4251,9 +4251,9 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 					material,
 					wi::scene::MaterialComponent::SURFACEMAP
 				);
-				KHR_materials_pbrSpecularGlossiness_builder["specularGlossinessTexture"] = tinygltf::Value({
-						{"index",tinygltf::Value(specglossTexInfo_pre.index)},
-						{"texCoord",tinygltf::Value(specglossTexInfo_pre.texCoord)}
+				KHR_materials_pbrSpecularGlossiness_builder["specularGlossinessTexture"] = wi::tinygltf::Value({
+						{"index",wi::tinygltf::Value(specglossTexInfo_pre.index)},
+						{"texCoord",wi::tinygltf::Value(specglossTexInfo_pre.texCoord)}
 					});
 			}
 		}
@@ -4262,13 +4262,13 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 		if(material.shaderType == wi::scene::MaterialComponent::SHADERTYPE_PBR_CLOTH || material.shaderType == wi::scene::MaterialComponent::SHADERTYPE_PBR_CLOTH_CLEARCOAT)
 		{
 			// Values
-			tinygltf::Value::Object KHR_materials_sheen_builder = {
-				{"sheenColorFactor", tinygltf::Value({
-					tinygltf::Value(double(material.sheenColor.x)),
-					tinygltf::Value(double(material.sheenColor.y)),
-					tinygltf::Value(double(material.sheenColor.z))
+			wi::tinygltf::Value::Object KHR_materials_sheen_builder = {
+				{"sheenColorFactor", wi::tinygltf::Value({
+					wi::tinygltf::Value(double(material.sheenColor.x)),
+					wi::tinygltf::Value(double(material.sheenColor.y)),
+					wi::tinygltf::Value(double(material.sheenColor.z))
 				})},
-				{"sheenRoughnessFactor", tinygltf::Value(double(material.sheenRoughness))}
+				{"sheenRoughnessFactor", wi::tinygltf::Value(double(material.sheenRoughness))}
 			};
 			// Textures
 			if(material.textures[wi::scene::MaterialComponent::SHEENCOLORMAP].resource.IsValid())
@@ -4279,9 +4279,9 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 					material,
 					wi::scene::MaterialComponent::SHEENCOLORMAP
 				);
-				KHR_materials_sheen_builder["sheenColorTexture"] = tinygltf::Value({
-						{"index",tinygltf::Value(sheencolorTexInfo_pre.index)},
-						{"texCoord",tinygltf::Value(sheencolorTexInfo_pre.texCoord)}
+				KHR_materials_sheen_builder["sheenColorTexture"] = wi::tinygltf::Value({
+						{"index",wi::tinygltf::Value(sheencolorTexInfo_pre.index)},
+						{"texCoord",wi::tinygltf::Value(sheencolorTexInfo_pre.texCoord)}
 					});
 			}
 			if(material.textures[wi::scene::MaterialComponent::SHEENROUGHNESSMAP].resource.IsValid())
@@ -4292,21 +4292,21 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 					material,
 					wi::scene::MaterialComponent::SHEENROUGHNESSMAP
 				);
-				KHR_materials_sheen_builder["sheenRoughnessTexture"] = tinygltf::Value({
-						{"index",tinygltf::Value(sheenRoughTexInfo_pre.index)},
-						{"texCoord",tinygltf::Value(sheenRoughTexInfo_pre.texCoord)}
+				KHR_materials_sheen_builder["sheenRoughnessTexture"] = wi::tinygltf::Value({
+						{"index",wi::tinygltf::Value(sheenRoughTexInfo_pre.index)},
+						{"texCoord",wi::tinygltf::Value(sheenRoughTexInfo_pre.texCoord)}
 					});
 			}
-			material_builder.extensions["KHR_materials_sheen"] = tinygltf::Value(KHR_materials_sheen_builder);
+			material_builder.extensions["KHR_materials_sheen"] = wi::tinygltf::Value(KHR_materials_sheen_builder);
 		}
 
 		// Clearcoat extension (KHR_materials_clearcoat)
 		// Values
 		if (material.shaderType == MaterialComponent::SHADERTYPE_PBR_CLEARCOAT || material.shaderType == MaterialComponent::SHADERTYPE_PBR_CLOTH_CLEARCOAT)
 		{
-			tinygltf::Value::Object KHR_materials_clearcoat_builder = {
-				{"clearcoatFactor", tinygltf::Value(double(material.clearcoat))},
-				{"clearcoatRoughnessFactor", tinygltf::Value(double(material.clearcoatRoughness))}
+			wi::tinygltf::Value::Object KHR_materials_clearcoat_builder = {
+				{"clearcoatFactor", wi::tinygltf::Value(double(material.clearcoat))},
+				{"clearcoatRoughnessFactor", wi::tinygltf::Value(double(material.clearcoatRoughness))}
 			};
 			// Textures
 			if (material.textures[wi::scene::MaterialComponent::CLEARCOATMAP].resource.IsValid())
@@ -4317,9 +4317,9 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 					material,
 					wi::scene::MaterialComponent::CLEARCOATMAP
 				);
-				KHR_materials_clearcoat_builder["clearcoatTexture"] = tinygltf::Value({
-						{"index",tinygltf::Value(clearcoatTexInfo_pre.index)},
-						{"texCoord",tinygltf::Value(clearcoatTexInfo_pre.texCoord)}
+				KHR_materials_clearcoat_builder["clearcoatTexture"] = wi::tinygltf::Value({
+						{"index",wi::tinygltf::Value(clearcoatTexInfo_pre.index)},
+						{"texCoord",wi::tinygltf::Value(clearcoatTexInfo_pre.texCoord)}
 					});
 			}
 			if (material.textures[wi::scene::MaterialComponent::CLEARCOATNORMALMAP].resource.IsValid())
@@ -4330,9 +4330,9 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 					material,
 					wi::scene::MaterialComponent::CLEARCOATNORMALMAP
 				);
-				KHR_materials_clearcoat_builder["clearcoatNormalTexture"] = tinygltf::Value({
-						{"index",tinygltf::Value(clearcoatNormTexInfo_pre.index)},
-						{"texCoord",tinygltf::Value(clearcoatNormTexInfo_pre.texCoord)}
+				KHR_materials_clearcoat_builder["clearcoatNormalTexture"] = wi::tinygltf::Value({
+						{"index",wi::tinygltf::Value(clearcoatNormTexInfo_pre.index)},
+						{"texCoord",wi::tinygltf::Value(clearcoatNormTexInfo_pre.texCoord)}
 					});
 			}
 			if (material.textures[wi::scene::MaterialComponent::CLEARCOATROUGHNESSMAP].resource.IsValid())
@@ -4343,29 +4343,29 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 					material,
 					wi::scene::MaterialComponent::CLEARCOATROUGHNESSMAP
 				);
-				KHR_materials_clearcoat_builder["clearcoatRoughnessTexture"] = tinygltf::Value({
-						{"index",tinygltf::Value(clearcoatRoughTexInfo_pre.index)},
-						{"texCoord",tinygltf::Value(clearcoatRoughTexInfo_pre.texCoord)}
+				KHR_materials_clearcoat_builder["clearcoatRoughnessTexture"] = wi::tinygltf::Value({
+						{"index",wi::tinygltf::Value(clearcoatRoughTexInfo_pre.index)},
+						{"texCoord",wi::tinygltf::Value(clearcoatRoughTexInfo_pre.texCoord)}
 					});
 			}
-			material_builder.extensions["KHR_materials_clearcoat"] = tinygltf::Value(KHR_materials_clearcoat_builder);
+			material_builder.extensions["KHR_materials_clearcoat"] = wi::tinygltf::Value(KHR_materials_clearcoat_builder);
 		}
 
 		// IOR Extension (KHR_materials_ior)
 		float ior_retrieve_phase1 = std::sqrt(material.reflectance);
 		float ior_retrieve_phase2 = -(1+ior_retrieve_phase1)/(ior_retrieve_phase1-1);
-		tinygltf::Value::Object KHR_materials_ior_builder = {
-			{"ior",tinygltf::Value(double(ior_retrieve_phase2))}
+		wi::tinygltf::Value::Object KHR_materials_ior_builder = {
+			{"ior",wi::tinygltf::Value(double(ior_retrieve_phase2))}
 		};
-		material_builder.extensions["KHR_materials_ior"] = tinygltf::Value(KHR_materials_ior_builder);
+		material_builder.extensions["KHR_materials_ior"] = wi::tinygltf::Value(KHR_materials_ior_builder);
 
 		// Specular Extension (KHR_materials_specular)
-		tinygltf::Value::Object KHR_materials_specular_builder = {
-			{"specularFactor", tinygltf::Value(material.specularColor.w)},
-			{"specularColorFactor",tinygltf::Value({
-				tinygltf::Value(double(material.specularColor.x)),
-				tinygltf::Value(double(material.specularColor.y)),
-				tinygltf::Value(double(material.specularColor.z))
+		wi::tinygltf::Value::Object KHR_materials_specular_builder = {
+			{"specularFactor", wi::tinygltf::Value(material.specularColor.w)},
+			{"specularColorFactor",wi::tinygltf::Value({
+				wi::tinygltf::Value(double(material.specularColor.x)),
+				wi::tinygltf::Value(double(material.specularColor.y)),
+				wi::tinygltf::Value(double(material.specularColor.z))
 			})}
 		};
 		if(material.textures[wi::scene::MaterialComponent::SPECULARMAP].resource.IsValid())
@@ -4376,23 +4376,23 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 				material,
 				wi::scene::MaterialComponent::SPECULARMAP
 			);
-			KHR_materials_specular_builder["specularTexture"] = tinygltf::Value({
-					{"index",tinygltf::Value(specularTexInfo_pre.index)},
-					{"texCoord",tinygltf::Value(specularTexInfo_pre.texCoord)}
+			KHR_materials_specular_builder["specularTexture"] = wi::tinygltf::Value({
+					{"index",wi::tinygltf::Value(specularTexInfo_pre.index)},
+					{"texCoord",wi::tinygltf::Value(specularTexInfo_pre.texCoord)}
 				});
-			KHR_materials_specular_builder["specularColorTexture"] = tinygltf::Value({
-					{"index",tinygltf::Value(specularTexInfo_pre.index)},
-					{"texCoord",tinygltf::Value(specularTexInfo_pre.texCoord)}
+			KHR_materials_specular_builder["specularColorTexture"] = wi::tinygltf::Value({
+					{"index",wi::tinygltf::Value(specularTexInfo_pre.index)},
+					{"texCoord",wi::tinygltf::Value(specularTexInfo_pre.texCoord)}
 				});
 		}
-		material_builder.extensions["KHR_materials_specular"] = tinygltf::Value(KHR_materials_specular_builder);
+		material_builder.extensions["KHR_materials_specular"] = wi::tinygltf::Value(KHR_materials_specular_builder);
 
 		if (material.shaderType == MaterialComponent::SHADERTYPE_PBR_ANISOTROPIC)
 		{
 			// Anisotropy Extension (KHR_materials_anisotropy)
-			tinygltf::Value::Object KHR_materials_anisotropy_builder = {
-				{"anisotropyStrength", tinygltf::Value(material.anisotropy_strength)},
-				{"anisotropyRotation", tinygltf::Value(material.anisotropy_rotation)}
+			wi::tinygltf::Value::Object KHR_materials_anisotropy_builder = {
+				{"anisotropyStrength", wi::tinygltf::Value(material.anisotropy_strength)},
+				{"anisotropyRotation", wi::tinygltf::Value(material.anisotropy_rotation)}
 			};
 			if (material.textures[wi::scene::MaterialComponent::ANISOTROPYMAP].resource.IsValid())
 			{
@@ -4402,12 +4402,12 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 					material,
 					wi::scene::MaterialComponent::ANISOTROPYMAP
 				);
-				KHR_materials_anisotropy_builder["anisotropyTexture"] = tinygltf::Value({
-						{"index",tinygltf::Value(specularTexInfo_pre.index)},
-						{"texCoord",tinygltf::Value(specularTexInfo_pre.texCoord)}
+				KHR_materials_anisotropy_builder["anisotropyTexture"] = wi::tinygltf::Value({
+						{"index",wi::tinygltf::Value(specularTexInfo_pre.index)},
+						{"texCoord",wi::tinygltf::Value(specularTexInfo_pre.texCoord)}
 					});
 			}
-			material_builder.extensions["KHR_materials_anisotropy"] = tinygltf::Value(KHR_materials_anisotropy_builder);
+			material_builder.extensions["KHR_materials_anisotropy"] = wi::tinygltf::Value(KHR_materials_anisotropy_builder);
 		}
 
 		state.gltfModel.materials.push_back(material_builder);
@@ -4441,10 +4441,10 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 		auto meshEntity = wiscene.meshes.GetEntity(m_id);
 		auto nameComponent = wiscene.names.GetComponent(meshEntity);
 
-		tinygltf::Mesh mesh_builder;
+		wi::tinygltf::Mesh mesh_builder;
 		mesh_builder.name = nameComponent->name;
 
-		tinygltf::Buffer buffer_builder;
+		wi::tinygltf::Buffer buffer_builder;
 		int buffer_index = (int)state.gltfModel.buffers.size();
 
 		size_t buf_idc_size = 0;
@@ -4553,7 +4553,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 		buf_d_col_size = buf_i - buf_d_col_offset;
 
 		// Mesh data
-		tinygltf::BufferView vpos_bufferView_builder;
+		wi::tinygltf::BufferView vpos_bufferView_builder;
 		int vpos_bufferView_index = (int)state.gltfModel.bufferViews.size();
 		vpos_bufferView_builder.buffer = buffer_index;
 		vpos_bufferView_builder.byteOffset = buf_d_vpos_offset;
@@ -4561,7 +4561,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 		vpos_bufferView_builder.target = TINYGLTF_TARGET_ARRAY_BUFFER;
 		state.gltfModel.bufferViews.push_back(vpos_bufferView_builder);
 
-		tinygltf::Accessor vpos_accessor_builder;
+		wi::tinygltf::Accessor vpos_accessor_builder;
 		int vpos_accessor_index = (int)state.gltfModel.accessors.size();
 		vpos_accessor_builder.bufferView = vpos_bufferView_index;
 		vpos_accessor_builder.componentType = TINYGLTF_COMPONENT_TYPE_FLOAT;
@@ -4578,7 +4578,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 		vpos_accessor_builder.minValues = {bound_min.x, bound_min.y, bound_min.z};
 		state.gltfModel.accessors.push_back(vpos_accessor_builder);
 
-		tinygltf::BufferView vnorm_bufferView_builder;
+		wi::tinygltf::BufferView vnorm_bufferView_builder;
 		int vnorm_bufferView_index = (int)state.gltfModel.bufferViews.size();
 		vnorm_bufferView_builder.buffer = buffer_index;
 		vnorm_bufferView_builder.byteOffset = buf_d_vnorm_offset;
@@ -4586,7 +4586,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 		vnorm_bufferView_builder.target = TINYGLTF_TARGET_ARRAY_BUFFER;
 		state.gltfModel.bufferViews.push_back(vnorm_bufferView_builder);
 
-		tinygltf::Accessor vnorm_accessor_builder;
+		wi::tinygltf::Accessor vnorm_accessor_builder;
 		int vnorm_accessor_index = (int)state.gltfModel.accessors.size();
 		vnorm_accessor_builder.bufferView = vnorm_bufferView_index;
 		vnorm_accessor_builder.componentType = TINYGLTF_COMPONENT_TYPE_FLOAT;
@@ -4594,7 +4594,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 		vnorm_accessor_builder.type = TINYGLTF_TYPE_VEC3;
 		state.gltfModel.accessors.push_back(vnorm_accessor_builder);
 
-		tinygltf::BufferView vtan_bufferView_builder;
+		wi::tinygltf::BufferView vtan_bufferView_builder;
 		int vtan_bufferView_index = (int)state.gltfModel.bufferViews.size();
 		vtan_bufferView_builder.buffer = buffer_index;
 		vtan_bufferView_builder.byteOffset = buf_d_vtan_offset;
@@ -4602,7 +4602,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 		vtan_bufferView_builder.target = TINYGLTF_TARGET_ARRAY_BUFFER;
 		state.gltfModel.bufferViews.push_back(vtan_bufferView_builder);
 
-		tinygltf::Accessor vtan_accessor_builder;
+		wi::tinygltf::Accessor vtan_accessor_builder;
 		int vtan_accessor_index = (int)state.gltfModel.accessors.size();
 		vtan_accessor_builder.bufferView = vtan_bufferView_index;
 		vtan_accessor_builder.componentType = TINYGLTF_COMPONENT_TYPE_FLOAT;
@@ -4613,7 +4613,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 		int uv0_accessor_index = -1;
 		if(buf_d_uv0_size > 0)
 		{
-			tinygltf::BufferView uv0_bufferView_builder;
+			wi::tinygltf::BufferView uv0_bufferView_builder;
 			int uv0_bufferView_index = (int)state.gltfModel.bufferViews.size();
 			uv0_bufferView_builder.buffer = buffer_index;
 			uv0_bufferView_builder.byteOffset = buf_d_uv0_offset;
@@ -4621,7 +4621,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 			uv0_bufferView_builder.target = TINYGLTF_TARGET_ARRAY_BUFFER;
 			state.gltfModel.bufferViews.push_back(uv0_bufferView_builder);
 
-			tinygltf::Accessor uv0_accessor_builder;
+			wi::tinygltf::Accessor uv0_accessor_builder;
 			uv0_accessor_index = (int)state.gltfModel.accessors.size();
 			uv0_accessor_builder.bufferView = uv0_bufferView_index;
 			uv0_accessor_builder.componentType = TINYGLTF_COMPONENT_TYPE_FLOAT;
@@ -4633,7 +4633,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 		int uv1_accessor_index = -1;
 		if(buf_d_uv1_size > 0)
 		{
-			tinygltf::BufferView uv1_bufferView_builder;
+			wi::tinygltf::BufferView uv1_bufferView_builder;
 			int uv1_bufferView_index = (int)state.gltfModel.bufferViews.size();
 			uv1_bufferView_builder.buffer = buffer_index;
 			uv1_bufferView_builder.byteOffset = buf_d_uv1_offset;
@@ -4641,7 +4641,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 			uv1_bufferView_builder.target = TINYGLTF_TARGET_ARRAY_BUFFER;
 			state.gltfModel.bufferViews.push_back(uv1_bufferView_builder);
 
-			tinygltf::Accessor uv1_accessor_builder;
+			wi::tinygltf::Accessor uv1_accessor_builder;
 			uv1_accessor_index = (int)state.gltfModel.accessors.size();
 			uv1_accessor_builder.bufferView = uv1_bufferView_index;
 			uv1_accessor_builder.componentType = TINYGLTF_COMPONENT_TYPE_FLOAT;
@@ -4653,7 +4653,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 		int joint_accessor_index = -1;
 		if(buf_d_joint_size > 0)
 		{
-			tinygltf::BufferView joint_bufferView_builder;
+			wi::tinygltf::BufferView joint_bufferView_builder;
 			int joint_bufferView_index = (int)state.gltfModel.bufferViews.size();
 			joint_bufferView_builder.buffer = buffer_index;
 			joint_bufferView_builder.byteOffset = buf_d_joint_offset;
@@ -4661,7 +4661,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 			joint_bufferView_builder.target = TINYGLTF_TARGET_ARRAY_BUFFER;
 			state.gltfModel.bufferViews.push_back(joint_bufferView_builder);
 
-			tinygltf::Accessor joint_accessor_builder;
+			wi::tinygltf::Accessor joint_accessor_builder;
 			joint_accessor_index = (int)state.gltfModel.accessors.size();
 			joint_accessor_builder.bufferView = joint_bufferView_index;
 			joint_accessor_builder.componentType = TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT;
@@ -4673,7 +4673,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 		int weight_accessor_index = -1;
 		if(buf_d_weights_size > 0)
 		{
-			tinygltf::BufferView weight_bufferView_builder;
+			wi::tinygltf::BufferView weight_bufferView_builder;
 			int weight_bufferView_index = (int)state.gltfModel.bufferViews.size();
 			weight_bufferView_builder.buffer = buffer_index;
 			weight_bufferView_builder.byteOffset = buf_d_weights_offset;
@@ -4681,7 +4681,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 			weight_bufferView_builder.target = TINYGLTF_TARGET_ARRAY_BUFFER;
 			state.gltfModel.bufferViews.push_back(weight_bufferView_builder);
 
-			tinygltf::Accessor weight_accessor_builder;
+			wi::tinygltf::Accessor weight_accessor_builder;
 			weight_accessor_index = (int)state.gltfModel.accessors.size();
 			weight_accessor_builder.bufferView = weight_bufferView_index;
 			weight_accessor_builder.componentType = TINYGLTF_COMPONENT_TYPE_FLOAT;
@@ -4693,7 +4693,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 		int color_accessor_index = -1;
 		if(buf_d_col_size > 0)
 		{
-			tinygltf::BufferView color_bufferView_builder;
+			wi::tinygltf::BufferView color_bufferView_builder;
 			int color_bufferView_index = (int)state.gltfModel.bufferViews.size();
 			color_bufferView_builder.buffer = buffer_index;
 			color_bufferView_builder.byteOffset = buf_d_col_offset;
@@ -4701,7 +4701,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 			color_bufferView_builder.target = TINYGLTF_TARGET_ARRAY_BUFFER;
 			state.gltfModel.bufferViews.push_back(color_bufferView_builder);
 
-			tinygltf::Accessor color_accessor_builder;
+			wi::tinygltf::Accessor color_accessor_builder;
 			color_accessor_index = (int)state.gltfModel.accessors.size();
 			color_accessor_builder.bufferView = color_bufferView_index;
 			color_accessor_builder.componentType = TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE;
@@ -4721,7 +4721,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 		}
 		buf_d_morph_def_size = buf_i - buf_d_morph_def_offset;
 
-		tinygltf::BufferView morph_def_bufferView_builder;
+		wi::tinygltf::BufferView morph_def_bufferView_builder;
 		int morph_def_bufferView_index = (int)state.gltfModel.bufferViews.size();
 		morph_def_bufferView_builder.buffer = buffer_index;
 		morph_def_bufferView_builder.byteOffset = buf_d_morph_def_offset;
@@ -4776,7 +4776,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 				int morph_sparse_bufferView_index = 0;
 				if (is_sparse)
 				{
-					tinygltf::BufferView morph_sparse_bufferView_builder;
+					wi::tinygltf::BufferView morph_sparse_bufferView_builder;
 					morph_sparse_bufferView_index = (int)state.gltfModel.bufferViews.size();
 					morph_sparse_bufferView_builder.buffer = buffer_index;
 					morph_sparse_bufferView_builder.byteOffset = buf_d_morph_idc_pos_offset;
@@ -4785,7 +4785,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 					state.gltfModel.bufferViews.push_back(morph_sparse_bufferView_builder);
 				}
 
-				tinygltf::BufferView morph_pos_bufferView_builder;
+				wi::tinygltf::BufferView morph_pos_bufferView_builder;
 				int morph_pos_bufferView_index = (int)state.gltfModel.bufferViews.size();
 				morph_pos_bufferView_builder.buffer = buffer_index;
 				morph_pos_bufferView_builder.byteOffset = buf_d_morph_pos_offset;
@@ -4793,7 +4793,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 				morph_pos_bufferView_builder.target = TINYGLTF_TARGET_ARRAY_BUFFER;
 				state.gltfModel.bufferViews.push_back(morph_pos_bufferView_builder);
 
-				tinygltf::Accessor morph_pos_accessor_builder;
+				wi::tinygltf::Accessor morph_pos_accessor_builder;
 				morph_pos_accessor_index = state.gltfModel.accessors.size();
 				morph_pos_accessor_builder.bufferView = (is_sparse) ? morph_def_bufferView_index : morph_pos_bufferView_index;
 				morph_pos_accessor_builder.componentType = TINYGLTF_COMPONENT_TYPE_FLOAT;
@@ -4821,7 +4821,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 				int morph_sparse_bufferView_index = 0;
 				if (is_sparse)
 				{
-					tinygltf::BufferView morph_sparse_bufferView_builder;
+					wi::tinygltf::BufferView morph_sparse_bufferView_builder;
 					morph_sparse_bufferView_index = (int)state.gltfModel.bufferViews.size();
 					morph_sparse_bufferView_builder.buffer = buffer_index;
 					morph_sparse_bufferView_builder.byteOffset = buf_d_morph_idc_nor_offset;
@@ -4830,7 +4830,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 					state.gltfModel.bufferViews.push_back(morph_sparse_bufferView_builder);
 				}
 
-				tinygltf::BufferView morph_norm_bufferView_builder;
+				wi::tinygltf::BufferView morph_norm_bufferView_builder;
 				int morph_norm_bufferView_index = (int)state.gltfModel.bufferViews.size();
 				morph_norm_bufferView_builder.buffer = buffer_index;
 				morph_norm_bufferView_builder.byteOffset = buf_d_morph_norm_offset;
@@ -4838,7 +4838,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 				morph_norm_bufferView_builder.target = TINYGLTF_TARGET_ARRAY_BUFFER;
 				state.gltfModel.bufferViews.push_back(morph_norm_bufferView_builder);
 
-				tinygltf::Accessor morph_norm_accessor_builder;
+				wi::tinygltf::Accessor morph_norm_accessor_builder;
 				morph_norm_accessor_index = state.gltfModel.accessors.size();
 				// morph_norm_accessor_builder.bufferView = (is_sparse) ? vnorm_bufferView_index : morph_norm_bufferView_index;
 				morph_norm_accessor_builder.bufferView = (is_sparse) ? morph_def_bufferView_index : morph_norm_bufferView_index;
@@ -4875,7 +4875,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 				continue;
 
 			// One primitive has one bufferview and accessor?
-			tinygltf::BufferView indices_bufferView_builder;
+			wi::tinygltf::BufferView indices_bufferView_builder;
 			int indices_bufferView_index = (int)state.gltfModel.bufferViews.size();
 			indices_bufferView_builder.buffer = buffer_index;
 			indices_bufferView_builder.byteOffset = subset.indexOffset*sizeof(uint32_t);
@@ -4883,7 +4883,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 			indices_bufferView_builder.target = TINYGLTF_TARGET_ELEMENT_ARRAY_BUFFER;
 			state.gltfModel.bufferViews.push_back(indices_bufferView_builder);
 
-			tinygltf::Accessor indices_accessor_builder;
+			wi::tinygltf::Accessor indices_accessor_builder;
 			int indices_accessor_index = (int)state.gltfModel.accessors.size();
 			indices_accessor_builder.bufferView = indices_bufferView_index;
 			indices_accessor_builder.byteOffset = 0;
@@ -4892,7 +4892,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 			indices_accessor_builder.type = TINYGLTF_TYPE_SCALAR;
 			state.gltfModel.accessors.push_back(indices_accessor_builder);
 	
-			tinygltf::Primitive primitive_builder;
+			wi::tinygltf::Primitive primitive_builder;
 			primitive_builder.indices = indices_accessor_index;
 			primitive_builder.attributes["POSITION"] = vpos_accessor_index;
 			primitive_builder.attributes["NORMAL"] = vnorm_accessor_index;
@@ -4935,7 +4935,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 
 		auto nameComponent = wiscene.names.GetComponent(lightEntity);
 
-		tinygltf::Light light_builder;
+		wi::tinygltf::Light light_builder;
 
 		if(nameComponent != nullptr)
 			light_builder.name = nameComponent->name;
@@ -4960,7 +4960,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 
 		auto nameComponent = wiscene.names.GetComponent(cameraEntity);
 		
-		tinygltf::Camera camera_builder;
+		wi::tinygltf::Camera camera_builder;
 
 		if(nameComponent != nullptr)
 			camera_builder.name = nameComponent->name;
@@ -4974,7 +4974,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 		state.gltfModel.cameras.push_back(camera_builder);
 	}
 
-	tinygltf::Scene scene_builder;
+	wi::tinygltf::Scene scene_builder;
 
 	// Compose Node
 	for(size_t t_id = 0; t_id < wiscene.transforms.GetCount(); ++t_id)
@@ -4989,7 +4989,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 
 		auto objectComponent = wiscene.objects.GetComponent(transformEntity);
 
-		tinygltf::Node node_builder;
+		wi::tinygltf::Node node_builder;
 		int node_index = (int)t_id;
 		
 		if(nameComponent != nullptr)
@@ -5025,9 +5025,9 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 
 		if(wiscene.lights.Contains(transformEntity))
 		{
-			tinygltf::Value::Object node_light_extension_builder;
-			node_light_extension_builder["light"] = tinygltf::Value(int(wiscene.lights.GetIndex(transformEntity)));
-			node_builder.extensions["KHR_lights_punctual"] = tinygltf::Value(node_light_extension_builder);
+			wi::tinygltf::Value::Object node_light_extension_builder;
+			node_light_extension_builder["light"] = wi::tinygltf::Value(int(wiscene.lights.GetIndex(transformEntity)));
+			node_builder.extensions["KHR_lights_punctual"] = wi::tinygltf::Value(node_light_extension_builder);
 		}
 
 		if(wiscene.cameras.Contains(transformEntity))
@@ -5048,12 +5048,12 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 
 		auto nameComponent = wiscene.names.GetComponent(armatureEntity);
 
-		tinygltf::Skin skin_builder;
+		wi::tinygltf::Skin skin_builder;
 		
 		if(nameComponent != nullptr)
 			skin_builder.name = nameComponent->name;
 
-		tinygltf::Buffer buffer_builder;
+		wi::tinygltf::Buffer buffer_builder;
 		int buffer_index = (int)state.gltfModel.buffers.size();
 
 		size_t buf_i = 0;
@@ -5071,7 +5071,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 		//std::mutex analysis_lock_sync;
 		//uint32_t analysis_readCount = 16384;
 
-		tinygltf::BufferView aibm_bufferView_builder;
+		wi::tinygltf::BufferView aibm_bufferView_builder;
 		int aibm_bufferView_index = (int)state.gltfModel.bufferViews.size();
 		aibm_bufferView_builder.buffer = buffer_index;
 		// aibm_bufferView_builder.byteOffset = 0;
@@ -5079,7 +5079,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 		// aibm_bufferView_builder.target = TINYGLTF_TARGET_ARRAY_BUFFER;
 		state.gltfModel.bufferViews.push_back(aibm_bufferView_builder);
 
-		tinygltf::Accessor aibm_accessor_builder;
+		wi::tinygltf::Accessor aibm_accessor_builder;
 		int aibm_accessor_index = (int)state.gltfModel.accessors.size();
 		aibm_accessor_builder.bufferView = aibm_bufferView_index;
 		aibm_accessor_builder.byteOffset = 0;
@@ -5124,7 +5124,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 
 		// Store animations into a single buffer
 		size_t buf_i = 0;
-		tinygltf::Buffer buffer_builder;
+		wi::tinygltf::Buffer buffer_builder;
 		int buffer_index = (int)state.gltfModel.buffers.size();
 		for(size_t animdata_id = 0; animdata_id < wiscene.animation_datas.GetCount(); ++animdata_id)
 		{
@@ -5147,7 +5147,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 			}
 			buf_d_fdata_size = buf_i - buf_d_fdata_offset;
 
-			tinygltf::BufferView ftime_bufferView_builder;
+			wi::tinygltf::BufferView ftime_bufferView_builder;
 			int ftime_bufferView_index = (int)state.gltfModel.bufferViews.size();
 			ftime_bufferView_builder.buffer = buffer_index;
 			ftime_bufferView_builder.byteOffset = buf_d_ftime_offset;
@@ -5155,7 +5155,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 			// ftime_bufferView_builder.target = TINYGLTF_TARGET_ARRAY_BUFFER;
 			state.gltfModel.bufferViews.push_back(ftime_bufferView_builder);
 
-			tinygltf::Accessor ftime_accessor_builder;
+			wi::tinygltf::Accessor ftime_accessor_builder;
 			int ftime_accessor_index = (int)state.gltfModel.accessors.size();
 			ftime_accessor_builder.bufferView = ftime_bufferView_index;
 			ftime_accessor_builder.componentType = TINYGLTF_COMPONENT_TYPE_FLOAT;
@@ -5163,7 +5163,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 			ftime_accessor_builder.type = TINYGLTF_TYPE_SCALAR;
 			state.gltfModel.accessors.push_back(ftime_accessor_builder);
 
-			tinygltf::BufferView fdata_bufferView_builder;
+			wi::tinygltf::BufferView fdata_bufferView_builder;
 			int fdata_bufferView_index = (int)state.gltfModel.bufferViews.size();
 			fdata_bufferView_builder.buffer = buffer_index;
 			fdata_bufferView_builder.byteOffset = buf_d_fdata_offset;
@@ -5180,7 +5180,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 				anim_sizedivider = (find_animdata_vectype->second == TINYGLTF_TYPE_SCALAR) ? 1 : find_animdata_vectype->second;
 			}
 
-			tinygltf::Accessor fdata_accessor_builder;
+			wi::tinygltf::Accessor fdata_accessor_builder;
 			int fdata_accessor_index = (int)state.gltfModel.accessors.size();
 			fdata_accessor_builder.bufferView = fdata_bufferView_index;
 			fdata_accessor_builder.componentType = TINYGLTF_COMPONENT_TYPE_FLOAT;
@@ -5201,7 +5201,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 	{
 		auto& animation = wiscene.animations[anim_id];
 		
-		tinygltf::Animation animation_builder;
+		wi::tinygltf::Animation animation_builder;
 
 		Entity entity = wiscene.animations.GetEntity(anim_id);
 		const NameComponent* name = wiscene.names.GetComponent(entity);
@@ -5212,7 +5212,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 
 		for(auto& sampler : animation.samplers)
 		{
-			tinygltf::AnimationSampler sampler_builder;
+			wi::tinygltf::AnimationSampler sampler_builder;
 			sampler_builder.input = (int)animation_datasets[sampler.data][1];
 			sampler_builder.output = (int)animation_datasets[sampler.data][3];
 			sampler_builder.interpolation = 
@@ -5223,7 +5223,7 @@ void ExportModel_GLTF(const std::string& filename, Scene& scene)
 		}
 		for(auto& channel : animation.channels)
 		{
-			tinygltf::AnimationChannel channel_builder;
+			wi::tinygltf::AnimationChannel channel_builder;
 			channel_builder.target_node = state.nodeMap[channel.target];
 			channel_builder.sampler = (int)channel.samplerIndex;
 			channel_builder.target_path = 

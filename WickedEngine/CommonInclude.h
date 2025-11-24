@@ -44,7 +44,7 @@ constexpr T clamp(T x, T a, T b)
 template <typename T>
 constexpr T saturate(T x)
 {
-	return std::clamp(x, T(0), T(1));
+	return ::clamp(x, T(0), T(1));
 }
 
 template <typename T>

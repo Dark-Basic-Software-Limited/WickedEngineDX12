@@ -26,6 +26,10 @@
 #include "Utility/DirectXMath/DirectXCollision.h"
 #endif
 
+#ifdef PI
+#undef PI
+#endif
+
 using namespace DirectX;
 using namespace DirectX::PackedVector;
 
@@ -270,6 +274,13 @@ namespace wi::math
 	{
 		amount = Clamp((amount - value1) / (value2 - value1), 0.0f, 1.0f);
 		return amount * amount*amount*(amount*(amount * 6 - 15) + 10);
+	}
+	inline float smoothstep(float edge0, float edge1, float x)
+	{
+		// Scale, bias and saturate x to 0..1 range
+		x = ::clamp((x - edge0) / (edge1 - edge0), 0.0f, 1.0f);
+		// Evaluate polynomial
+		return x * x * (3 - 2 * x);
 	}
 	constexpr bool Collision2D(const XMFLOAT2& hitBox1Pos, const XMFLOAT2& hitBox1Siz, const XMFLOAT2& hitBox2Pos, const XMFLOAT2& hitBox2Siz)
 	{

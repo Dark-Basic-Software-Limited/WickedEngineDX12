@@ -32,7 +32,7 @@
 #include "wiHairParticle.h"
 #include "wiRenderer.h"
 #include "wiMath.h"
-#include "wiAudio.h"
+#include "wiAudioMAX.h"
 #include "wiResourceManager.h"
 #include "wiTimer.h"
 #include "wiHelper.h"
@@ -116,7 +116,7 @@ namespace wiInput = wi::input;
 namespace wiXInput = wi::input::xinput;
 namespace wiRawInput = wi::input::rawinput;
 namespace wiSDLInput = wi::input::sdlinput;
-namespace wiAudio = wi::audio;
+//namespace wiAudio = wi::audio;
 namespace wiNetwork = wi::network;
 namespace wiPhysicsEngine = wi::physics;
 namespace wiLua = wi::lua;
@@ -171,10 +171,10 @@ using wi::image::SAMPLEMODE;
 using wi::image::QUALITY;
 using wi::font::Alignment;
 
-static constexpr int SYSTEM_EVENT_THREAD_SAFE_POINT = wi::eventhandler::EVENT_THREAD_SAFE_POINT;
-static constexpr int SYSTEM_EVENT_RELOAD_SHADERS = wi::eventhandler::EVENT_RELOAD_SHADERS;
-static constexpr int SYSTEM_EVENT_SET_VSYNC = wi::eventhandler::EVENT_SET_VSYNC;
-static constexpr XMFLOAT4X4 IDENTITYMATRIX = wi::math::IDENTITY_MATRIX;
+//static constexpr int SYSTEM_EVENT_THREAD_SAFE_POINT = wi::eventhandler::EVENT_THREAD_SAFE_POINT;
+//static constexpr int SYSTEM_EVENT_RELOAD_SHADERS = wi::eventhandler::EVENT_RELOAD_SHADERS;
+//static constexpr int SYSTEM_EVENT_SET_VSYNC = wi::eventhandler::EVENT_SET_VSYNC;
+//static constexpr XMFLOAT4X4 IDENTITYMATRIX = wi::math::IDENTITY_MATRIX;
 
 #endif // WICKEDENGINE_BACKWARDS_COMPATIBILITY_0_59
 

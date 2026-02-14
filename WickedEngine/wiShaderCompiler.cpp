@@ -794,7 +794,6 @@ namespace wi::shadercompiler
 	}
 	bool IsShaderOutdated(const std::string& shaderfilename)
 	{
-		return true; // Force recompilation every run — cached .cso files cause crashes without embedded shader dump
 #ifdef SHADERCOMPILER_ENABLED
 		std::string filepath = shaderfilename;
 		wi::helper::MakePathAbsolute(filepath);

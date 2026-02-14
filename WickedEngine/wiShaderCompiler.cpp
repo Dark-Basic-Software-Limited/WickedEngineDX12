@@ -140,6 +140,7 @@ namespace wi::shadercompiler
 			//L"-O0", // Optimization Level 0
 			//L"-enable-16bit-types",
 			L"-Wno-conversion",
+			L"-HV", L"2021", // HLSL 2021 required for select(), template, bitfields used by WickedEngine shaders
 		};
 
 		if (has_flag(input.flags, Flags::DISABLE_OPTIMIZATION))

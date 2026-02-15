@@ -2,6 +2,7 @@
 #include "wiGraphicsDevice.h"
 #include "wiCanvas.h"
 #include "wiColor.h"
+#include <string>
 
 
 // QoL macros, allows writing just ScopedXxxProfiling without needing to declare a variable manually
@@ -69,5 +70,16 @@ namespace wi::profiler
 
 	void SetBackgroundColor(wi::Color color);
 	void SetTextColor(wi::Color color);
+
+	// Safe data access (no GPU calls, no rendering - just reads internal timing data)
+	// Returns formatted text of all CPU and GPU profiling ranges with timing in ms.
+	// Profiler must be enabled via SetEnabled(true) for data to be collected.
+	std::string GetTextData();
+
+	// Returns CPU frame time in milliseconds (0 if profiler not enabled)
+	float GetCPUFrameTime();
+
+	// Returns GPU frame time in milliseconds (0 if profiler not enabled)
+	float GetGPUFrameTime();
 };
 

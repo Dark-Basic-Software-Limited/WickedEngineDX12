@@ -487,6 +487,8 @@ namespace wi::profiler
 			};
 
 			GraphicsDevice::GPUAllocation allocation = device->AllocateGPU(sizeof(Vertex) * graph_vertex_count * 4 + sizeof(graph_info) + sizeof(graph_memory_info), cmd);
+			if (!allocation.IsValid())
+				return;
 
 			for (uint32_t i = 0; i < graph_vertex_count; ++i)
 			{
@@ -670,5 +672,73 @@ namespace wi::profiler
 	void SetTextColor(wi::Color color)
 	{
 		text_color = color;
+	}
+
+	std::string GetTextData()
+	{
+		if (!ENABLED || !initialized)
+			return "";
+
+		// Same data collection logic as DrawData lines 338-389, but no GPU calls
+		wi::unordered_map<std::string, Hits> text_cache_cpu;
+		wi::unordered_map<std::string, Hits> text_cache_gpu;
+
+		for (auto& x : ranges)
+		{
+			if (!x.second.in_use)
+				continue;
+			if (x.second.IsCPURange())
+			{
+				if (x.first == cpu_frame)
+					continue;
+				text_cache_cpu[x.second.name].num_hits++;
+				text_cache_cpu[x.second.name].total_time += x.second.time;
+			}
+			else
+			{
+				if (x.first == gpu_frame)
+					continue;
+				text_cache_gpu[x.second.name].num_hits++;
+				text_cache_gpu[x.second.name].total_time += x.second.time;
+			}
+		}
+
+		std::stringstream ss("");
+		ss.precision(2);
+
+		ss << ranges[cpu_frame].name << ": " << std::fixed << ranges[cpu_frame].time << " ms" << std::endl;
+		for (auto& x : text_cache_cpu)
+		{
+			if (x.second.num_hits > 1)
+				ss << "\t" << x.first << " (" << x.second.num_hits << "x): " << std::fixed << x.second.total_time << " ms" << std::endl;
+			else if (x.second.num_hits == 1)
+				ss << "\t" << x.first << ": " << std::fixed << x.second.total_time << " ms" << std::endl;
+		}
+		ss << std::endl;
+
+		ss << ranges[gpu_frame].name << ": " << std::fixed << ranges[gpu_frame].time << " ms" << std::endl;
+		for (auto& x : text_cache_gpu)
+		{
+			if (x.second.num_hits > 1)
+				ss << "\t" << x.first << " (" << x.second.num_hits << "x): " << std::fixed << x.second.total_time << " ms" << std::endl;
+			else if (x.second.num_hits == 1)
+				ss << "\t" << x.first << ": " << std::fixed << x.second.total_time << " ms" << std::endl;
+		}
+
+		return ss.str();
+	}
+
+	float GetCPUFrameTime()
+	{
+		if (!ENABLED || !initialized)
+			return 0.0f;
+		return ranges[cpu_frame].time;
+	}
+
+	float GetGPUFrameTime()
+	{
+		if (!ENABLED || !initialized)
+			return 0.0f;
+		return ranges[gpu_frame].time;
 	}
 }

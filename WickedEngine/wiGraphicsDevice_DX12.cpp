@@ -3945,6 +3945,11 @@ std::mutex queue_locker;
 		{
 			assert(internal_state->rootSignature != nullptr);
 			assert(internal_state->rootsig_desc != nullptr);
+			if (internal_state->rootSignature == nullptr || internal_state->rootsig_desc == nullptr)
+			{
+				wi::backlog::post("CreateShader (CS/LIB) failed: missing DX12 root signature", wi::backlog::LogLevel::Error);
+				return false;
+			}
 			internal_state->rootsig_optimizer.init(*internal_state->rootsig_desc);
 		}
 
@@ -4138,6 +4143,11 @@ std::mutex queue_locker;
 
 		assert(internal_state->rootSignature != nullptr);
 		assert(internal_state->rootsig_desc != nullptr);
+		if (internal_state->rootSignature == nullptr || internal_state->rootsig_desc == nullptr)
+		{
+			wi::backlog::post("CreatePipelineState failed: shader missing DX12 root signature", wi::backlog::LogLevel::Error);
+			return false;
+		}
 		internal_state->rootsig_optimizer.init(*internal_state->rootsig_desc);
 
 		RasterizerState pRasterizerStateDesc = pso->desc.rs != nullptr ? *pso->desc.rs : RasterizerState();
@@ -7719,6 +7729,16 @@ std::mutex queue_locker;
 	ID3D12CommandQueue* GraphicsDevice_DX12::GetGraphicsCommandQueue()
 	{
 		return queues[QUEUE_GRAPHICS].queue.Get();
+	}
+
+	// GameGuru MAX: Expose DX12 internals for ImGui integration
+	ID3D12Device* GraphicsDevice_DX12::GetDX12Device()
+	{
+		return device.Get();
+	}
+	ID3D12GraphicsCommandList* GraphicsDevice_DX12::GetDX12GraphicsCommandList(CommandList cmd)
+	{
+		return GetCommandList(cmd).GetGraphicsCommandList();
 	}
 }
 

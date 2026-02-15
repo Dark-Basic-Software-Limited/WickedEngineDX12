@@ -451,6 +451,10 @@ namespace wi::graphics
 		ID3D12Resource* GetTextureInternalResource(const Texture* texture);
 		ID3D12CommandQueue* GetGraphicsCommandQueue();
 
+		// GameGuru MAX: Expose DX12 internals for ImGui integration
+		ID3D12Device* GetDX12Device();
+		ID3D12GraphicsCommandList* GetDX12GraphicsCommandList(CommandList cmd);
+
 		struct DescriptorHeapGPU
 		{
 			D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {};

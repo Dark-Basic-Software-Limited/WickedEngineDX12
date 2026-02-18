@@ -1025,6 +1025,9 @@ namespace wi
 				drawscene_flags
 			);
 
+			// Custom scene draw (terrain/trees/grass depth prepass):
+			if (customDraw_Prepass) customDraw_Prepass(&camera->frustum, cmd);
+
 			wi::profiler::EndRange(range);
 			device->EventEnd(cmd);
 
@@ -1322,6 +1325,9 @@ namespace wi
 					wi::renderer::DRAWSCENE_SKIP_PLANAR_REFLECTION_OBJECTS
 				);
 
+				// Custom scene draw (terrain/trees reflection depth prepass):
+				if (customDraw_Prepass_Reflections) customDraw_Prepass_Reflections(&camera_reflection.frustum, cmd);
+
 				device->RenderPassEnd(cmd);
 
 				wi::renderer::ResolveMSAADepthBuffer(depthBuffer_Reflection_resolved, depthBuffer_Reflection, cmd);
@@ -1411,6 +1417,8 @@ namespace wi
 					wi::renderer::DRAWSCENE_HAIRPARTICLE |
 					wi::renderer::DRAWSCENE_SKIP_PLANAR_REFLECTION_OBJECTS
 				);
+				// Custom scene draw (terrain/trees reflection opaque):
+				if (customDraw_Opaque) customDraw_Opaque(&camera_reflection.frustum, 1, cmd);
 				wi::renderer::DrawSky(*scene, cmd);
 				wi::renderer::DrawScene(
 					visibility_reflection,
@@ -1635,6 +1643,8 @@ namespace wi
 					cmd,
 					drawscene_flags
 				);
+				// Custom scene draw (terrain/trees/grass main opaque):
+				if (customDraw_Opaque) customDraw_Opaque(&camera->frustum, 0, cmd);
 				wi::renderer::DrawSky(*scene, cmd);
 				wi::profiler::EndRange(range); // Opaque Scene
 			}
@@ -2238,6 +2248,9 @@ namespace wi
 			device->EventEnd(cmd);
 			wi::profiler::EndRange(range); // Transparent Scene
 		}
+
+		// Custom scene draw (terrain transparent overlays):
+		if (customDraw_Transparent) customDraw_Transparent(&camera->frustum, cmd);
 
 		wi::renderer::DrawDebugWorld(*scene, *camera, *this, cmd);
 

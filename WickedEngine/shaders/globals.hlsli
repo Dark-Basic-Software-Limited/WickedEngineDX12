@@ -211,11 +211,11 @@ float3x3 adjoint(in float4x4 m)
 	"CBV(b2), " \
 	"DescriptorTable( " \
 		"CBV(b3, numDescriptors = 11, flags = DATA_STATIC_WHILE_SET_AT_EXECUTE)," \
-		"SRV(t0, numDescriptors = 16, flags = DESCRIPTORS_VOLATILE | DATA_STATIC_WHILE_SET_AT_EXECUTE)," \
+		"SRV(t0, numDescriptors = 64, flags = DESCRIPTORS_VOLATILE | DATA_STATIC_WHILE_SET_AT_EXECUTE)," \
 		"UAV(u0, numDescriptors = 16, flags = DESCRIPTORS_VOLATILE | DATA_STATIC_WHILE_SET_AT_EXECUTE)" \
 	")," \
 	"DescriptorTable( " \
-		"Sampler(s0, offset = 0, numDescriptors = 8, flags = DESCRIPTORS_VOLATILE)" \
+		"Sampler(s0, offset = 0, numDescriptors = 16, flags = DESCRIPTORS_VOLATILE)" \
 	")," \
 	"DescriptorTable( " \
 		"Sampler(s0, space = 1, offset = 0, numDescriptors = unbounded, flags = DESCRIPTORS_VOLATILE)" \

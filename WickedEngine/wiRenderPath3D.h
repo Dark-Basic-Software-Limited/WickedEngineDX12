@@ -355,6 +355,12 @@ namespace wi
 		};
 		wi::vector<CustomPostprocess> custom_post_processes;
 
+		// Custom scene draw callbacks for game integration (called during render passes if non-null)
+		void (*customDraw_Prepass)(const wi::primitive::Frustum*, wi::graphics::CommandList) = nullptr;
+		void (*customDraw_Prepass_Reflections)(const wi::primitive::Frustum*, wi::graphics::CommandList) = nullptr;
+		void (*customDraw_Opaque)(const wi::primitive::Frustum*, int mode, wi::graphics::CommandList) = nullptr;
+		void (*customDraw_Transparent)(const wi::primitive::Frustum*, wi::graphics::CommandList) = nullptr;
+
 		void PreUpdate() override;
 		void Update(float dt) override;
 		void PreRender() override;

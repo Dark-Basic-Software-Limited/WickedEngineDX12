@@ -87,6 +87,10 @@ std::string SHADERSOURCEPATH = SHADER_INTEROP_PATH;
 //	Currently the DX12 device could crash for unknown reasons with the global root signature export
 //#define RTREFLECTION_WITH_RAYTRACING_PIPELINE
 
+// Custom scene draw callbacks for game integration (shadow maps and env probes)
+void (*customDraw_ShadowMap)(const wi::primitive::Frustum*, int, wi::graphics::CommandList) = nullptr;
+void (*customDraw_EnvProbe)(const wi::primitive::Sphere*, const wi::primitive::Frustum*, uint32_t, wi::graphics::CommandList) = nullptr;
+
 static thread_local wi::vector<GPUBarrier> barrier_stack;
 void FlushBarriers(CommandList cmd)
 {
@@ -6823,6 +6827,35 @@ void DrawShadowmaps(
 					}
 				}
 			}
+
+			// Custom scene draw (terrain/trees/grass shadow maps):
+			if (customDraw_ShadowMap)
+			{
+				for (uint32_t cascade = 0; cascade < cascade_count; ++cascade)
+				{
+					XMStoreFloat4x4(&cb.cameras[0].view_projection, shcams[cascade].view_projection);
+					cb.cameras[0].output_index = 0;
+					cb.cameras[0].options = SHADERCAMERA_OPTION_ORTHO;
+					for (int i = 0; i < arraysize(cb.cameras[0].frustum.planes); ++i)
+					{
+						cb.cameras[0].frustum.planes[i] = shcams[cascade].frustum.planes[i];
+					}
+					device->BindDynamicConstantBuffer(cb, CBSLOT_RENDERER_CAMERA, cmd);
+
+					Viewport vp;
+					vp.top_left_x = float(shadow_rect.x + cascade * shadow_rect.w);
+					vp.top_left_y = float(shadow_rect.y);
+					vp.width = float(shadow_rect.w);
+					vp.height = float(shadow_rect.h);
+					device->BindViewports(1, &vp, cmd);
+
+					Rect scissor;
+					scissor.from_viewport(vp);
+					device->BindScissorRects(1, &scissor, cmd);
+
+					customDraw_ShadowMap(&shcams[cascade].frustum, cascade, cmd);
+				}
+			}
 		}
 		break;
 		case LightComponent::SPOT:
@@ -9290,6 +9323,15 @@ void RefreshEnvProbes(const Visibility& vis, CommandList cmd)
 		if (probe_aabb.layerMask & vis.layerMask) // only draw light visualizers if this is a hand placed probe
 		{
 			DrawLightVisualizers(vis, cmd, 6); // 6 instances so it will be replicated for every cubemap face
+		}
+
+		// Custom scene draw (terrain/trees in env probes):
+		if (customDraw_EnvProbe)
+		{
+			Sphere culler_sphere(probe.position, zFarP);
+			Frustum frusta[6];
+			for (int i = 0; i < 6; i++) frusta[i] = cameras[i].frustum;
+			customDraw_EnvProbe(&culler_sphere, frusta, 6, cmd);
 		}
 
 		device->RenderPassEnd(cmd);

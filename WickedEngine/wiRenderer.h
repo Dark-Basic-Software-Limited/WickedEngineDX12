@@ -1371,5 +1371,9 @@ namespace wi::renderer
 	void PushBarrier(const wi::graphics::GPUBarrier& barrier);
 	void FlushBarriers(wi::graphics::CommandList cmd);
 
+	// Custom scene draw callbacks for game integration (shadow maps and env probes)
+	extern void (*customDraw_ShadowMap)(const wi::primitive::Frustum*, int cascade, wi::graphics::CommandList);
+	extern void (*customDraw_EnvProbe)(const wi::primitive::Sphere*, const wi::primitive::Frustum*, uint32_t frustum_count, wi::graphics::CommandList);
+
 };
 

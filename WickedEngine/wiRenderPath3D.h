@@ -360,6 +360,9 @@ namespace wi
 		void (*customDraw_Prepass_Reflections)(const wi::primitive::Frustum*, wi::graphics::CommandList) = nullptr;
 		void (*customDraw_Opaque)(const wi::primitive::Frustum*, int mode, wi::graphics::CommandList) = nullptr;
 		void (*customDraw_Transparent)(const wi::primitive::Frustum*, wi::graphics::CommandList) = nullptr;
+		void (*customDraw_Compose)(wi::graphics::CommandList) = nullptr;
+		// Called after prepass render pass ends (outside any render pass), for virtual texture readback etc.
+		void (*customDraw_AfterPrepass)(const wi::graphics::Texture&, uint32_t sampleCount, wi::graphics::CommandList) = nullptr;
 
 		void PreUpdate() override;
 		void Update(float dt) override;

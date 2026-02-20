@@ -1033,6 +1033,9 @@ namespace wi
 
 			device->RenderPassEnd(cmd);
 
+			// After prepass render pass: virtual texture readback (compute + copy, must be outside render pass)
+			if (customDraw_AfterPrepass) customDraw_AfterPrepass(rtPrimitiveID_render, getMSAASampleCount(), cmd);
+
 		});
 
 		// Main camera compute effects:
@@ -1783,6 +1786,8 @@ namespace wi
 			fx.blendFlag = BLENDMODE_PREMULTIPLIED;
 			wi::image::Draw(&debugUAV, fx, cmd);
 		}
+
+		if (customDraw_Compose) customDraw_Compose(cmd);
 
 		device->EventEnd(cmd);
 

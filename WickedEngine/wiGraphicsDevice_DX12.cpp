@@ -4258,7 +4258,10 @@ std::mutex queue_locker;
 			break;
 		}
 
-		stream.stream1.STRIP = D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED;
+		if (pso->desc.pt == PrimitiveTopology::TRIANGLESTRIP || pso->desc.pt == PrimitiveTopology::LINESTRIP)
+			stream.stream1.STRIP = D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFF;
+		else
+			stream.stream1.STRIP = D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED;
 
 		if (renderpass_info != nullptr)
 		{

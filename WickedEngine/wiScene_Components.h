@@ -1638,6 +1638,9 @@ namespace wi::scene
 		wi::vector<float> keyframe_times;
 		wi::vector<float> keyframe_data;
 
+		//GGMAX
+		uint32_t prevKeyRight = 0;
+
 		void Serialize(wi::Archive& archive, wi::ecs::EntitySerializer& seri);
 	};
 
@@ -1656,7 +1659,12 @@ namespace wi::scene
 		float end = 0;
 		float timer = 0;
 		float amount = 1;	// blend amount
-		float speed = 1;
+
+		// GGMAX
+		float speed = 50;
+		uint32_t primaryanimid = 0;
+		uint32_t useprimaryanimtimer = 0;
+		uint32_t objectIndex = 0;
 
 		struct AnimationChannel
 		{
@@ -1669,6 +1677,13 @@ namespace wi::scene
 			wi::ecs::Entity target = wi::ecs::INVALID_ENTITY;
 			int samplerIndex = -1;
 			int retargetIndex = -1;
+
+			// GGMAX
+			int iUsePreFrame = 0;
+			float fSmoothAmount = 1.0f;
+			XMVECTOR vPreFrameScale;
+			XMVECTOR qPreFrameRotation;
+			XMVECTOR vPreFrameTranslation;
 
 			enum class Path
 			{
@@ -1807,6 +1822,12 @@ namespace wi::scene
 		constexpr XMFLOAT4 GetRootRotation() const { return rootRotationOffset; }
 		constexpr wi::ecs::Entity GetRootMotionBone() const { return rootMotionBone; }
 		constexpr void SetRootMotionBone(wi::ecs::Entity _rootMotionBone) { rootMotionBone = _rootMotionBone; }
+
+		// GGMAX
+		bool updateonce = false;
+		inline void SetSpeed(float fSpeed = 1.0f) { speed = fSpeed; }
+		inline void SetUpdateOnce() { updateonce = true; }
+		inline void UsePrimaryAnimTimer(uint32_t pAnimComponentPtr = 0, uint32_t iPrimaryanimid = 0) { useprimaryanimtimer = pAnimComponentPtr; primaryanimid = iPrimaryanimid; }
 
 		void Serialize(wi::Archive& archive, wi::ecs::EntitySerializer& seri);
 	};

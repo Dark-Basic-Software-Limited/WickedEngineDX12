@@ -566,6 +566,12 @@ float4 main(PixelInput input, in bool is_frontface : SV_IsFrontFace APPEND_COVER
 	}
 	surface.N = normalize(input.nor);
 	surface.facenormal = surface.N;
+#ifndef PREPASS
+	if (GetFrame().options & OPTION_BIT_DEBUG_NORMAL_VIS)
+	{
+		return float4(surface.facenormal * 0.5 + 0.5, 1.0);
+	}
+#endif
 #endif // OBJECTSHADER_USE_NORMAL
 
 #ifdef OBJECTSHADER_USE_COMMON

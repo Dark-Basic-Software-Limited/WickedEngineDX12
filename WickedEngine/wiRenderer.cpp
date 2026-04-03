@@ -134,6 +134,7 @@ bool raytracedShadows = false;
 bool tessellationEnabled = true;
 bool disableAlbedoMaps = false;
 bool forceDiffuseLighting = false;
+bool debugNormalVis = false;
 bool SHADOWS_ENABLED = true;
 bool SCREENSPACESHADOWS = false;
 bool SURFELGI = false;
@@ -4318,6 +4319,10 @@ void UpdatePerFrameData(
 	if (IsForceDiffuseLighting())
 	{
 		frameCB.options |= OPTION_BIT_FORCE_DIFFUSE_LIGHTING;
+	}
+	if (IsDebugNormalVis())
+	{
+		frameCB.options |= OPTION_BIT_DEBUG_NORMAL_VIS;
 	}
 	if (vis.scene->weather.IsVolumetricCloudsCastShadow() && vis.scene->weather.IsVolumetricClouds())
 	{
@@ -19167,6 +19172,14 @@ void SetForceDiffuseLighting(bool value)
 bool IsForceDiffuseLighting()
 {
 	return forceDiffuseLighting;
+}
+void SetDebugNormalVis(bool value)
+{
+	debugNormalVis = value;
+}
+bool IsDebugNormalVis()
+{
+	return debugNormalVis;
 }
 void SetScreenSpaceShadowsEnabled(bool value)
 {

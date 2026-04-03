@@ -1196,6 +1196,8 @@ namespace wi::renderer
 	bool IsDisableAlbedoMaps();
 	void SetForceDiffuseLighting(bool value);
 	bool IsForceDiffuseLighting();
+	void SetDebugNormalVis(bool value);
+	bool IsDebugNormalVis();
 	void SetScreenSpaceShadowsEnabled(bool value);
 	bool GetScreenSpaceShadowsEnabled();
 	void SetSurfelGIEnabled(bool value);

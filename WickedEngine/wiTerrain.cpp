@@ -1644,8 +1644,13 @@ namespace wi::terrain
 
 			const uint32_t min_resolution = SVT_TILE_SIZE;
 			const uint32_t max_resolution = 65536u;
-			const uint32_t required_resolution = dist < 2 ? max_resolution : min_resolution;
+
+			//GGMAX
+			//const uint32_t required_resolution = dist < 2 ? max_resolution : min_resolution;
 			//const uint32_t required_resolution = std::max(min_resolution, max_resolution >> std::min(7, std::max(0, dist - 1)));
+			//const int d = std::max(0, dist - 4); // hold max_resolution for dist 0..4
+			//const uint32_t required_resolution = std::max(min_resolution, max_resolution >> std::min(7, d));
+			const uint32_t required_resolution = dist < 2 ? max_resolution : min_resolution;
 
 			if (vt.resolution != required_resolution)
 			{

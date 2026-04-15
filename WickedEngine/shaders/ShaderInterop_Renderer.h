@@ -121,7 +121,7 @@ enum TEXTURESLOT
 	TEXTURESLOT_COUNT
 };
 
-static const float SVT_MIP_BIAS = 0.5;
+static const float SVT_MIP_BIAS = -2.0;
 static const uint SVT_TILE_SIZE = 256u;
 static const uint SVT_TILE_BORDER = 4u;
 static const uint SVT_TILE_SIZE_PADDED = SVT_TILE_SIZE + SVT_TILE_BORDER * 2;

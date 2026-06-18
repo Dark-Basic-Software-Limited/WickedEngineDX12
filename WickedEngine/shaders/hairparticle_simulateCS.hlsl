@@ -80,6 +80,22 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 Gid : SV_GroupID, uint groupIn
 	position = mul(xHairBaseMeshUnormRemap.GetMatrix(), float4(position, 1)).xyz; // position UNORM -> FLOAT
 	half3 target = normalize(attribute_at_bary(nor0, nor1, nor2, bary));
 	target = normalize(mul(xHairTransform.GetMatrixAdjoint(), target));
+	// GG fix: the stored per-vertex normals from wiTerrain.cpp are computed
+	// from a fixed (V, V+x, V+z) reference triangle, which does NOT match
+	// the actual mesh triangulation at most vertices. At chunk_scale > 1
+	// (we use 80) the resulting per-vertex normals can disagree wildly with
+	// the real face normals, producing chaotic blade orientation. We
+	// override with the face normal of the triangle the blade actually sits
+	// on, computed in-shader from the three vertex positions (with the same
+	// UNORM->FLOAT remap that the simulation applies to `position`). Note
+	// the operand order — terrain mesh winding makes cross(P1-P0, P2-P0)
+	// point downward, so swap to cross(P2-P0, P1-P0) for +Y.
+	{
+		float3 P0 = mul(xHairBaseMeshUnormRemap.GetMatrix(), float4(pos0, 1)).xyz;
+		float3 P1 = mul(xHairBaseMeshUnormRemap.GetMatrix(), float4(pos1, 1)).xyz;
+		float3 P2 = mul(xHairBaseMeshUnormRemap.GetMatrix(), float4(pos2, 1)).xyz;
+		target = (half3)normalize(cross(P2 - P0, P1 - P0));
+	}
 	half3 tangent = normalize(mul(half3(hemispherepoint_cos(rng.next_float(), rng.next_float()).xy, 0), get_tangentspace(target)));
 	half3 binormal = cross(target, tangent);
 	half strand_length = attribute_at_bary(length0, length1, length2, bary);

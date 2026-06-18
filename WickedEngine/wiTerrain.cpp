@@ -1097,10 +1097,16 @@ namespace wi::terrain
 						const float x = (float(coord.x) - chunk_half_width) * chunk_scale;
 						const float z = (float(coord.y) - chunk_half_width) * chunk_scale;
 						const float height = heights_padded[coord.x][coord.y];
+						// Fix: horizontal steps must match the real world spacing
+						// between neighbouring vertices (chunk_scale), otherwise
+						// the cross product sees the height delta amplified by
+						// chunk_scale and the resulting normal lies near
+						// horizontal. With chunk_scale = 1 (Wicked default) this
+						// reduces to the original "+ 1" behaviour.
 						const XMVECTOR corners[3] = {
 							XMVectorSet(chunk_data.position.x + x, height, chunk_data.position.z + z, 0),
-							XMVectorSet(chunk_data.position.x + x + 1, heights_padded[coord.x + 1][coord.y], chunk_data.position.z + z, 0),
-							XMVectorSet(chunk_data.position.x + x, heights_padded[coord.x][coord.y + 1], chunk_data.position.z + z + 1, 0),
+							XMVectorSet(chunk_data.position.x + x + chunk_scale, heights_padded[coord.x + 1][coord.y], chunk_data.position.z + z, 0),
+							XMVectorSet(chunk_data.position.x + x, heights_padded[coord.x][coord.y + 1], chunk_data.position.z + z + chunk_scale, 0),
 						};
 						const XMVECTOR T = XMVectorSubtract(corners[1], corners[2]);
 						const XMVECTOR B = XMVectorSubtract(corners[0], corners[1]);

@@ -43,6 +43,14 @@ namespace wi
 		void CreateRenderData();
 		void CreateRaytracingRenderData();
 
+		// GG-MAX: rebuild ONLY the vertexBuffer_length GPU buffer from the current vertex_lengths
+		// data. Leaves generalBuffer (and so simulation_view, vb_pos, vb_nor, …) intact, so the
+		// per-strand simulation state stays alive across the update — no settling pop on the sway
+		// animation. Intended for in-place paint updates where strandCount / index list / mesh have
+		// NOT changed; only which vertices are "painted" has. CreateRenderData() must have been
+		// called previously to set up the rest of the GPU state.
+		void UpdateVertexLengthsBuffer();
+
 		void UpdateCPU(
 			const wi::scene::TransformComponent& transform,
 			const wi::scene::MeshComponent& mesh,

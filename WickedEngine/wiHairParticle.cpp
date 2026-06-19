@@ -110,6 +110,45 @@ namespace wi
 		BLAS = {};
 	}
 
+	// GG-MAX (Grass Stage 3): rebuild ONLY the vertexBuffer_length GPU buffer from the current
+	// vertex_lengths data. CreateRenderData() destroys generalBuffer and resets every per-strand
+	// simulation tail to rest, producing a visible "settling pop" on the wind animation each time
+	// it's called. For incremental paint updates where strandCount / indices / mesh have NOT
+	// changed and only the per-vertex paint mask flipped, this path leaves generalBuffer (and so
+	// simulation_view, vb_pos, etc.) completely intact — the sway continues uninterrupted while
+	// the GPU picks up the new length mask on its next dispatch.
+	void HairParticleSystem::UpdateVertexLengthsBuffer()
+	{
+		if (vertex_lengths.empty()) return;
+		// Safety: if the rest of the GPU resources were never built (generalBuffer invalid),
+		// we'd be uploading lengths against nothing — fall through to the full path instead.
+		if (!generalBuffer.IsValid()) { CreateRenderData(); return; }
+
+		GraphicsDevice* device = wi::graphics::GetDevice();
+
+		auto pack_lengths = [&](void* dest) {
+			uint8_t* vertex_lengths_packed = (uint8_t*)dest;
+			for (size_t i = 0; i < vertex_lengths.size(); ++i)
+			{
+				uint8_t packed = uint8_t(wi::math::Clamp(vertex_lengths[i], 0, 1) * 255.0f);
+				std::memcpy(vertex_lengths_packed + i, &packed, sizeof(uint8_t));
+			}
+		};
+		GPUBufferDesc bd;
+		bd.misc_flags = ResourceMiscFlag::NONE;
+		bd.bind_flags = BindFlag::SHADER_RESOURCE;
+		bd.format = Format::R8_UNORM;
+		bd.stride = sizeof(uint8_t);
+		bd.size = bd.stride * vertex_lengths.size();
+		device->CreateBuffer2(&bd, pack_lengths, &vertexBuffer_length);
+		device->SetName(&vertexBuffer_length, "HairParticleSystem::vertexBuffer_length");
+		// Deliberately NOT touching: generalBuffer, simulation_view, vb_pos[0/1], vb_nor,
+		// vb_uvs, wetmap, ib_culled, prim_view, indirect_view, vb_pos_raytracing, indexBuffer,
+		// BLAS, must_rebuild_blas, regenerate_frame, _flags. The simulate CS rebinds
+		// vertexBuffer_length per dispatch (wiHairParticle.cpp ~line 560) so the new buffer is
+		// picked up on the next frame automatically.
+	}
+
 	void HairParticleSystem::CreateRenderData()
 	{
 		DeleteRenderData();

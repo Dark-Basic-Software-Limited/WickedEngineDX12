@@ -26,6 +26,12 @@ namespace wi
 	static Shader ps_shadow;
 	static Shader ps_simple;
 	static Shader cs_simulate;
+	// GG-MAX Stage 3 Option B: 1x1 all-zero R8_UNORM bound to the simulate CS's t4 slot
+	// for hair entities that don't supply a paint mask. With xHairGrassType == 0 the
+	// shader skips the sample entirely, so the placeholder is read by nothing in upstream
+	// usage — but DX12 will validate that the SRV slot has a bound resource regardless,
+	// so we need this placeholder to keep non-GG hair systems happy.
+	static wi::graphics::Texture grass_visibility_placeholder;
 	static DepthStencilState dss_default, dss_equal, dss_shadow;
 	static RasterizerState rs, ncrs, wirers, rs_shadow;
 	static BlendState bs;
@@ -535,6 +541,16 @@ namespace wi
 				}
 			}
 			hcb.xHairUniformity = hair.uniformity;
+
+			// GG-MAX Stage 3 Option B: paint-mask CB constants. grass_type == 0 -> shader skips
+			// the sample entirely (upstream behavior); GG sets grass_type = 1..N on each per-type
+			// chunk entity. Transform is uv = (worldXZ - origin) * invWorldSize + 0.5 — matches
+			// the GG_GetGrassMap CPU formula with origin = (0,0) and invWorldSize = 0.5/halfExtent.
+			hcb.xHairGrassType = hair.grass_type;
+			hcb.xHairGrassMapInvWorldSize = hair.grass_map_inv_world_size;
+			hcb.xHairGrassMapOriginX = hair.grass_map_origin_x;
+			hcb.xHairGrassMapOriginZ = hair.grass_map_origin_z;
+
 			device->UpdateBuffer(&hair.constantBuffer, &hcb, cmd);
 			wi::renderer::PushBarrier(GPUBarrier::Buffer(&hair.constantBuffer, ResourceState::COPY_DST, ResourceState::CONSTANT_BUFFER));
 
@@ -597,6 +613,15 @@ namespace wi
 				device->BindResource(&mesh.generalBuffer, 2, cmd, mesh.vb_nor.subresource_srv);
 			}
 			device->BindResource(&hair.vertexBuffer_length, 3, cmd);
+
+			// GG-MAX Stage 3 Option B: per-entity paint mask SRV. The shader only reads from it
+			// when xHairGrassType != 0; non-GG hair entities get the placeholder and pay nothing.
+			{
+				const Texture* grassTex = (hair.grass_visibility_texture && hair.grass_visibility_texture->IsValid())
+					? hair.grass_visibility_texture
+					: &grass_visibility_placeholder;
+				device->BindResource(grassTex, 4, cmd);
+			}
 
 			device->Dispatch((hair.strandCount + THREADCOUNT_SIMULATEHAIR - 1) / THREADCOUNT_SIMULATEHAIR, 1, 1, cmd);
 
@@ -924,6 +949,28 @@ namespace wi
 
 		static wi::eventhandler::Handle handle = wi::eventhandler::Subscribe(wi::eventhandler::EVENT_RELOAD_SHADERS, [](uint64_t userdata) { HairParticleSystem_Internal::LoadShaders(); });
 		HairParticleSystem_Internal::LoadShaders();
+
+		// GG-MAX Stage 3 Option B: 1x1 zero-init placeholder bound to simulate CS slot t4 for
+		// hair entities that don't supply a paint mask. With xHairGrassType == 0 the shader
+		// won't read it; this just keeps the SRV slot validly bound.
+		{
+			GraphicsDevice* device = wi::graphics::GetDevice();
+			TextureDesc td = {};
+			td.bind_flags = BindFlag::SHADER_RESOURCE;
+			td.sample_count = 1;
+			td.mip_levels = 1;
+			td.array_size = 1;
+			td.format = Format::R8_UNORM;
+			td.usage = Usage::DEFAULT;
+			td.width = 1;
+			td.height = 1;
+			const uint8_t zero = 0;
+			SubresourceData initdata = {};
+			initdata.data_ptr = &zero;
+			initdata.row_pitch = 1;
+			device->CreateTexture(&td, &initdata, &grass_visibility_placeholder);
+			device->SetName(&grass_visibility_placeholder, "grass_visibility_placeholder");
+		}
 
 		wilog("wi::HairParticleSystem Initialized (%d ms)", (int)std::round(timer.elapsed()));
 	}

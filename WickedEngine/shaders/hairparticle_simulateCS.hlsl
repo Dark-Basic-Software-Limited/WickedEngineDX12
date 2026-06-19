@@ -17,6 +17,11 @@ Buffer<float4> meshVertexBuffer_POS : register(t1);
 Buffer<half4> meshVertexBuffer_NOR : register(t2);
 Buffer<half> meshVertexBuffer_length : register(t3);
 
+// GG-MAX Stage 3 Option B: paint mask. R8_UNORM byte/255 — convert to byte with
+// uint(sample * 255 + 0.5). xHairGrassType == 0 leaves this unused; otherwise the
+// strand-position-driven sample happens inside main() (added in B.3).
+Texture2D<float> texHairGrassMap : register(t4);
+
 RWStructuredBuffer<PatchSimulationData> simulationBuffer : register(u0);
 RWBuffer<float4> vertexBuffer_POS : register(u1);
 RWBuffer<float4> vertexBuffer_UVS : register(u2);
@@ -105,7 +110,45 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 Gid : SV_GroupID, uint groupIn
 	
 	// Transform particle by the emitter object matrix:
 	float3 base = mul(xHairTransform.GetMatrix(), float4(position.xyz, 1)).xyz;
-	
+
+	// GG-MAX Stage 3 Option B: per-strand visibility check against the GG paint mask.
+	// pGrassMap stores `flattened (0x80) | encodedID`, where encodedID is 0 (none),
+	// 1 (legacy default = type 0), or 2..N+1 (type 0..N-1, with +2 offset). We sample
+	// the R8_UNORM byte at this strand's world XZ and zero strand_length when the cell
+	// is flattened, unpainted, or paints a different grass type than this entity owns.
+	// xHairGrassType == 0 disables the check entirely — preserves upstream Wicked hair.
+	if (xHairGrassType != 0u)
+	{
+		float2 uv =
+			(float2(base.x, base.z) - float2(xHairGrassMapOriginX, xHairGrassMapOriginZ))
+			* xHairGrassMapInvWorldSize + 0.5;
+		if (any(uv < 0.0) || any(uv >= 1.0))
+		{
+			strand_length = 0;
+		}
+		else
+		{
+			uint2 dim;
+			texHairGrassMap.GetDimensions(dim.x, dim.y);
+			uint2 px = uint2(uv * float2(dim));
+			float sample = texHairGrassMap.Load(int3(px, 0));
+			uint byteVal = uint(sample * 255.0 + 0.5);
+			if ((byteVal & 0x80u) != 0u)
+			{
+				strand_length = 0; // flattened
+			}
+			else
+			{
+				uint encoded = byteVal & 0x7Fu;
+				uint cellType = (encoded >= 2u) ? (encoded - 2u) : 0u;
+				if (encoded == 0u || (cellType + 1u) != xHairGrassType)
+				{
+					strand_length = 0;
+				}
+			}
+		}
+	}
+
 	float3 diff = GetCamera().position - base;
 	const float distsq = dot(diff, diff);
 	const bool distance_culled = distsq > sqr(xHairViewDistance);

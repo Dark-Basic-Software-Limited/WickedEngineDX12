@@ -116,6 +116,18 @@ namespace wi
 		};
 		wi::vector<AtlasRect> atlas_rects;
 
+		// GG-MAX Stage 3 Option B (non-serialized): per-strand visibility from a world-space
+		// paint mask. Non-zero grass_type opts in — the simulate CS samples the bound mask at
+		// the strand's world XZ and zeros strand_length when the cell doesn't match. Default
+		// grass_type = 0 disables the feature entirely, leaving upstream behavior unchanged.
+		// grass_visibility_texture is per-entity so multiple hair systems can each point at
+		// their own mask; nullptr falls through to a 1x1 placeholder bound by Wicked.
+		uint32_t grass_type = 0;
+		float grass_map_inv_world_size = 0.0f;
+		float grass_map_origin_x = 0.0f;
+		float grass_map_origin_z = 0.0f;
+		const wi::graphics::Texture* grass_visibility_texture = nullptr;
+
 		// Non-serialized attributes:
 		XMFLOAT4X4 world;
 		wi::primitive::AABB aabb;

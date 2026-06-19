@@ -60,6 +60,16 @@ CBUFFER(HairParticleCB, CBSLOT_OTHER_HAIRPARTICLE)
 	float xHair_padding0;
 	float xHair_padding1;
 
+	// GG-MAX Stage 3 Option B: per-strand visibility from a world-space paint mask.
+	// xHairGrassType > 0 turns it on; the simulate CS samples a Texture2D<float> bound
+	// at t4 in the simulate dispatch (R8_UNORM byte / 255) at uv = (worldXZ - origin) *
+	// invWorldSize + 0.5 and zeros strand_length when the cell type doesn't match.
+	// 0 = disabled — pure Wicked behavior, no shader sampling, no GG plumbing required.
+	uint xHairGrassType;
+	float xHairGrassMapInvWorldSize;
+	float xHairGrassMapOriginX;
+	float xHairGrassMapOriginZ;
+
 	HairParticleAtlasRect xHairAtlasRects[64];
 };
 

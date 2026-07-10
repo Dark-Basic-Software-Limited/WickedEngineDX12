@@ -147,6 +147,46 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 Gid : SV_GroupID, uint groupIn
 				}
 			}
 		}
+
+		// GG-MAX Stage B.10: per-strand slope filter (grass on cliffs). DX11's
+		// GGGrass_UpdateInstances rejected instances with `ny < 0.7` sampled from a
+		// coarse per-chunk normal map; jittered per-instance sampling made that filter
+		// look clean in DX11. In Wicked we place many more strands per chunk against
+		// a shared paint mask, and CPU cell filtering is doomed by a mismatch of
+		// resolutions (grass-map cell ~4.8 units vs. DX11 normal-map texel hundreds
+		// of units) plus the fact that a strand belonging to a flat paint cell can
+		// still sit on the adjacent cliff triangle. Filter here instead: `target` is
+		// the face normal of the exact triangle this strand sits on (recomputed above
+		// as the fix 1.2 grass-orientation workaround), so target.y < 0.7 kills the
+		// strand only when its OWN triangle is steep — cliffs go grass-free, gentle
+		// slopes keep grass, and paint cells needn't be mutated. Only fires for GG
+		// grass entities (the xHairGrassType != 0u gate keeps upstream hair clean).
+		if (target.y < (half)0.7)
+		{
+			strand_length = 0;
+		}
+
+		// GG-MAX Stage B.10 altitude filter: strands whose world Y falls outside
+		// the configured band are hidden. Above-water and underwater use disjoint
+		// [min, max] pairs so a single hair entity can represent, say, grass on
+		// hills AND seaweed on the seabed without either half fighting the other.
+		// base.y is the strand's world Y (mesh vertex position through the entity
+		// transform), which for terrain-mounted grass IS the terrain height at
+		// that strand's XZ — matches DX11 UpdateInstances line 447/452 semantics.
+		if (base.y > xHairGrassWaterHeight)
+		{
+			if (base.y < xHairGrassMinHeight || base.y > xHairGrassMaxHeight)
+			{
+				strand_length = 0;
+			}
+		}
+		else
+		{
+			if (base.y < xHairGrassMinHeightUnderwater || base.y > xHairGrassMaxHeightUnderwater)
+			{
+				strand_length = 0;
+			}
+		}
 	}
 
 	float3 diff = GetCamera().position - base;

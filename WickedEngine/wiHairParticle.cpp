@@ -551,6 +551,13 @@ namespace wi
 			hcb.xHairGrassMapOriginX = hair.grass_map_origin_x;
 			hcb.xHairGrassMapOriginZ = hair.grass_map_origin_z;
 
+			// GG-MAX Stage B.10: altitude filter (only used when xHairGrassType != 0).
+			hcb.xHairGrassWaterHeight = hair.grass_water_height;
+			hcb.xHairGrassMinHeight = hair.grass_min_height;
+			hcb.xHairGrassMaxHeight = hair.grass_max_height;
+			hcb.xHairGrassMinHeightUnderwater = hair.grass_min_height_underwater;
+			hcb.xHairGrassMaxHeightUnderwater = hair.grass_max_height_underwater;
+
 			device->UpdateBuffer(&hair.constantBuffer, &hcb, cmd);
 			wi::renderer::PushBarrier(GPUBarrier::Buffer(&hair.constantBuffer, ResourceState::COPY_DST, ResourceState::CONSTANT_BUFFER));
 

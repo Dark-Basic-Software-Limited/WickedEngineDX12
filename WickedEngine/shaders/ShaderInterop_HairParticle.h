@@ -70,6 +70,21 @@ CBUFFER(HairParticleCB, CBSLOT_OTHER_HAIRPARTICLE)
 	float xHairGrassMapOriginX;
 	float xHairGrassMapOriginZ;
 
+	// GG-MAX Stage B.10: per-strand altitude filter — applied only when xHairGrassType != 0.
+	// Strand world Y (base.y) is compared to xHairGrassWaterHeight; strands above use the
+	// above-water pair [min, max], strands below use the underwater pair. Both cutoffs are
+	// inclusive. Set min < world floor and max > world ceiling to disable that half — the
+	// GG-side defaults (min = -1000, max = 30000; min_uw = -7000, max_uw = 1000) act as
+	// "no filter" so out-of-the-box levels see zero behavioral change.
+	float xHairGrassWaterHeight;
+	float xHairGrassMinHeight;
+	float xHairGrassMaxHeight;
+	float xHairGrassMinHeightUnderwater;
+	float xHairGrassMaxHeightUnderwater;
+	float xHair_padding_alt0;
+	float xHair_padding_alt1;
+	float xHair_padding_alt2;
+
 	HairParticleAtlasRect xHairAtlasRects[64];
 };
 

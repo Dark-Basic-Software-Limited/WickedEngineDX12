@@ -128,6 +128,16 @@ namespace wi
 		float grass_map_origin_z = 0.0f;
 		const wi::graphics::Texture* grass_visibility_texture = nullptr;
 
+		// GG-MAX Stage B.10 (non-serialized): altitude filter — only active when grass_type != 0.
+		// Above water strands must sit in [grass_min_height, grass_max_height] (inclusive).
+		// Below water strands must sit in [grass_min_height_underwater, grass_max_height_underwater].
+		// Defaults span the full range so callers who don't set them get "no filter".
+		float grass_water_height = 0.0f;
+		float grass_min_height = -1e30f;
+		float grass_max_height = 1e30f;
+		float grass_min_height_underwater = -1e30f;
+		float grass_max_height_underwater = 1e30f;
+
 		// Non-serialized attributes:
 		XMFLOAT4X4 world;
 		wi::primitive::AABB aabb;

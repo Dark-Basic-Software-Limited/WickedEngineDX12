@@ -1184,6 +1184,12 @@ namespace wi::renderer
 	float GetGameSpeed();
 	void SetShadowsEnabled(bool value);
 	bool IsShadowsEnabled();
+	//GGMAX delayed shadow cascades: directional cascades refresh at staggered
+	//per-cascade rates (production DX11 parity); skipped cascades keep their
+	//atlas contents + frozen matrices. Default off = stock behaviour.
+	void SetDelayedShadowCascadesEnabled(bool value);
+	bool GetDelayedShadowCascadesEnabled();
+	void InvalidateDelayedShadowCascades(); // force a full refresh (sun moved, cascade splits changed, level load)
 	void SetRaytraceBounceCount(uint32_t bounces);
 	uint32_t GetRaytraceBounceCount();
 	void SetRaytraceDebugBVHVisualizerEnabled(bool value);

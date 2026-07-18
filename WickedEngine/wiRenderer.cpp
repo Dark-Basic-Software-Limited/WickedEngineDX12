@@ -693,6 +693,31 @@ PipelineState PSO_extractStencilBit[8];
 PipelineState PSO_waveeffect;
 PipelineState PSO_mesh_blend_resolve;
 
+//GGMAX delayed shadow cascades (WICKED_ENGINE_CHANGES.md 1.11): port of the
+//production DX11 "delayed shadows" — directional cascades refresh at staggered
+//rates (c0 every frame, c1 /2, c2 /3, c3 /4, c4 /9) instead of all-every-frame.
+//Skipped cascades keep their atlas contents (renderpass switches to LoadOp::LOAD
+//with per-rect clear draws) and sample with the frozen view-projection they were
+//rendered with. Default OFF = stock behaviour.
+Shader shadowClearPS_GG;
+PipelineState PSO_shadowClear_GG;
+static bool delayedShadowCascadesEnabled = false;
+struct DelayedShadowCascadeState
+{
+	static constexpr uint32_t MAX_CASCADES = 8;
+	XMFLOAT4X4 cachedVP[MAX_CASCADES] = {};
+	XMFLOAT3 cachedEye[MAX_CASCADES] = {};
+	bool update[MAX_CASCADES] = {};        // this frame's per-cascade refresh decisions
+	bool active = false;                   // decisions were produced this frame
+	bool fullClearThisFrame = true;        // atlas recreated / rect moved / first frame -> stock CLEAR path
+	bool valid = false;                    // cachedVP usable
+	wi::ecs::Entity lightEntity = wi::ecs::INVALID_ENTITY;
+	int rectX = -1, rectY = -1, rectW = -1, rectH = -1;
+	uint32_t atlasWidth = 0, atlasHeight = 0;
+	uint64_t decisionFrame = ~0ull;
+};
+static DelayedShadowCascadeState delayedShadowState;
+
 RaytracingPipelineState RTPSO_reflection;
 
 enum SKYRENDERING
@@ -1529,6 +1554,14 @@ void LoadShaders()
 		desc.rs = &rasterizers[RSTYPE_DOUBLESIDED];
 		desc.dss = &depthStencils[DSSTYPE_WRITEONLY];
 		device->CreatePipelineState(&desc, &PSO_copyDepth);
+
+		//GGMAX delayed shadow cascades: scissored fullscreen draw that "clears" a
+		//shadow atlas rect from inside the renderpass (screenVS emits z=0 =
+		//reversed-Z far; PS outputs the transparent atlas clear value).
+		LoadShader(ShaderStage::PS, shadowClearPS_GG, "shadowClearPS.cso");
+		desc.ps = &shadowClearPS_GG;
+		device->CreatePipelineState(&desc, &PSO_shadowClear_GG);
+		desc.ps = &shaders[PSTYPE_COPY_DEPTH];
 
 		desc.ps = &shaders[PSTYPE_COPY_STENCIL_BIT];
 		for (int i = 0; i < 8; ++i)
@@ -4689,9 +4722,87 @@ void UpdatePerFrameData(
 			{
 				SHCAM* shcams = (SHCAM*)alloca(sizeof(SHCAM) * cascade_count);
 				CreateDirLightShadowCams(light, *vis.camera, shcams, cascade_count, shadow_rect, vis.scene->character_dedicated_shadows.data(), vis.scene->character_dedicated_shadows.size());
-				for (size_t cascade = 0; cascade < cascade_count; ++cascade)
+
+				//GGMAX delayed shadow cascades: decide per-cascade refresh and freeze
+				//the matrices of skipped cascades so shaders sample them with the
+				//exact view-projection they were last rendered with. Only the first
+				//shadow-casting directional light gets the treatment (GG has one sun);
+				//character dedicated shadows shift the cascade indices, so their
+				//presence disables the feature for the frame.
+				const bool ggDelayed = delayedShadowCascadesEnabled
+					&& vis.scene->character_dedicated_shadows.empty()
+					&& cascade_count <= DelayedShadowCascadeState::MAX_CASCADES
+					&& delayedShadowState.decisionFrame != device->GetFrameCount();
+				if (ggDelayed)
 				{
-					XMStoreFloat4x4(&matrixArray[matrixCounter++], shcams[cascade].view_projection);
+					DelayedShadowCascadeState& st = delayedShadowState;
+					const uint64_t fc = device->GetFrameCount();
+					st.decisionFrame = fc;
+					const wi::ecs::Entity lightEnt = vis.scene->lights.GetEntity(lightIndex);
+
+					const bool forceAll = !st.valid
+						|| st.lightEntity != lightEnt
+						|| st.rectX != shadow_rect.x || st.rectY != shadow_rect.y
+						|| st.rectW != shadow_rect.w || st.rectH != shadow_rect.h
+						|| st.atlasWidth != shadowMapAtlas.desc.width
+						|| st.atlasHeight != shadowMapAtlas.desc.height;
+					st.fullClearThisFrame = forceAll;
+
+					for (uint32_t c = 0; c < cascade_count; ++c) st.update[c] = true;
+					if (!forceAll)
+					{
+						//production DX11 cadence: c0 every frame, then /2 /3 /4 /9
+						const int frame = (int)fc;
+						if (cascade_count > 1 && (frame % 2) != 0) st.update[1] = false;
+						if (cascade_count > 2 && (frame % 3) != 0) st.update[2] = false;
+						if (cascade_count > 3 && (frame % 4) != 0) st.update[3] = false;
+						if (cascade_count > 4 && (frame % 9) != 0) st.update[4] = false;
+						//load leveling (DX11): avoid refreshing cascades 1,2,3 in the
+						//same frame; never let all three skip together either
+						if (cascade_count > 3)
+						{
+							if (st.update[1] && st.update[2] && st.update[3]) st.update[3] = false;
+							else if (!st.update[1] && !st.update[2] && !st.update[3]) st.update[3] = true;
+						}
+						//camera translation override (64 world units, DX11): a real move
+						//refreshes stale cascades immediately
+						XMFLOAT3 eye;
+						XMStoreFloat3(&eye, vis.camera->GetEye());
+						for (uint32_t c = 0; c < cascade_count; ++c)
+						{
+							if (st.update[c]) continue;
+							const float dx = eye.x - st.cachedEye[c].x;
+							const float dy = eye.y - st.cachedEye[c].y;
+							const float dz = eye.z - st.cachedEye[c].z;
+							if (dx * dx + dy * dy + dz * dz > 64.0f * 64.0f) st.update[c] = true;
+						}
+					}
+
+					XMFLOAT3 eyeNow;
+					XMStoreFloat3(&eyeNow, vis.camera->GetEye());
+					for (uint32_t c = 0; c < cascade_count; ++c)
+					{
+						if (st.update[c])
+						{
+							XMStoreFloat4x4(&st.cachedVP[c], shcams[c].view_projection);
+							st.cachedEye[c] = eyeNow;
+						}
+						matrixArray[matrixCounter++] = st.cachedVP[c];
+					}
+					st.lightEntity = lightEnt;
+					st.rectX = shadow_rect.x; st.rectY = shadow_rect.y;
+					st.rectW = shadow_rect.w; st.rectH = shadow_rect.h;
+					st.atlasWidth = shadowMapAtlas.desc.width;
+					st.atlasHeight = shadowMapAtlas.desc.height;
+					st.valid = true;
+					st.active = true;
+				}
+				else
+				{
+					for (size_t cascade = 0; cascade < cascade_count; ++cascade)
+					{
+						XMStoreFloat4x4(&matrixArray[matrixCounter++], shcams[cascade].view_projection);
+					}
 				}
 			}
 
@@ -6671,10 +6782,20 @@ void DrawShadowmaps(
 
 	const uint32_t max_viewport_count = device->GetMaxViewportCount();
 
+	//GGMAX delayed shadow cascades: valid only when this frame's decisions were
+	//produced by UpdatePerFrameData (same frame). When active AND the atlas
+	//layout is stable, the atlas is LOADED instead of cleared, every rect that
+	//renders this frame clears itself with a scissored draw, and skipped
+	//directional cascades keep last frame's contents.
+	const bool ggDelayedShadows = delayedShadowCascadesEnabled
+		&& delayedShadowState.active
+		&& delayedShadowState.decisionFrame == device->GetFrameCount();
+	const bool ggLoadAtlas = ggDelayedShadows && !delayedShadowState.fullClearThisFrame;
+
 	const RenderPassImage rp[] = {
 		RenderPassImage::DepthStencil(
 			&shadowMapAtlas,
-			RenderPassImage::LoadOp::CLEAR,
+			ggLoadAtlas ? RenderPassImage::LoadOp::LOAD : RenderPassImage::LoadOp::CLEAR,
 			RenderPassImage::StoreOp::STORE,
 			ResourceState::SHADER_RESOURCE,
 			ResourceState::DEPTHSTENCIL,
@@ -6682,13 +6803,66 @@ void DrawShadowmaps(
 		),
 		RenderPassImage::RenderTarget(
 			&shadowMapAtlas_Transparent,
-			RenderPassImage::LoadOp::CLEAR,
+			ggLoadAtlas ? RenderPassImage::LoadOp::LOAD : RenderPassImage::LoadOp::CLEAR,
 			RenderPassImage::StoreOp::STORE,
 			ResourceState::SHADER_RESOURCE,
 			ResourceState::SHADER_RESOURCE
 		),
 	};
 	device->RenderPassBegin(rp, arraysize(rp), cmd);
+
+	//GGMAX delayed shadow cascades: per-rect clears for everything that renders
+	//this frame (all spot/point/rect lights + the directional cascades being
+	//refreshed + the rain blocker). Anything else keeps last frame's texels.
+	if (ggLoadAtlas)
+	{
+		device->EventBegin("Shadow atlas partial clears", cmd);
+		device->BindPipelineState(&PSO_shadowClear_GG, cmd);
+		auto ggClearRect = [&](int x, int y, int w, int h)
+		{
+			if (w <= 0 || h <= 0) return;
+			Viewport vp;
+			vp.top_left_x = float(x);
+			vp.top_left_y = float(y);
+			vp.width = float(w);
+			vp.height = float(h);
+			device->BindViewports(1, &vp, cmd);
+			Rect sc;
+			sc.from_viewport(vp);
+			device->BindScissorRects(1, &sc, cmd);
+			device->Draw(3, 0, cmd);
+		};
+		for (uint32_t lightIndex : vis.visibleLights)
+		{
+			const LightComponent& light = vis.scene->lights[lightIndex];
+			if (light.IsInactive() || !light.IsCastingShadow() || light.IsStatic())
+				continue;
+			const wi::rectpacker::Rect& r = vis.visibleLightShadowRects[lightIndex];
+			switch (light.GetType())
+			{
+			case LightComponent::DIRECTIONAL:
+			{
+				const uint32_t cc = std::min(uint(light.cascade_distances.size() + vis.scene->character_dedicated_shadows.size()), max_viewport_count);
+				for (uint32_t c = 0; c < cc; ++c)
+				{
+					if (c < DelayedShadowCascadeState::MAX_CASCADES && !delayedShadowState.update[c])
+						continue;
+					ggClearRect(r.x + (int)c * r.w, r.y, r.w, r.h);
+				}
+			}
+			break;
+			case LightComponent::POINT:
+				ggClearRect(r.x, r.y, r.w * 6, r.h);
+				break;
+			default:
+				ggClearRect(r.x, r.y, r.w, r.h);
+				break;
+			}
+		}
+		ggClearRect(vis.rain_blocker_shadow_rect.x, vis.rain_blocker_shadow_rect.y,
+			vis.rain_blocker_shadow_rect.w, vis.rain_blocker_shadow_rect.h);
+		device->EventEnd(cmd);
+	}
 
 	for (uint32_t lightIndex : vis.visibleLights)
 	{
@@ -6737,6 +6911,9 @@ void DrawShadowmaps(
 						uint8_t shadow_lod = 0xFF;
 						for (uint32_t cascade = 0; cascade < cascade_count; ++cascade)
 						{
+							//GGMAX delayed cascades: no instances for skipped cascades
+							if (ggDelayedShadows && cascade < DelayedShadowCascadeState::MAX_CASCADES && !delayedShadowState.update[cascade])
+								continue;
 							if ((cascade < (cascade_count - object.cascadeMask)) && shcams[cascade].frustum.CheckBoxFast(aabb))
 							{
 								camera_mask |= 1 << cascade;
@@ -6805,6 +6982,9 @@ void DrawShadowmaps(
 				cb.cameras[0].position = vis.camera->Eye;
 				for (uint32_t cascade = 0; cascade < std::min(2u + (uint32_t)vis.scene->character_dedicated_shadows.size(), cascade_count); ++cascade)
 				{
+					//GGMAX delayed cascades: skipped cascades keep last frame's hair
+					if (ggDelayedShadows && cascade < DelayedShadowCascadeState::MAX_CASCADES && !delayedShadowState.update[cascade])
+						continue;
 					XMStoreFloat4x4(&cb.cameras[0].view_projection, shcams[cascade].view_projection);
 					cb.cameras[0].options = SHADERCAMERA_OPTION_ORTHO;
 					if (cascade < vis.scene->character_dedicated_shadows.size())
@@ -6845,6 +7025,9 @@ void DrawShadowmaps(
 			{
 				for (uint32_t cascade = 0; cascade < cascade_count; ++cascade)
 				{
+					//GGMAX delayed cascades: skipped cascades keep last frame's terrain
+					if (ggDelayedShadows && cascade < DelayedShadowCascadeState::MAX_CASCADES && !delayedShadowState.update[cascade])
+						continue;
 					XMStoreFloat4x4(&cb.cameras[0].view_projection, shcams[cascade].view_projection);
 					cb.cameras[0].output_index = 0;
 					cb.cameras[0].options = SHADERCAMERA_OPTION_ORTHO;
@@ -19131,6 +19314,20 @@ void SetShadowsEnabled(bool value)
 bool IsShadowsEnabled()
 {
 	return SHADOWS_ENABLED;
+}
+//GGMAX delayed shadow cascades
+void SetDelayedShadowCascadesEnabled(bool value)
+{
+	delayedShadowCascadesEnabled = value;
+	delayedShadowState.valid = false;
+}
+bool GetDelayedShadowCascadesEnabled()
+{
+	return delayedShadowCascadesEnabled;
+}
+void InvalidateDelayedShadowCascades()
+{
+	delayedShadowState.valid = false;
 }
 void SetRaytraceBounceCount(uint32_t bounces)
 {

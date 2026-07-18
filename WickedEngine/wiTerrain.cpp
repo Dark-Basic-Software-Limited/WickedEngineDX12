@@ -1762,6 +1762,13 @@ namespace wi::terrain
 				vt.blendmap = chunk_data.blendmap;
 			}
 
+			// GGMAX: blendmap-edit repaint — pick up the recreated blendmap texture here
+			// on the main thread; the update job below turns the flag into tile re-renders
+			if (vt.pending_repaint_blendmap)
+			{
+				vt.blendmap = chunk_data.blendmap;
+			}
+
 			virtual_textures_in_use.push_back(&vt);
 
 			if (vt.residency == nullptr)
@@ -1884,6 +1891,54 @@ namespace wi::terrain
 					}
 				}
 				vt->allocation_requests.clear();
+			}
+
+			// GGMAX: blendmap-edit repaint — re-render every currently resident page with
+			// the updated blendmap. Residency is untouched, so this refreshes the visible
+			// terrain next frame; the old full invalidate() path re-streamed the chunk
+			// through several seconds of feedback round-trips after every paint stroke.
+			for (VirtualTexture* vt : virtual_textures_in_use)
+			{
+				if (!vt->pending_repaint_blendmap)
+					continue;
+				vt->pending_repaint_blendmap = false;
+				if (vt->residency == nullptr)
+					continue; // single-tile far chunks take the cheap invalidate() path instead
+
+				const uint32_t width = vt->residency->feedbackMap.desc.width;
+				const uint32_t height = vt->residency->feedbackMap.desc.height;
+				uint32_t page_count = 0;
+				uint32_t lod_offsets[10] = {};
+				for (uint32_t i = 0; i < vt->lod_count; ++i)
+				{
+					const uint32_t l_width = std::max(1u, width >> i);
+					const uint32_t l_height = std::max(1u, height >> i);
+					lod_offsets[i] = page_count;
+					page_count += l_width * l_height;
+				}
+				for (uint32_t lod = 0; lod < vt->lod_count; ++lod)
+				{
+					const uint32_t l_width = std::max(1u, width >> lod);
+					const uint32_t l_height = std::max(1u, height >> lod);
+					for (uint32_t y = 0; y < l_height; ++y)
+					{
+						for (uint32_t x = 0; x < l_width; ++x)
+						{
+							const uint32_t l_index = lod_offsets[lod] + x + y * l_width;
+							if (l_index >= vt->tiles.size())
+								continue;
+							VirtualTextureAtlas::Tile& tile = vt->tiles[l_index];
+							if (!atlas.check_tile_resident(tile))
+								continue;
+							VirtualTexture::UpdateRequest& request = vt->update_requests.emplace_back();
+							request.x = (uint16_t)x;
+							request.y = (uint16_t)y;
+							request.lod = (uint16_t)lod;
+							request.tile_x = tile.x;
+							request.tile_y = tile.y;
+						}
+					}
+				}
 			}
 
 			for (VirtualTexture* vt : virtual_textures_in_use)

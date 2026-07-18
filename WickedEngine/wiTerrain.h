@@ -188,6 +188,13 @@ namespace wi::terrain
 			resolution = 0;
 		}
 
+		// GGMAX: set when the chunk's blendmap texture was rebuilt after a paint/blend
+		// edit — the next UpdateVirtualTexturesCPU rebinds the blendmap and re-renders
+		// every currently RESIDENT tile in place. Unlike invalidate(), this keeps the
+		// residency intact, so the refresh lands next frame instead of re-streaming
+		// the whole chunk through multi-frame GPU feedback round-trips.
+		bool pending_repaint_blendmap = false;
+
 		struct AllocationRequest
 		{
 			uint32_t x = 0;

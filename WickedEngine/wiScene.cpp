@@ -2664,11 +2664,57 @@ namespace wi::scene
 											XMMatrixDecompose(&S, &bR, &T, localMatrix);
 										}
 									}
-									const XMVECTOR R = XMQuaternionSlerp(aR, bR, t);
+									XMVECTOR R = XMQuaternionSlerp(aR, bR, t);
+
+									//GGMAX (skinned-model corruption fix): the blend result must be a unit
+									//quaternion — slerp propagates garbage inputs (a corrupted current pose or a
+									//bad blend factor) instead of healing them, and a non-unit quaternion stored
+									//here scales/shears the bone matrix. Guard: renormalize, or reset to identity
+									//when unusable (zero/NaN/inf).
+									bool ggRotSanitized = false;
+									{
+										const float ggRLenSq = XMVectorGetX(XMVector4LengthSq(R));
+										if (!(ggRLenSq > 0.25f && ggRLenSq < 4.0f)) // NaN fails both
+										{
+											ggRotSanitized = true;
+											if (ggRLenSq > 1e-12f && ggRLenSq < 1e12f)
+												R = XMQuaternionNormalize(R);
+											else
+												R = XMQuaternionIdentity();
+										}
+									}
+
 									if (!isRootBone)
 									{
 										// Not root motion bone.
 										XMStoreFloat4(&target_transform->rotation_local, R);
+
+										//GGMAX debug tripwire (parrot corruption hunt):
+										//log the inputs whenever the sanitizer above had to fire.
+										XMFLOAT4 ggchk = target_transform->rotation_local;
+										if (ggRotSanitized)
+										{
+											XMFLOAT4 gga, ggb;
+											XMStoreFloat4(&gga, aR);
+											XMStoreFloat4(&ggb, bR);
+											FILE* ggf = fopen("anim_garbage.txt", "a");
+											if (ggf)
+											{
+												fprintf(ggf, "ANIMROT tgt=%u out=(%g,%g,%g,%g) aR=(%g,%g,%g,%g) bR=(%g,%g,%g,%g) t=%g keyL=%d keyR=%d "
+													"dataEnt=%u keys=%d dsize=%d timer=%g start=%g end=%g spd=%g playing=%d looped=%d prevKR=%d retarget=%d\n",
+													(unsigned)channel.target,
+													ggchk.x, ggchk.y, ggchk.z, ggchk.w,
+													gga.x, gga.y, gga.z, gga.w,
+													ggb.x, ggb.y, ggb.z, ggb.w,
+													t, keyLeft, keyRight,
+													(unsigned)sampler.data,
+													(int)animationdata->keyframe_times.size(), (int)animationdata->keyframe_data.size(),
+													animation.timer, animation.start, animation.end, animation.speed,
+													animation.IsPlaying() ? 1 : 0, animation.IsLooped() ? 1 : 0,
+													animationdata->prevKeyRight, (int)channel.retargetIndex);
+												fclose(ggf);
+											}
+										}
 									}
 									else
 									{
@@ -2813,11 +2859,52 @@ namespace wi::scene
 								const XMVECTOR bR = XMLoadFloat4(&transform.rotation_local);
 								const XMVECTOR bT = XMLoadFloat3(&transform.translation_local);
 								const XMVECTOR S = XMVectorLerp(aS, bS, t);
-								const XMVECTOR R = XMQuaternionSlerp(aR, bR, t);
+								XMVECTOR R = XMQuaternionSlerp(aR, bR, t);
 								const XMVECTOR T = XMVectorLerp(aT, bT, t);
+
+								//GGMAX (skinned-model corruption fix): same unit-quaternion guard as the
+								//first write-back site above — see comment there.
+								bool ggRotSanitized2 = false;
+								{
+									const float ggRLenSq2 = XMVectorGetX(XMVector4LengthSq(R));
+									if (!(ggRLenSq2 > 0.25f && ggRLenSq2 < 4.0f)) // NaN fails both
+									{
+										ggRotSanitized2 = true;
+										if (ggRLenSq2 > 1e-12f && ggRLenSq2 < 1e12f)
+											R = XMQuaternionNormalize(R);
+										else
+											R = XMQuaternionIdentity();
+									}
+								}
+
 								XMStoreFloat3(&target_transform->scale_local, S);
 								XMStoreFloat4(&target_transform->rotation_local, R);
 								XMStoreFloat3(&target_transform->translation_local, T);
+
+								//GGMAX debug tripwire (parrot corruption hunt):
+								//log the inputs whenever the sanitizer above had to fire.
+								{
+									XMFLOAT4 ggchk2 = target_transform->rotation_local;
+									if (ggRotSanitized2)
+									{
+										XMFLOAT4 gga2, ggb2;
+										XMStoreFloat4(&gga2, aR);
+										XMStoreFloat4(&ggb2, bR);
+										FILE* ggf2 = fopen("anim_garbage.txt", "a");
+										if (ggf2)
+										{
+											fprintf(ggf2, "ANIMROT2 tgt=%u path=%d preframe=%d out=(%g,%g,%g,%g) aR=(%g,%g,%g,%g) bR=(%g,%g,%g,%g) t=%g "
+												"timer=%g amount=%g playing=%d\n",
+												(unsigned)channel.target, (int)channel.path, (int)channel.iUsePreFrame,
+												ggchk2.x, ggchk2.y, ggchk2.z, ggchk2.w,
+												gga2.x, gga2.y, gga2.z, gga2.w,
+												ggb2.x, ggb2.y, ggb2.z, ggb2.w,
+												t, animation.timer, animation.amount,
+												animation.IsPlaying() ? 1 : 0);
+											fclose(ggf2);
+										}
+									}
+								}
 							}
 
 							if (target_mesh != nullptr)

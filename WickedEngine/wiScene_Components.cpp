@@ -132,11 +132,81 @@ namespace wi::scene
 	{
 		SetDirty();
 
+		//GGMAX (skinned-model corruption fix): XMMatrixDecompose produces garbage outputs
+		//(huge quaternion components) for singular/sheared/torn world matrices, and that
+		//garbage used to be committed straight into the local pose — on bones this is the
+		//"exploded skinned model" bug (giant stretched triangles). Validate the decomposed
+		//rotation; on failure keep the previous rotation/scale and take translation straight
+		//from the world matrix (always safe).
+		const XMFLOAT3 prevScale = scale_local;
+		const XMFLOAT4 prevRotation = rotation_local;
+
 		XMVECTOR S, R, T;
-		XMMatrixDecompose(&S, &R, &T, XMLoadFloat4x4(&world));
+		bool decomposed = XMMatrixDecompose(&S, &R, &T, XMLoadFloat4x4(&world));
 		XMStoreFloat3(&scale_local, S);
 		XMStoreFloat4(&rotation_local, R);
 		XMStoreFloat3(&translation_local, T);
+
+		const float q2 = rotation_local.x * rotation_local.x + rotation_local.y * rotation_local.y +
+			rotation_local.z * rotation_local.z + rotation_local.w * rotation_local.w;
+		const bool rotationValid = decomposed && (q2 > 0.25f) && (q2 < 4.0f); // NaN fails both
+		if (!rotationValid)
+		{
+			scale_local = prevScale;
+			rotation_local = prevRotation;
+			translation_local = XMFLOAT3(world._41, world._42, world._43);
+		}
+
+#ifdef _WIN32
+		//GGMAX debug tripwire (parrot corruption hunt): if the decompose was garbage,
+		//log the caller so the source of the bad world matrix can be identified.
+		if (!rotationValid)
+		{
+			void* stack[24];
+			unsigned short frames = RtlCaptureStackBackTrace(0, 24, stack, nullptr);
+			FILE* f = fopen("applytransform_garbage.txt", "a");
+			if (f)
+			{
+				fprintf(f, "GARBAGE this=%p rot=(%g,%g,%g,%g) scl=(%g,%g,%g) trn=(%g,%g,%g)\n  world=[%g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g]\n  stack:",
+					(void*)this,
+					rotation_local.x, rotation_local.y, rotation_local.z, rotation_local.w,
+					scale_local.x, scale_local.y, scale_local.z,
+					translation_local.x, translation_local.y, translation_local.z,
+					world._11, world._12, world._13, world._14,
+					world._21, world._22, world._23, world._24,
+					world._31, world._32, world._33, world._34,
+					world._41, world._42, world._43, world._44);
+				// local clone of dbghelp's SYMBOL_INFO to avoid pulling in <dbghelp.h>
+				struct GG_SYMBOL_INFO {
+					unsigned long SizeOfStruct; unsigned long TypeIndex; unsigned long long Reserved[2];
+					unsigned long Index; unsigned long Size; unsigned long long ModBase; unsigned long Flags;
+					unsigned long long Value; unsigned long long Address; unsigned long Register;
+					unsigned long Scope; unsigned long Tag; unsigned long NameLen; unsigned long MaxNameLen; char Name[1];
+				};
+				HMODULE hDbg = LoadLibraryA("dbghelp.dll");
+				typedef int(WINAPI* PSymInitialize)(HANDLE, const char*, int);
+				typedef int(WINAPI* PSymFromAddr)(HANDLE, unsigned long long, unsigned long long*, GG_SYMBOL_INFO*);
+				PSymInitialize pSymInitialize = hDbg ? (PSymInitialize)GetProcAddress(hDbg, "SymInitialize") : nullptr;
+				PSymFromAddr pSymFromAddr = hDbg ? (PSymFromAddr)GetProcAddress(hDbg, "SymFromAddr") : nullptr;
+				static bool symInit = false;
+				if (pSymInitialize && !symInit) { pSymInitialize(GetCurrentProcess(), nullptr, 1); symInit = true; }
+				for (unsigned short i = 0; i < frames; ++i)
+				{
+					char symbuf[sizeof(GG_SYMBOL_INFO) + 256] = {};
+					GG_SYMBOL_INFO* sym = (GG_SYMBOL_INFO*)symbuf;
+					sym->SizeOfStruct = sizeof(GG_SYMBOL_INFO);
+					sym->MaxNameLen = 255;
+					unsigned long long disp = 0;
+					if (pSymFromAddr && pSymFromAddr(GetCurrentProcess(), (unsigned long long)stack[i], &disp, sym) && sym->NameLen > 0)
+						fprintf(f, " %s+0x%llx", sym->Name, (unsigned long long)disp);
+					else
+						fprintf(f, " %p", stack[i]);
+				}
+				fprintf(f, "\n");
+				fclose(f);
+			}
+		}
+#endif // _WIN32
 	}
 	void TransformComponent::ClearTransform()
 	{

@@ -127,22 +127,29 @@ float4 main(PSIn input) : SV_TARGET
 	
 #if 1
 	// FOAM:
-	float water_depth_diff = abs(texture_lineardepth[pixel] * GetCamera().z_far - lineardepth); // Note: for the shore foam, this is more accurate than water plane distance
+	// All the constants below were tuned for a world measured in METERS. xOceanFoamUnitScale
+	// converts world distances/positions into those tuned units (1 = stock; GGMAX passes
+	// ~0.0254 because its world is inch-scaled — without this the shore band is ~40x too thin
+	// and the foam noise repeats every inch). xOceanFoamAmount is an artistic intensity knob.
+	const float foam_unit = xOceanFoamUnitScale;
+	float water_depth_diff = abs(texture_lineardepth[pixel] * GetCamera().z_far - lineardepth) * foam_unit; // Note: for the shore foam, this is more accurate than water plane distance
+	float water_depth_foam = water_depth * foam_unit;
+	float2 foamP = surface.P.xz * foam_unit;
 	float foam_shore = saturate(exp(-water_depth_diff * 2));
-	float foam_wave = pow(saturate(gradient.a), 4) * saturate(exp(-water_depth * 0.1));
+	float foam_wave = pow(saturate(gradient.a), 4) * saturate(exp(-water_depth_foam * 0.1));
 	float foam_combined = saturate(foam_shore + foam_wave);
 	float foam_simplex = 0;
-	foam_simplex += smoothstep(0, 0.8, noise_simplex_2D(surface.P.xz * 1 + GetTime()));
-	foam_simplex += smoothstep(0, 0.8, noise_simplex_2D(surface.P.xz * 2 + GetTime()));
-	foam_simplex += smoothstep(0, 0.8, noise_simplex_2D(surface.P.zx * 4 - GetTime() * 2));
+	foam_simplex += smoothstep(0, 0.8, noise_simplex_2D(foamP * 1 + GetTime()));
+	foam_simplex += smoothstep(0, 0.8, noise_simplex_2D(foamP * 2 + GetTime()));
+	foam_simplex += smoothstep(0, 0.8, noise_simplex_2D(foamP.yx * 4 - GetTime() * 2));
 	float foam_voronoi = 0;
-	foam_voronoi += smoothstep(0.5, 0.8, noise_voronoi(surface.P.xz * 1, GetTime()).x);
-	foam_voronoi += smoothstep(0.5, 0.8, noise_voronoi(surface.P.xz * 2, GetTime()).x);
-	foam_voronoi += smoothstep(0.5, 0.8, noise_voronoi(surface.P.xz * 4, GetTime()).x);
+	foam_voronoi += smoothstep(0.5, 0.8, noise_voronoi(foamP * 1, GetTime()).x);
+	foam_voronoi += smoothstep(0.5, 0.8, noise_voronoi(foamP * 2, GetTime()).x);
+	foam_voronoi += smoothstep(0.5, 0.8, noise_voronoi(foamP * 4, GetTime()).x);
 	float foam = 0;
 	foam += foam_voronoi * foam_simplex * foam_combined;
 	foam += smoothstep(0.5, 0.6, saturate(foam_combined + 0.1));
-	foam *= 2;
+	foam *= 2 * xOceanFoamAmount;
 	foam = saturate(foam);
 	surface.albedo = lerp(surface.albedo, 0.6, foam);
 	surface.refraction.a *= 1 - foam;

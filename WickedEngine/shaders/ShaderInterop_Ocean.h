@@ -27,8 +27,8 @@ CBUFFER(OceanCB, CBSLOT_OTHER_OCEAN)
 
 	float xOceanChoppyScale;
 	float xOceanGridLen;
-	float xOcean_padding0;
-	float xOcean_padding1;
+	float xOceanFoamUnitScale;	// converts world units to the meters the foam math was tuned in (1 = stock meters; GGMAX passes ~0.0254 for inch-scaled worlds)
+	float xOceanFoamAmount;		// artistic multiplier on final foam intensity (1 = stock)
 };
 
 #endif // WI_SHADERINTEROP_OCEAN_H

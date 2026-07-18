@@ -37,6 +37,11 @@ namespace wi
 			float waterHeight = 0.0f;
 			uint32_t surfaceDetail = 4;
 			float surfaceDisplacementTolerance = 2;
+			// Converts world units to the meters the shore/wave foam math was tuned in.
+			// 1 = stock (world is in meters). GGMAX worlds are inch-scaled and pass ~0.0254.
+			float foam_unit_scale = 1.0f;
+			// Artistic multiplier on final foam intensity (1 = stock look).
+			float foam_amount = 1.0f;
 		};
 		void Create(const OceanParameters& params);
 

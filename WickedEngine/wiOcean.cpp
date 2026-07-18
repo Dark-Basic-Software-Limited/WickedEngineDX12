@@ -326,6 +326,8 @@ namespace wi
 		cb.xOceanMapHalfTexel = 0.5f / params.dmap_dim;
 		cb.xOceanWaterHeight = params.waterHeight;
 		cb.xOceanSurfaceDisplacementTolerance = std::max(1.0f, params.surfaceDisplacementTolerance);
+		cb.xOceanFoamUnitScale = std::max(0.000001f, params.foam_unit_scale);
+		cb.xOceanFoamAmount = std::max(0.0f, params.foam_amount);
 
 		return cb;
 	}

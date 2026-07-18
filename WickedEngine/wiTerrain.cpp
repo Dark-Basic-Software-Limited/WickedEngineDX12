@@ -679,7 +679,11 @@ namespace wi::terrain
 				chunk_data.props_entity = INVALID_ENTITY;
 				if (chunk_data.vt != nullptr)
 				{
-					chunk_data.vt->invalidate();
+					// GGMAX: when preserving blendmaps across in-place regen, keep the VT residency
+					// too — only the mesh changed. The freshly merged MaterialComponent is re-bound
+					// to the existing vt in UpdateVirtualTexturesCPU (no reset, nothing re-streams).
+					if (!gg_preserve_blendmap_on_regen)
+						chunk_data.vt->invalidate();
 				}
 			}
 		}
@@ -987,6 +991,13 @@ namespace wi::terrain
 				// may be flagged merge_pending below (flagging every visited chunk made
 				// GG's blendmap passes skip the whole map forever)
 				const bool gg_chunk_generated = (it == chunks.end() || it->second.entity == INVALID_ENTITY || it->second.invalidated);
+				// GGMAX: in-place regen (sculpt/edit invalidation) of an existing chunk may keep its
+				// blendmap — see gg_preserve_blendmap_on_regen. Computed from `it` BEFORE chunks[chunk]
+				// below can insert/rehash. Only kicks in when the old chunk has usable layers.
+				const bool gg_preserve_blend = gg_preserve_blendmap_on_regen &&
+					it != chunks.end() && it->second.entity != INVALID_ENTITY && it->second.invalidated &&
+					it->second.blendmap_layers.size() >= 4 &&
+					it->second.blendmap_layers[0].pixels.size() == vertexCount;
 				if (it == chunks.end() || it->second.entity == INVALID_ENTITY || it->second.invalidated)
 				{
 					// Generate a new chunk:
@@ -1044,10 +1055,13 @@ namespace wi::terrain
 					mesh.vertex_tangents.resize(vertexCount);
 					mesh.vertex_uvset_0.resize(vertexCount);
 
-					chunk_data.blendmap_layers.resize(4);
-					for (auto& x : chunk_data.blendmap_layers)
+					if (!gg_preserve_blend) // GGMAX: keep GG's multi-layer blendmap across in-place regen
 					{
-						x.pixels.resize(vertexCount);
+						chunk_data.blendmap_layers.resize(4);
+						for (auto& x : chunk_data.blendmap_layers)
+						{
+							x.pixels.resize(vertexCount);
+						}
 					}
 
 					chunk_data.spline_blendmap_layers.resize(splineMaterialEntities.size());
@@ -1160,10 +1174,13 @@ namespace wi::terrain
 
 						XMFLOAT4 materialBlendWeights(region_base, region_slope, region_low_altitude, region_high_altitude);
 
-						chunk_data.blendmap_layers[0].pixels[index] = uint8_t(materialBlendWeights.x * 255);
-						chunk_data.blendmap_layers[1].pixels[index] = uint8_t(materialBlendWeights.y * 255);
-						chunk_data.blendmap_layers[2].pixels[index] = uint8_t(materialBlendWeights.z * 255);
-						chunk_data.blendmap_layers[3].pixels[index] = uint8_t(materialBlendWeights.w * 255);
+						if (!gg_preserve_blend) // GGMAX: engine-default region weights would overwrite GG's blendmap
+						{
+							chunk_data.blendmap_layers[0].pixels[index] = uint8_t(materialBlendWeights.x * 255);
+							chunk_data.blendmap_layers[1].pixels[index] = uint8_t(materialBlendWeights.y * 255);
+							chunk_data.blendmap_layers[2].pixels[index] = uint8_t(materialBlendWeights.z * 255);
+							chunk_data.blendmap_layers[3].pixels[index] = uint8_t(materialBlendWeights.w * 255);
+						}
 
 						// Normalize after store, blending shader wants unnormalized!
 						weight_norm(materialBlendWeights);
@@ -1227,7 +1244,10 @@ namespace wi::terrain
 
 					// Create the textures for virtual texture update:
 					chunk_data.heightmap = {};
-					chunk_data.blendmap = {};
+					if (!gg_preserve_blend) // GGMAX: keep the existing GPU blendmap texture (layers untouched above)
+					{
+						chunk_data.blendmap = {};
+					}
 					CreateChunkRegionTexture(chunk_data);
 
 					if (IsPhysicsEnabled())
@@ -1724,9 +1744,15 @@ namespace wi::terrain
 			//const uint32_t required_resolution = std::max(min_resolution, max_resolution >> std::min(7, d));
 			const uint32_t required_resolution = dist < 2 ? max_resolution : min_resolution;
 
-			if (vt.resolution != required_resolution)
+			// GGMAX: an in-place chunk regen merge replaces the chunk's MaterialComponent with a
+			// fresh one (no atlas bindings). Detect that and re-run the bind block against the
+			// EXISTING vt — without vt.init(), so residency/tiles survive and nothing re-streams.
+			const bool gg_material_rebind = vt.resolution == required_resolution && vt.resolution != 0 &&
+				!material->textures[0].resource.IsValid();
+			if (vt.resolution != required_resolution || gg_material_rebind)
 			{
-				vt.init(atlas, required_resolution);
+				if (vt.resolution != required_resolution)
+					vt.init(atlas, required_resolution);
 
 				for (uint32_t map_type = 0; map_type < arraysize(atlas.maps); ++map_type)
 				{

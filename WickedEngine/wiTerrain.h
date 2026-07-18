@@ -231,6 +231,11 @@ namespace wi::terrain
 		XMFLOAT3 position = XMFLOAT3(0, 0, 0);
 		bool visible = true;
 		bool invalidated = false;
+		// GGMAX: set by the generator when it (re)generates this chunk, cleared when the
+		// result is merged into the main scene. Between those two points the main-scene
+		// mesh is the STALE pre-regeneration version — consumers that bake data from the
+		// chunk mesh (GG blendmap passes) must skip the chunk while this is up.
+		bool merge_pending = false;
 		wi::allocator::shared_ptr<VirtualTexture> vt;
 		wi::vector<uint16_t> heightmap_data;
 		wi::graphics::Texture heightmap;

@@ -685,6 +685,13 @@ namespace wi::terrain
 		// What was generated, will be merged in to the main scene
 		scene->MergeFastInternal(generator->scene);
 
+		// GGMAX: everything the (now idle) generator produced is live in the main scene —
+		// lift the merge_pending flags so mesh-baking consumers may process these chunks
+		for (auto it = chunks.begin(); it != chunks.end(); it++)
+		{
+			it->second.merge_pending = false;
+		}
+
 		chunk_scale_rcp = 1.0f / chunk_scale;
 
 		if (IsCenterToCamEnabled())
@@ -1384,6 +1391,7 @@ namespace wi::terrain
 				{
 					ChunkData& chunk_data = it->second;
 					chunk_data.invalidated = false;
+					chunk_data.merge_pending = true; // GGMAX: main-scene mesh is stale until the next merge
 				}
 
 				if (generated_something && timer.elapsed_milliseconds() > generation_time_budget_milliseconds)

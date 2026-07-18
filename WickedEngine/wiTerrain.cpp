@@ -979,6 +979,11 @@ namespace wi::terrain
 				chunk.x += offset_x;
 				chunk.z += offset_z;
 				auto it = chunks.find(chunk);
+				// GGMAX: remember whether this visit actually (re)generates — the spiral
+				// visits every existing chunk every job run, and only generated chunks
+				// may be flagged merge_pending below (flagging every visited chunk made
+				// GG's blendmap passes skip the whole map forever)
+				const bool gg_chunk_generated = (it == chunks.end() || it->second.entity == INVALID_ENTITY || it->second.invalidated);
 				if (it == chunks.end() || it->second.entity == INVALID_ENTITY || it->second.invalidated)
 				{
 					// Generate a new chunk:
@@ -1391,7 +1396,8 @@ namespace wi::terrain
 				{
 					ChunkData& chunk_data = it->second;
 					chunk_data.invalidated = false;
-					chunk_data.merge_pending = true; // GGMAX: main-scene mesh is stale until the next merge
+					if (gg_chunk_generated)
+						chunk_data.merge_pending = true; // GGMAX: freshly (re)generated — main-scene mesh is stale until the next merge
 				}
 
 				if (generated_something && timer.elapsed_milliseconds() > generation_time_budget_milliseconds)

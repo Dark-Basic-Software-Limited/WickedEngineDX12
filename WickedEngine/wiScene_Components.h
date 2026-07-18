@@ -1156,6 +1156,7 @@ namespace wi::scene
 			NOT_VISIBLE_IN_MAIN_CAMERA = 1 << 8,
 			NOT_VISIBLE_IN_REFLECTIONS = 1 << 9,
 			WETMAP_ENABLED = 1 << 10,
+			OCCLUSION_QUERY_DISABLED = 1 << 11,	// GGMAX: opt this object out of per-object GPU occlusion queries (always treated as visible)
 		};
 		uint32_t _flags = RENDERABLE | CAST_SHADOW;
 
@@ -1211,6 +1212,9 @@ namespace wi::scene
 		// With this you can disable object rendering for reflections
 		constexpr void SetNotVisibleInReflections(bool value) { if (value) { _flags |= NOT_VISIBLE_IN_REFLECTIONS; } else { _flags &= ~NOT_VISIBLE_IN_REFLECTIONS; } }
 		constexpr void SetWetmapEnabled(bool value) { if (value) { _flags |= WETMAP_ENABLED; } else { _flags &= ~WETMAP_ENABLED; } }
+		// GGMAX: exclude this object from GPU occlusion queries — it is always considered visible.
+		// Use for huge pools of cheap objects (tree pool) where query bookkeeping costs more than drawing.
+		constexpr void SetOcclusionQueryDisabled(bool value) { if (value) { _flags |= OCCLUSION_QUERY_DISABLED; } else { _flags &= ~OCCLUSION_QUERY_DISABLED; } }
 
 		constexpr bool IsRenderable() const { return (_flags & RENDERABLE) && (GetTransparency() < 0.99f); }
 		constexpr bool IsCastingShadow() const { return _flags & CAST_SHADOW; }
@@ -1222,6 +1226,7 @@ namespace wi::scene
 		constexpr bool IsNotVisibleInMainCamera() const { return _flags & NOT_VISIBLE_IN_MAIN_CAMERA; }
 		constexpr bool IsNotVisibleInReflections() const { return _flags & NOT_VISIBLE_IN_REFLECTIONS; }
 		constexpr bool IsWetmapEnabled() const { return _flags & WETMAP_ENABLED; }
+		constexpr bool IsOcclusionQueryDisabled() const { return _flags & OCCLUSION_QUERY_DISABLED; }	// GGMAX
 
 		constexpr float GetTransparency() const { return 1 - color.w; }
 		constexpr uint32_t GetFilterMask() const { return filterMask | filterMaskDynamic; }

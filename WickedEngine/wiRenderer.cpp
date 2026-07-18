@@ -3759,7 +3759,14 @@ void UpdateVisibility(Visibility& vis)
 
 				if (vis.flags & Visibility::ALLOW_OCCLUSION_CULLING)
 				{
-					if (object.IsRenderable() && occlusion_result.occlusionQueries[vis.scene->queryheap_idx] < 0)
+					if (object.IsOcclusionQueryDisabled())
+					{
+						// GGMAX: object opted out of occlusion queries — keep it visible every
+						// frame (history shifts left each frame; without this it would decay
+						// to permanently occluded). No query slot is ever allocated for it.
+						occlusion_result.occlusionHistory |= 1;
+					}
+					else if (object.IsRenderable() && occlusion_result.occlusionQueries[vis.scene->queryheap_idx] < 0)
 					{
 						if (aabb.intersects(vis.camera->Eye))
 						{

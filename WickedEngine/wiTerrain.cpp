@@ -591,15 +591,18 @@ namespace wi::terrain
 			restart_generation = true;
 			modifiers_to_remove.clear();
 		}
-		for (wi::ecs::Entity entity : materialEntities)
+		if (generation_restart_on_dirty_materials) // GGMAX: GG registers materials at runtime and owns the blendmaps — no rebuild on dirt
 		{
-			MaterialComponent* material = scene->materials.GetComponent(entity);
-			if (material == nullptr)
-				continue;
-			if (material->IsDirty())
+			for (wi::ecs::Entity entity : materialEntities)
 			{
-				restart_generation = true;
-				break;
+				MaterialComponent* material = scene->materials.GetComponent(entity);
+				if (material == nullptr)
+					continue;
+				if (material->IsDirty())
+				{
+					restart_generation = true;
+					break;
+				}
 			}
 		}
 		splineMaterialEntities.clear();

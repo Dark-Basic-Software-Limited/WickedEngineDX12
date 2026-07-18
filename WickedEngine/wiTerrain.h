@@ -296,6 +296,7 @@ namespace wi::terrain
 		// For generating scene on a background thread:
 		float generation_time_budget_milliseconds = 8; // after this much time, the generation thread will start to exit. This can help avoid a very long running, resource consuming and slow cancellation generation
 		bool generation_view_cone_priority = false; // GGMAX: when enabled, chunks within the camera's horizontal view cone are generated before the rest of the spiral (the visible terrain builds first)
+		bool generation_high_priority = false; // GGMAX: run the generation job + its per-chunk dispatches on the HIGH priority job pool (Low pool threads are THREAD_PRIORITY_LOWEST and starve while the CPU is busy, e.g. during level load). Set only for burst scenarios like an initial build.
 		std::shared_ptr<Generator> generator;
 
 		wi::vector<VirtualTexture*> virtual_textures_in_use;

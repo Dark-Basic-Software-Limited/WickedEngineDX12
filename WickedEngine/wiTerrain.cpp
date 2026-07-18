@@ -918,7 +918,9 @@ namespace wi::terrain
 
 		// Start the generation on a background thread and keep it running until the next frame
 		generator->cancelled.store(false);
-		generator->workload.priority = wi::jobsystem::Priority::Low;
+		// GGMAX: optionally promote generation to the High pool — the Low pool runs at
+		// THREAD_PRIORITY_LOWEST and starves while the CPU is busy (level load).
+		generator->workload.priority = generation_high_priority ? wi::jobsystem::Priority::High : wi::jobsystem::Priority::Low;
 		size_t terrain_spline_count_scene = 0; // Count the current terrain modifier splines in scene
 		for (size_t i = 0; i < scene->splines.GetCount(); ++i)
 		{
@@ -1053,7 +1055,8 @@ namespace wi::terrain
 
 					// Do a parallel for loop over all the chunk's vertices and compute their properties:
 					wi::jobsystem::context ctx;
-					ctx.priority = wi::jobsystem::Priority::Low;
+					ctx.priority = generation_high_priority ? wi::jobsystem::Priority::High : wi::jobsystem::Priority::Low; // GGMAX
+
 
 					// Preload height grid with padding, because neighbors will need to be accessed to determine slopes:
 					constexpr int chunk_width_padded = chunk_width + 1;

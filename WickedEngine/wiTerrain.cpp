@@ -945,6 +945,20 @@ namespace wi::terrain
 				generator->splines.push_back(spline);
 			}
 		}
+		// GGMAX: capture the camera's horizontal look direction for view-cone-first
+		// generation. Zero vector = disabled (also when looking straight down).
+		XMFLOAT2 view_cone_forward = XMFLOAT2(0, 0);
+		if (generation_view_cone_priority)
+		{
+			const float fx = camera.At.x;
+			const float fz = camera.At.z;
+			const float len = std::sqrt(fx * fx + fz * fz);
+			if (len > 0.001f)
+			{
+				view_cone_forward = XMFLOAT2(fx / len, fz / len);
+			}
+		}
+
 		wi::jobsystem::Execute(generator->workload, [=](wi::jobsystem::JobArgs a) {
 
 			wi::Timer timer;
@@ -1387,6 +1401,38 @@ namespace wi::terrain
 				{
 					request_chunk(chunk.x, chunk.z);
 					if (generator->cancelled.load()) return;
+				}
+			}
+
+			// GGMAX view-cone priority pre-pass: sweep the same outward spiral once,
+			// restricted to chunks in front of the camera (plus the two rings
+			// immediately around it), so the terrain the user is looking at builds
+			// first. The full spiral below then fills in the rest — request_chunk
+			// fast-skips chunks that already exist, and the generation budget makes
+			// each job launch resume wherever the previous one ran out.
+			if (view_cone_forward.x != 0 || view_cone_forward.y != 0)
+			{
+				request_chunk(0, 0);
+				if (generator->cancelled.load()) return;
+				for (int growth = 0; growth < generation; ++growth)
+				{
+					const int side = 2 * (growth + 1);
+					int x = -growth - 1;
+					int z = -growth - 1;
+					auto cone_request = [&](int cx, int cz)
+					{
+						if (growth >= 2) // rings 1-2 around the camera are unconditional
+						{
+							const float lenr = std::sqrt(float(cx * cx + cz * cz));
+							const float d = (float(cx) * view_cone_forward.x + float(cz) * view_cone_forward.y) / std::max(0.001f, lenr);
+							if (d < 0.35f) return; // outside ~70 degree half-angle
+						}
+						request_chunk(cx, cz);
+					};
+					for (int i = 0; i < side; ++i) { cone_request(x, z); if (generator->cancelled.load()) return; x++; }
+					for (int i = 0; i < side; ++i) { cone_request(x, z); if (generator->cancelled.load()) return; z++; }
+					for (int i = 0; i < side; ++i) { cone_request(x, z); if (generator->cancelled.load()) return; x--; }
+					for (int i = 0; i < side; ++i) { cone_request(x, z); if (generator->cancelled.load()) return; z--; }
 				}
 			}
 

@@ -180,6 +180,23 @@ namespace wi::terrain
 
 		void free(VirtualTextureAtlas& atlas)
 		{
+			// GGMAX: release physical-tile ownership BEFORE the tiles vector is destroyed.
+			// physical_tiles[].last_used stores raw pointers into this vector; a later
+			// tiles allocation can reuse the same heap block, making the stale last_used
+			// spuriously match a brand-new tile by address. check_tile_resident then
+			// reports tiles this VT never allocated as resident: the page table maps
+			// recycled physical tiles holding another chunk's pixels AND the re-render is
+			// skipped — random foreign squares during fast zoom in/out cycles.
+			for (auto& tile : tiles)
+			{
+				if (!tile.IsValid())
+					continue;
+				VirtualTextureAtlas::PhysicalTile& physical_tile = atlas.physical_tiles[tile.x + tile.y * atlas.physical_tile_count_x];
+				if (physical_tile.last_used == &tile)
+				{
+					physical_tile.last_used = nullptr;
+				}
+			}
 			tiles.clear();
 			atlas.free_residency(residency);
 		}
@@ -330,13 +347,15 @@ namespace wi::terrain
 		// until the game's main-thread blend passes catch up. Return false to fall back to
 		// the engine-default weights (e.g. game data not ready during initial level load).
 		std::function<bool(ChunkData& chunk_data, const wi::scene::MeshComponent& mesh)> gg_generate_blendmap;
-		// GGMAX: defer virtual-texture residency UPGRADES (min res -> max res when a chunk
-		// enters the near ring) until the camera has stopped crossing chunk boundaries, and
-		// budget them per frame. Without this, a fast camera zoom sweeps the dist<2 ring
-		// across the terrain and every crossing chunk resets its VT residency mid-motion —
-		// visible as square tiles of mixed sharpness/stale content flickering until the
-		// camera settles. Deferred chunks keep rendering their correct low-res tile.
-		// Downgrades and fresh/unbound chunks are never deferred. Default false = stock.
+		// GGMAX: FREEZE virtual-texture resolution changes (both upgrades and downgrades)
+		// while the camera is crossing chunk boundaries. Without this, a fast camera zoom
+		// sweeps the dist<2 ring across the terrain and every crossing chunk re-inits its
+		// VT mid-motion — residency churn visible as square tiles of mixed sharpness/stale
+		// content flickering until the camera settles. Frozen chunks keep rendering their
+		// existing (correct) tiles at their current resolution. Once the camera holds one
+		// chunk for 10 frames: downgrades run immediately (frees tile pool), upgrades run
+		// budgeted per frame. Fresh (resolution 0) and unbound-material chunks are never
+		// deferred. Default false = stock.
 		bool gg_vt_upgrade_hysteresis = false;
 		wi::terrain::Chunk gg_prev_center_chunk = {};
 		uint32_t gg_center_stable_frames = 0;

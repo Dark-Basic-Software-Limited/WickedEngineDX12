@@ -1778,22 +1778,31 @@ namespace wi::terrain
 			// EXISTING vt — without vt.init(), so residency/tiles survive and nothing re-streams.
 			const bool gg_material_rebind = vt.resolution == required_resolution && vt.resolution != 0 &&
 				!material->textures[0].resource.IsValid();
-			// GGMAX: VT upgrade hysteresis — while the camera is crossing chunk boundaries,
-			// chunks entering the near ring keep their current low-res VT (correct content,
-			// just soft) instead of resetting residency mid-motion, which showed as square
-			// tiles of mixed sharpness flickering during fast zooms. Once the camera holds
-			// still for 10 frames, upgrades run a few per frame. Fresh (resolution 0) and
-			// unbound-material chunks are never deferred — they must bind now.
-			bool gg_defer_upgrade = false;
-			if (gg_vt_upgrade_hysteresis && vt.resolution != 0 && required_resolution > vt.resolution &&
+			// GGMAX: VT hysteresis — while the camera is crossing chunk boundaries, FREEZE
+			// resolution changes entirely: chunks keep rendering their existing correct
+			// tiles at their current resolution instead of re-initializing mid-motion
+			// (residency churn showed as square tiles of mixed sharpness/stale content
+			// flickering during fast zooms). Once the camera holds still for 10 frames,
+			// downgrades run immediately (frees tile pool) and upgrades run a few per
+			// frame. Fresh (resolution 0) and unbound-material chunks are never deferred —
+			// they must bind now.
+			bool gg_defer_change = false;
+			if (gg_vt_upgrade_hysteresis && vt.resolution != 0 && vt.resolution != required_resolution &&
 				material->textures[0].resource.IsValid())
 			{
-				if (gg_center_stable_frames < 10 || gg_upgrade_budget == 0)
-					gg_defer_upgrade = true;
-				else
-					gg_upgrade_budget--;
+				if (gg_center_stable_frames < 10)
+				{
+					gg_defer_change = true; // camera in motion: keep the old VT references
+				}
+				else if (required_resolution > vt.resolution)
+				{
+					if (gg_upgrade_budget == 0)
+						gg_defer_change = true;
+					else
+						gg_upgrade_budget--;
+				}
 			}
-			if ((vt.resolution != required_resolution && !gg_defer_upgrade) || gg_material_rebind)
+			if ((vt.resolution != required_resolution && !gg_defer_change) || gg_material_rebind)
 			{
 				if (vt.resolution != required_resolution)
 					vt.init(atlas, required_resolution);

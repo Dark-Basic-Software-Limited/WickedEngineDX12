@@ -359,6 +359,17 @@ namespace wi::terrain
 		bool gg_vt_upgrade_hysteresis = false;
 		wi::terrain::Chunk gg_prev_center_chunk = {};
 		uint32_t gg_center_stable_frames = 0;
+		// GGMAX: radius (in chunks) of the full-resolution virtual-texture zone. Stock = 2:
+		// a tiny ring the camera crosses in milliseconds, forcing VT re-inits/re-streams on
+		// every fast move. A bounded game island can sit entirely INSIDE a wider zone —
+		// then camera travel never crosses a resolution boundary at all and the VT cache
+		// for near, correct terrain is never re-referenced (tile residency stays feedback-
+		// driven, so the physical pool cost barely changes).
+		int gg_near_ring_dist = 2;
+		// GGMAX: extra chunks beyond the stock removal threshold (generation + 2) before a
+		// chunk is destroyed. Bounded islands should keep their chunks alive across zoom
+		// travel — destruction/recreation churn is a VT cache flush. Default 0 = stock.
+		int gg_removal_margin = 0;
 		bool generation_high_priority = false; // GGMAX: run the generation job + its per-chunk dispatches on the HIGH priority job pool (Low pool threads are THREAD_PRIORITY_LOWEST and starve while the CPU is busy, e.g. during level load). Set only for burst scenarios like an initial build.
 		std::shared_ptr<Generator> generator;
 

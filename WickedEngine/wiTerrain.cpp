@@ -719,7 +719,7 @@ namespace wi::terrain
 			gg_prev_center_chunk = center_chunk;
 		}
 
-		const int removal_threshold = generation + 2;
+		const int removal_threshold = generation + 2 + gg_removal_margin; // GGMAX: bounded islands keep chunks alive across zoom travel
 		GraphicsDevice* device = GetDevice();
 
 		// Check whether there are any materials that would write to virtual textures:
@@ -1791,7 +1791,7 @@ namespace wi::terrain
 			//const uint32_t required_resolution = std::max(min_resolution, max_resolution >> std::min(7, std::max(0, dist - 1)));
 			//const int d = std::max(0, dist - 4); // hold max_resolution for dist 0..4
 			//const uint32_t required_resolution = std::max(min_resolution, max_resolution >> std::min(7, d));
-			const uint32_t required_resolution = dist < 2 ? max_resolution : min_resolution;
+			const uint32_t required_resolution = dist < gg_near_ring_dist ? max_resolution : min_resolution; // GGMAX: widened full-res zone (stock: dist < 2)
 
 			// GGMAX: an in-place chunk regen merge replaces the chunk's MaterialComponent with a
 			// fresh one (no atlas bindings). Detect that and re-run the bind block against the

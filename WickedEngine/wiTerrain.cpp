@@ -1242,6 +1242,19 @@ namespace wi::terrain
 						chunk_data.grass.CreateFromMesh(mesh);
 					}
 
+					// GGMAX: let the game fill the blendmap with its own weights (generator
+					// thread) so the chunk is born correct — the engine-default region weights
+					// written above only remain if there is no callback or it declines.
+					// Preserved (in-place regen) chunks keep their existing layers untouched.
+					if (!gg_preserve_blend)
+					{
+						chunk_data.gg_blendmap_generated = false;
+						if (gg_generate_blendmap)
+						{
+							chunk_data.gg_blendmap_generated = gg_generate_blendmap(chunk_data, mesh);
+						}
+					}
+
 					// Create the textures for virtual texture update:
 					chunk_data.heightmap = {};
 					if (!gg_preserve_blend) // GGMAX: keep the existing GPU blendmap texture (layers untouched above)

@@ -9,6 +9,7 @@
 #include "wiVector.h"
 
 #include <memory>
+#include <functional>
 
 namespace wi::terrain
 {
@@ -250,6 +251,11 @@ namespace wi::terrain
 		// mesh is the STALE pre-regeneration version — consumers that bake data from the
 		// chunk mesh (GG blendmap passes) must skip the chunk while this is up.
 		bool merge_pending = false;
+		// GGMAX: set when this chunk's blendmap was filled by Terrain::gg_generate_blendmap
+		// on the generator thread (born game-correct, GPU texture already built from it).
+		// Game blend passes latch their processed keys and skip the rewrite while this is
+		// up; the game's edit bridge clears it so real edits reprocess normally.
+		bool gg_blendmap_generated = false;
 		wi::allocator::shared_ptr<VirtualTexture> vt;
 		wi::vector<uint16_t> heightmap_data;
 		wi::graphics::Texture heightmap;
@@ -317,6 +323,13 @@ namespace wi::terrain
 		bool generation_view_cone_priority = false; // GGMAX: when enabled, chunks within the camera's horizontal view cone are generated before the rest of the spiral (the visible terrain builds first)
 		bool generation_restart_on_dirty_materials = true; // GGMAX: stock Wicked restarts generation (full chunk teardown) whenever a terrain material is dirty — an editor convenience. GG creates/updates terrain materials at runtime (incremental painted-slot registration) and owns the blendmaps itself, so a dirty material must NOT rebuild the island (it caused a 4-5s full-terrain flicker on the first paint stroke with each new texture)
 		bool gg_preserve_blendmap_on_regen = false; // GGMAX: in-place chunk regeneration (sculpt/edit invalidation) keeps the chunk's existing blendmap layers, GPU blendmap texture and virtual-texture residency instead of regenerating engine-default region weights and resetting the VT. GG owns the blendmaps (its DX11-style passes rewrite them right after regen) — without this, every sculpt-drag frame flashed the engine's 4-region default blend and re-streamed all tiles (chunk-shaped blur/checker until mouse release)
+		// GGMAX: when set, freshly generated (non-preserved) chunks get their blendmap filled
+		// by this callback on the generator thread, right after the chunk's vertex data is
+		// complete and before the region texture is created — streamed-in chunks are born
+		// with game-correct blending instead of flashing the engine-default region weights
+		// until the game's main-thread blend passes catch up. Return false to fall back to
+		// the engine-default weights (e.g. game data not ready during initial level load).
+		std::function<bool(ChunkData& chunk_data, const wi::scene::MeshComponent& mesh)> gg_generate_blendmap;
 		bool generation_high_priority = false; // GGMAX: run the generation job + its per-chunk dispatches on the HIGH priority job pool (Low pool threads are THREAD_PRIORITY_LOWEST and starve while the CPU is busy, e.g. during level load). Set only for burst scenarios like an initial build.
 		std::shared_ptr<Generator> generator;
 

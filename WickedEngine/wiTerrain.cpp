@@ -1798,9 +1798,17 @@ namespace wi::terrain
 			}
 
 			// GGMAX: blendmap-edit repaint — pick up the recreated blendmap texture here
-			// on the main thread; the update job below turns the flag into tile re-renders
+			// on the main thread and LATCH the request for the update job below. The job
+			// consumes the latch, never the live flag: game code sets the live flag at any
+			// point in the frame, possibly while a prior job is still in flight, and a job
+			// that consumed the live flag before this re-bind ran would re-render tiles
+			// against the OLD blendmap and drop the request — the edit would never land.
+			// (The previous frame's job was joined at the top of this function, so no job
+			// is in flight while this block transfers the flag.)
 			if (vt.pending_repaint_blendmap)
 			{
+				vt.pending_repaint_blendmap = false;
+				vt.gg_repaint_blendmap_latched = true;
 				vt.blendmap = chunk_data.blendmap;
 			}
 
@@ -1934,9 +1942,9 @@ namespace wi::terrain
 			// through several seconds of feedback round-trips after every paint stroke.
 			for (VirtualTexture* vt : virtual_textures_in_use)
 			{
-				if (!vt->pending_repaint_blendmap)
+				if (!vt->gg_repaint_blendmap_latched)
 					continue;
-				vt->pending_repaint_blendmap = false;
+				vt->gg_repaint_blendmap_latched = false;
 				if (vt->residency == nullptr)
 					continue; // single-tile far chunks take the cheap invalidate() path instead
 

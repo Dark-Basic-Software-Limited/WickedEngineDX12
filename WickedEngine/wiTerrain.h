@@ -193,7 +193,14 @@ namespace wi::terrain
 		// every currently RESIDENT tile in place. Unlike invalidate(), this keeps the
 		// residency intact, so the refresh lands next frame instead of re-streaming
 		// the whole chunk through multi-frame GPU feedback round-trips.
+		// Ownership: game code only SETS this; UpdateVirtualTexturesCPU's main-thread
+		// loop (which runs after the previous frame's job was joined) consumes it into
+		// gg_repaint_blendmap_latched together with the vt.blendmap re-bind; only the
+		// async job reads/clears the latch. The job must never touch this live flag —
+		// a job in flight while game code sets it would consume the request against
+		// the OLD blendmap binding and the edit would silently never land.
 		bool pending_repaint_blendmap = false;
+		bool gg_repaint_blendmap_latched = false;
 
 		struct AllocationRequest
 		{

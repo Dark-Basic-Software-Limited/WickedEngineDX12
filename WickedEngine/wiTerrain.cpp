@@ -1612,6 +1612,26 @@ namespace wi::terrain
 		// near ring sharpens over a few frames instead of hitching (gg_vt_upgrade_hysteresis)
 		uint32_t gg_upgrade_budget = 4;
 
+		// GGMAX: while the camera is crossing chunk boundaries, FREEZE the tile allocator
+		// completely — no tile aging, no free-list rebuild, no allocations, no stealing.
+		// The GPU feedback that keeps visible tiles alive arrives on a 2-3 frame delayed
+		// readback; during fast camera moves the keep-alive gaps let STILL-VISIBLE tiles
+		// age into the free list, and the flood of misses from newly-visible terrain then
+		// steals them — another chunk renders its pixels into a square that was correct
+		// and on screen (the "random squares" during violent zooms). Frozen terrain keeps
+		// every resident tile; newly approached terrain simply stays coarse until the
+		// camera settles, then streams in as designed.
+		const bool gg_vt_frozen = gg_vt_upgrade_hysteresis && gg_center_stable_frames < 10;
+		if (gg_vt_frozen && !atlas.free_tiles.empty())
+		{
+			// The free list entering this frame's chunk loop (used by chunk-init tail
+			// allocations) was built by the previous job, possibly before the freeze —
+			// filter it to the provably off-screen set so init can't steal visible tiles.
+			atlas.free_tiles.erase(std::remove_if(atlas.free_tiles.begin(), atlas.free_tiles.end(),
+				[&](const VirtualTextureAtlas::Tile& t) { return atlas.get_tile_frames(t) < 60; }),
+				atlas.free_tiles.end());
+		}
+
 		if (!sampler.IsValid())
 		{
 			SamplerDesc samplerDesc;
@@ -1871,13 +1891,16 @@ namespace wi::terrain
 				continue;
 		}
 
-		wi::jobsystem::Execute(virtual_texture_ctx, [this](wi::jobsystem::JobArgs args) {
+		wi::jobsystem::Execute(virtual_texture_ctx, [this, gg_vt_frozen](wi::jobsystem::JobArgs args) {
 
 			// Update state of physical tiles:
 			//	Potentially each physical tile is getting marked as unused here (free_frames > 0), unless GPU requested them to be resident
-			for (auto& x : atlas.physical_tiles)
+			if (!gg_vt_frozen) // GGMAX: no tile aging while the camera is in motion
 			{
-				x.free_frames++;
+				for (auto& x : atlas.physical_tiles)
+				{
+					x.free_frames++;
+				}
 			}
 
 			// Process GPU allocation requests from last frame:
@@ -1952,12 +1975,20 @@ namespace wi::terrain
 
 			// Determine reusable tiles:
 			//	After all GPU requests were processed, we can make the unused tiles available for allocations
+			// GGMAX: while the camera is in motion, only tiles unused for 60+ frames may be
+			// recycled — provably off-screen, since the delayed feedback keep-alive gaps
+			// during fast moves are only a few frames. Tiles below the threshold belong to
+			// terrain that was recently visible and correct: stealing them mid-motion is
+			// what painted random foreign squares over the terrain during violent zooms.
+			// (Aging is frozen too, so this set only drains during a long flight — new
+			// terrain then simply stays coarse until the camera settles.)
+			const uint64_t gg_min_free_frames = gg_vt_frozen ? 60 : 1;
 			atlas.free_tiles.clear();
 			for (uint8_t y = 0; y < atlas.physical_tile_count_y; ++y)
 			{
 				for (uint8_t x = 0; x < atlas.physical_tile_count_x; ++x)
 				{
-					if (atlas.physical_tiles[x + y * atlas.physical_tile_count_x].free_frames > 0)
+					if (atlas.physical_tiles[x + y * atlas.physical_tile_count_x].free_frames >= gg_min_free_frames)
 					{
 						VirtualTextureAtlas::Tile& tile = atlas.free_tiles.emplace_back();
 						tile.x = x;

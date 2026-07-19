@@ -330,6 +330,16 @@ namespace wi::terrain
 		// until the game's main-thread blend passes catch up. Return false to fall back to
 		// the engine-default weights (e.g. game data not ready during initial level load).
 		std::function<bool(ChunkData& chunk_data, const wi::scene::MeshComponent& mesh)> gg_generate_blendmap;
+		// GGMAX: defer virtual-texture residency UPGRADES (min res -> max res when a chunk
+		// enters the near ring) until the camera has stopped crossing chunk boundaries, and
+		// budget them per frame. Without this, a fast camera zoom sweeps the dist<2 ring
+		// across the terrain and every crossing chunk resets its VT residency mid-motion —
+		// visible as square tiles of mixed sharpness/stale content flickering until the
+		// camera settles. Deferred chunks keep rendering their correct low-res tile.
+		// Downgrades and fresh/unbound chunks are never deferred. Default false = stock.
+		bool gg_vt_upgrade_hysteresis = false;
+		wi::terrain::Chunk gg_prev_center_chunk = {};
+		uint32_t gg_center_stable_frames = 0;
 		bool generation_high_priority = false; // GGMAX: run the generation job + its per-chunk dispatches on the HIGH priority job pool (Low pool threads are THREAD_PRIORITY_LOWEST and starve while the CPU is busy, e.g. during level load). Set only for burst scenarios like an initial build.
 		std::shared_ptr<Generator> generator;
 

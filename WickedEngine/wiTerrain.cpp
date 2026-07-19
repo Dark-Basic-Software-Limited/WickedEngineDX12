@@ -1798,6 +1798,11 @@ namespace wi::terrain
 			// EXISTING vt — without vt.init(), so residency/tiles survive and nothing re-streams.
 			const bool gg_material_rebind = vt.resolution == required_resolution && vt.resolution != 0 &&
 				!material->textures[0].resource.IsValid();
+			// GGMAX: a chunk whose tail-tile allocation failed (tile pool exhausted at init
+			// time) renders flat untextured squares and stock has NO retry path — force a
+			// re-init once the pool has tiles again. Never deferred by the hysteresis.
+			const bool gg_tail_invalid = vt.resolution != 0 &&
+				(vt.tiles.empty() || !vt.tiles.back().IsValid()) && !atlas.free_tiles.empty();
 			// GGMAX: VT hysteresis — while the camera is crossing chunk boundaries, FREEZE
 			// resolution changes entirely: chunks keep rendering their existing correct
 			// tiles at their current resolution instead of re-initializing mid-motion
@@ -1822,9 +1827,9 @@ namespace wi::terrain
 						gg_upgrade_budget--;
 				}
 			}
-			if ((vt.resolution != required_resolution && !gg_defer_change) || gg_material_rebind)
+			if ((vt.resolution != required_resolution && !gg_defer_change) || gg_material_rebind || gg_tail_invalid)
 			{
-				if (vt.resolution != required_resolution)
+				if (vt.resolution != required_resolution || gg_tail_invalid)
 					vt.init(atlas, required_resolution);
 
 				for (uint32_t map_type = 0; map_type < arraysize(atlas.maps); ++map_type)
@@ -1895,12 +1900,14 @@ namespace wi::terrain
 
 			// Update state of physical tiles:
 			//	Potentially each physical tile is getting marked as unused here (free_frames > 0), unless GPU requested them to be resident
-			if (!gg_vt_frozen) // GGMAX: no tile aging while the camera is in motion
+			// GGMAX: aging must ALWAYS run — freezing it starved the recycle pool during
+			// sustained camera motion (nothing ever crossed the recycle threshold), chunk
+			// inits then failed to allocate tail tiles and the whole terrain degraded to
+			// flat untextured squares. The protection against mid-motion steals is the
+			// recycle threshold below, not an aging freeze.
+			for (auto& x : atlas.physical_tiles)
 			{
-				for (auto& x : atlas.physical_tiles)
-				{
-					x.free_frames++;
-				}
+				x.free_frames++;
 			}
 
 			// Process GPU allocation requests from last frame:
@@ -1977,11 +1984,11 @@ namespace wi::terrain
 			//	After all GPU requests were processed, we can make the unused tiles available for allocations
 			// GGMAX: while the camera is in motion, only tiles unused for 60+ frames may be
 			// recycled — provably off-screen, since the delayed feedback keep-alive gaps
-			// during fast moves are only a few frames. Tiles below the threshold belong to
-			// terrain that was recently visible and correct: stealing them mid-motion is
-			// what painted random foreign squares over the terrain during violent zooms.
-			// (Aging is frozen too, so this set only drains during a long flight — new
-			// terrain then simply stays coarse until the camera settles.)
+			// during fast moves are only 2-3 frames (visible tiles oscillate at 0-3 and can
+			// never be stolen). Tiles below the threshold belong to terrain that was
+			// recently visible and correct: stealing them mid-motion is what painted random
+			// foreign squares over the terrain during violent zooms. Aging keeps running,
+			// so genuinely off-screen tiles keep flowing into the pool even mid-flight.
 			const uint64_t gg_min_free_frames = gg_vt_frozen ? 60 : 1;
 			atlas.free_tiles.clear();
 			for (uint8_t y = 0; y < atlas.physical_tile_count_y; ++y)

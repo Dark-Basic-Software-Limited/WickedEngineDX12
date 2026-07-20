@@ -156,7 +156,11 @@ inline void light_directional(in ShaderEntity light, in Surface surface, inout L
 		float water_height = ocean.water_height + displacement.y;
 		if (surface.P.y < water_height)
 		{
-			half3 caustic = texture_caustics.SampleLevel(sampler_linear_mirror, ocean_uv, 0).rgb;
+			// Caustic UV is scaled independently of patch_size, so the seabed light-ripple size can
+			// be tuned WITHOUT changing wave size (patch_size otherwise drives both). The
+			// displacement/water_height lookup above deliberately keeps the unscaled ocean_uv.
+			// ocean.caustic_scale == 1 reproduces stock behaviour exactly.
+			half3 caustic = texture_caustics.SampleLevel(sampler_linear_mirror, ocean_uv * ocean.caustic_scale, 0).rgb;
 			caustic *= sqr(saturate((water_height - surface.P.y) * 0.5)); // fade out at shoreline
 			caustic *= light_color;
 			lighting.indirect.diffuse += caustic;

@@ -42,6 +42,11 @@ namespace wi
 			float foam_unit_scale = 1.0f;
 			// Artistic multiplier on final foam intensity (1 = stock look).
 			float foam_amount = 1.0f;
+			// Scales ONLY the refraction normal lookup used for the underwater light ripples
+			// ("caustics") cast on the seabed, decoupling their size from patch_length - which
+			// otherwise also drives wave size, so you cannot enlarge one without the other.
+			// 1 = stock (ripple size welded to patch_length); <1 = larger ripples.
+			float caustic_scale = 1.0f;
 		};
 		void Create(const OceanParameters& params);
 

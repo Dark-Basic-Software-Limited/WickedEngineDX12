@@ -350,6 +350,11 @@ struct alignas(16) ShaderOcean
 	int texture_displacementmap;
 	int texture_gradientmap;
 
+	float caustic_scale;	// scales ONLY the seabed caustic lookup, so its size is independent of patch_size (which also drives wave size). 1 = stock (welded to patch size); <1 = larger caustics
+	float caustic_pad0;
+	float caustic_pad1;
+	float caustic_pad2;
+
 	bool IsValid() { return texture_displacementmap >= 0; }
 };
 

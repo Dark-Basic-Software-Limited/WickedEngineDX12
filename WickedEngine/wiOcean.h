@@ -56,6 +56,13 @@ namespace wi
 			// Color" + "Underwater Fog" Water-panel controls.
 			float underwater_fog_density = 0.0f;
 			XMFLOAT4 underwater_color = XMFLOAT4(0.0f, 0.05f, 0.12f, 1.0f);
+
+			// GG delta 1.24: tints the see-through (refraction) SURFACE view toward waterColor.rgb
+			// with depth, so a chosen "Water Base Color" is visible even on fully-transparent water
+			// (waterColor.a == 0) — clear shallows, coloured depths, like real water absorbing light.
+			// 0 = off (stock: base colour only shows through opacity/alpha). Larger = colour reached
+			// over less depth.
+			float water_color_depth = 0.0f;
 		};
 		void Create(const OceanParameters& params);
 

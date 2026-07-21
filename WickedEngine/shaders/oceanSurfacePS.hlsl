@@ -122,6 +122,10 @@ float4 main(PSIn input) : SV_TARGET
 		float3 transmittance = saturate(exp(-water_depth * surface.extinction * color.a));
 		surface.refraction.a = waterfog;
 		surface.refraction.rgb *= transmittance;
+		// GG delta 1.24: tint the see-through (refraction) toward the Water Base Color with depth,
+		// so a chosen colour is visible even on fully-transparent water (color.a == 0) — clear
+		// shallows, coloured depths. xOceanWaterColorDepth 0 = off (stock).
+		surface.refraction.rgb = lerp(surface.refraction.rgb, color.rgb, saturate(abs(water_depth) * xOceanWaterColorDepth));
 		color.a = 1;
 	}
 	

@@ -29,6 +29,11 @@ CBUFFER(OceanCB, CBSLOT_OTHER_OCEAN)
 	float xOceanGridLen;
 	float xOceanFoamUnitScale;	// converts world units to the meters the foam math was tuned in (1 = stock meters; GGMAX passes ~0.0254 for inch-scaled worlds)
 	float xOceanFoamAmount;		// artistic multiplier on final foam intensity (1 = stock)
+
+	float xOceanWaterColorDepth;	// GG delta 1.24: tints the refraction (see-through) toward xOceanWaterColor with depth so the base colour shows on transparent water. 0 = off (stock)
+	float xOceanWCPad0;
+	float xOceanWCPad1;
+	float xOceanWCPad2;
 };
 
 #endif // WI_SHADERINTEROP_OCEAN_H

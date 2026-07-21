@@ -230,6 +230,16 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 Gid : SV_GroupID, uint groupIn
 		}
 	}
 	
+	// GG perf: a strand that isn't drawn this frame (distance/frustum culled, so NOT appended to the
+	// culled index buffer above) still ran the full billboard-write + physics below — pure waste, its
+	// output is never referenced by the draw. Skip that work for non-visible strands. The wave-atomic
+	// index append above already ran for every lane, so bailing here is wave-safe. Exceptions: on
+	// regenerate_frame every strand must build the static primitive buffer + seed its sim state. Drawn
+	// (visible) strands are untouched, so the rendered grass is byte-identical; a culled strand's sim
+	// state simply freezes until it re-enters view (imperceptible settle under wind, none when static).
+	if (!visible && !regenerate_frame)
+		return;
+
 	half len = lerp(1, rng.next_float(), saturate(xHairRandomness)) * strand_length;
 	len *= xHairLength;
 	len *= atlas_rect.size;

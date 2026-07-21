@@ -902,6 +902,8 @@ namespace wi::scene
 		shaderscene.weather.ocean.water_height = weather.oceanParameters.waterHeight;
 		shaderscene.weather.ocean.patch_size_rcp = 1.0f / weather.oceanParameters.patch_length;
 		shaderscene.weather.ocean.caustic_scale = weather.oceanParameters.caustic_scale;
+		shaderscene.weather.ocean.underwater_fog_density = weather.oceanParameters.underwater_fog_density;
+		shaderscene.weather.ocean.underwater_color = weather.oceanParameters.underwater_color;
 		shaderscene.weather.ocean.texture_displacementmap = device->GetDescriptorIndex(ocean.getDisplacementMap(), SubresourceType::SRV);
 		shaderscene.weather.ocean.texture_gradientmap = device->GetDescriptorIndex(ocean.getGradientMap(), SubresourceType::SRV);
 		shaderscene.weather.stars = weather.stars;

@@ -47,6 +47,15 @@ namespace wi
 			// otherwise also drives wave size, so you cannot enlarge one without the other.
 			// 1 = stock (ripple size welded to patch_length); <1 = larger ripples.
 			float caustic_scale = 1.0f;
+
+			// GG delta 1.23: underwater screen effect (underwaterCS) decoupled from the water
+			// SURFACE colour/alpha, so a designer can keep transparent surface water while still
+			// controlling how the SUBMERGED view fogs. underwater_fog_density 0 = fall back to
+			// waterColor.a (stock behaviour); >0 = independent fog. underwater_color = the colour
+			// the submerged view fogs toward (rgb; a unused). Both driven by GG's "Underwater
+			// Color" + "Underwater Fog" Water-panel controls.
+			float underwater_fog_density = 0.0f;
+			XMFLOAT4 underwater_color = XMFLOAT4(0.0f, 0.05f, 0.12f, 1.0f);
 		};
 		void Create(const OceanParameters& params);
 

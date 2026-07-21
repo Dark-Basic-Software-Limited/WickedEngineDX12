@@ -32,6 +32,14 @@ void main(uint3 DTid : SV_DispatchThreadID)
 
 	const float4 original_color = input.SampleLevel(sampler_linear_mirror, uv, 0);
 	float4 color = original_color;
+
+	// GG delta 1.23: the SUBMERGED view fogs using its OWN colour + density (underwater_color /
+	// underwater_fog_density), decoupled from the water SURFACE colour/alpha so a transparent
+	// surface can coexist with a properly-fogged underwater view. density <= 0 falls back to the
+	// stock behaviour (surface water_color / water_color.a).
+	const float  uw_density = ocean.underwater_fog_density > 0 ? ocean.underwater_fog_density : ocean.water_color.a;
+	const float3 uw_color   = ocean.underwater_fog_density > 0 ? ocean.underwater_color.rgb   : ocean.water_color.rgb;
+
 	if (world_pos.y < ocean_pos.y) // if below water surface, apply effects
 	{
 #if 0
@@ -67,10 +75,10 @@ void main(uint3 DTid : SV_DispatchThreadID)
 		float water_depth = ocean_pos.y - surface_position.y;
 		water_depth = max(min(distance_from_surface, ocean_dist), water_depth);
 
-		float waterfog = saturate(exp(-water_depth * ocean.water_color.a));
-		float3 transmittance = saturate(exp(-water_depth * ocean.extinction_color.rgb * ocean.water_color.a));
+		float waterfog = saturate(exp(-water_depth * uw_density));
+		float3 transmittance = saturate(exp(-water_depth * ocean.extinction_color.rgb * uw_density));
 		color.rgb *= transmittance;
-		color.rgb = lerp(ocean.water_color.rgb, color.rgb, waterfog);
+		color.rgb = lerp(uw_color, color.rgb, waterfog);
 		
 		//color = float4(1, 0, 0, 1);
 	}
@@ -79,7 +87,7 @@ void main(uint3 DTid : SV_DispatchThreadID)
 	float intersection_direction = world_pos.y - ocean_pos.y;
 	float intersection_distance = abs(intersection_direction);
 	float intersection_blend = saturate(exp(-intersection_distance * 100));
-	float3 intersection_color = ocean.water_color.rgb;
+	float3 intersection_color = uw_color;
 	color.rgb = lerp(color.rgb, intersection_color, intersection_blend);
 	
 	output[DTid.xy] = color;

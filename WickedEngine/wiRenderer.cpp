@@ -4751,18 +4751,20 @@ void UpdatePerFrameData(
 					for (uint32_t c = 0; c < cascade_count; ++c) st.update[c] = true;
 					if (!forceAll)
 					{
-						//production DX11 cadence: c0 every frame, then /2 /3 /4 /9
+						// Cascade-blend SYNC (fixes the "two terrain shapes" cliff-shadow flicker under
+						// delayed shadows). The lighting shader deterministically BLENDS adjacent cascades
+						// in the edge-fade band, so the two cascades a boundary pixel lerps between must
+						// hold the SAME-age snapshot — otherwise the blend oscillates between their
+						// silhouettes (which differ by terrain LOD floor and, during VT re-stream, by the
+						// per-frame IsGenerating/IsVisible chunk set) even at a static camera. The old
+						// per-cascade /2 /3 /4 /9 cadence + load-leveling deliberately DESYNCED cascades
+						// 1/2/3 — exactly what produced the flicker. Instead: cascade 0 every frame, and
+						// cascades 1..N together every OTHER frame, so every far-cascade boundary is
+						// always self-consistent while still ~halving the staggered cascades' cost.
 						const int frame = (int)fc;
-						if (cascade_count > 1 && (frame % 2) != 0) st.update[1] = false;
-						if (cascade_count > 2 && (frame % 3) != 0) st.update[2] = false;
-						if (cascade_count > 3 && (frame % 4) != 0) st.update[3] = false;
-						if (cascade_count > 4 && (frame % 9) != 0) st.update[4] = false;
-						//load leveling (DX11): avoid refreshing cascades 1,2,3 in the
-						//same frame; never let all three skip together either
-						if (cascade_count > 3)
+						if ((frame % 2) != 0)
 						{
-							if (st.update[1] && st.update[2] && st.update[3]) st.update[3] = false;
-							else if (!st.update[1] && !st.update[2] && !st.update[3]) st.update[3] = true;
+							for (uint32_t c = 1; c < cascade_count; ++c) st.update[c] = false;
 						}
 						//camera translation override (64 world units, DX11): a real move
 						//refreshes stale cascades immediately

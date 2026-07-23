@@ -169,6 +169,7 @@ static int localShadowBudget = -1;
 static int localShadowGrantedCount = 0;   // local casters granted a shadow slot this frame
 static int localShadowCappedCount = 0;    // local casters denied a slot (rendered fully lit)
 static int localShadowRenderedCount = 0;  // local shadows actually re-rendered this frame
+static wi::vector<wi::ecs::Entity> localShadowGrantedPrev; // last frame's granted set (Phase 1.5 hysteresis)
 
 GPUBuffer indirectDebugStatsReadback[GraphicsDevice::GetBufferCount()];
 bool indirectDebugStatsReadback_available[GraphicsDevice::GetBufferCount()] = {};
@@ -4009,7 +4010,7 @@ void UpdateVisibility(Visibility& vis)
 		localShadowRenderedCount = 0;
 		if (localShadowBudget >= 0)
 		{
-			struct ShadowCand { uint32_t idx; float score; };
+			struct ShadowCand { uint32_t idx; wi::ecs::Entity ent; float score; };
 			wi::vector<ShadowCand> cands;
 			cands.reserve(vis.visibleLights.size());
 			for (uint32_t li : vis.visibleLights)
@@ -4021,7 +4022,16 @@ void UpdateVisibility(Visibility& vis)
 				if (lt != LightComponent::POINT && lt != LightComponent::SPOT && lt != LightComponent::RECTANGLE)
 					continue; // never cap the directional sun
 				const float d = std::max(0.001f, wi::math::Distance(vis.camera->Eye, L.position));
-				cands.push_back({ li, L.GetRange() / d }); // priority: larger range / nearer = keep
+				ShadowCand c;
+				c.idx = li;
+				c.ent = vis.scene->lights.GetEntity(li);
+				c.score = L.GetRange() / d; // priority: larger range / nearer = keep
+				// Phase 1.5 hysteresis: an incumbent (granted last frame) keeps its slot unless a
+				// challenger beats it by >15%. Bias its score up so the granted set is stable under
+				// camera motion (no shadow-pop). Keyed on Entity, not the reused per-frame light index.
+				for (size_t p = 0; p < localShadowGrantedPrev.size(); ++p)
+					if (localShadowGrantedPrev[p] == c.ent) { c.score *= 1.15f; break; }
+				cands.push_back(c);
 			}
 			const int budget = std::max(0, localShadowBudget);
 			if ((int)cands.size() > budget)
@@ -4037,7 +4047,16 @@ void UpdateVisibility(Visibility& vis)
 					localGranted[cands[i].idx] = 0; // denied -> no rect -> rendered unshadowed
 				localShadowCappedCount = (int)cands.size() - budget;
 			}
-			localShadowGrantedCount = std::min((int)cands.size(), budget);
+			const int grantN = std::min((int)cands.size(), budget);
+			localShadowGrantedCount = grantN;
+			// Remember this frame's granted set for next-frame hysteresis.
+			localShadowGrantedPrev.clear();
+			for (int i = 0; i < grantN; ++i)
+				localShadowGrantedPrev.push_back(cands[i].ent);
+		}
+		else
+		{
+			localShadowGrantedPrev.clear();
 		}
 
 		while (iterative_scaling > 0.03f)

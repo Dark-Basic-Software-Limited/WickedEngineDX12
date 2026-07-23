@@ -10,5 +10,7 @@ IF ERRORLEVEL 1 (
     exit /b 1
 ) ELSE (
     echo BUILD SUCCEEDED
+    echo Refreshing stale engine shader .cso ...
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0refresh_shaders.ps1"
     exit /b 0
 )

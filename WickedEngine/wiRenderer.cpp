@@ -162,6 +162,14 @@ Texture shadowMapAtlas_Transparent;
 int max_shadow_resolution_2D = 1024;
 int max_shadow_resolution_cube = 256;
 
+// GG Phase 1 (point-light shadow budget): cap the number of local (point/spot/rect) shadow
+// casters that receive an atlas slot per frame, reviving the DX11 iShadowPointMax behaviour the
+// atlas rewrite dropped. -1 = uncapped (stock engine, byte-identical); 0 = local shadows off.
+static int localShadowBudget = -1;
+static int localShadowGrantedCount = 0;   // local casters granted a shadow slot this frame
+static int localShadowCappedCount = 0;    // local casters denied a slot (rendered fully lit)
+static int localShadowRenderedCount = 0;  // local shadows actually re-rendered this frame
+
 GPUBuffer indirectDebugStatsReadback[GraphicsDevice::GetBufferCount()];
 bool indirectDebugStatsReadback_available[GraphicsDevice::GetBufferCount()] = {};
 
@@ -3991,6 +3999,47 @@ void UpdateVisibility(Visibility& vis)
 		auto range = wi::profiler::BeginRangeCPU("Shadowmap packing");
 		float iterative_scaling = 1;
 
+		// --- GG Phase 1: cap local (point/spot/rect) shadow casters to iShadowPointMax. Built ONCE
+		// (not per iterative_scaling retry). Denied lights get no atlas rect and have their
+		// CAST_SHADOW flag withheld (below), so they render fully lit (DX11 iCulledPointShadows look).
+		// localShadowBudget < 0 => uncapped (stock, byte-identical).
+		wi::vector<uint8_t> localGranted(vis.scene->lights.GetCount(), 1); // 1 = may receive a shadow rect
+		localShadowGrantedCount = 0;
+		localShadowCappedCount = 0;
+		localShadowRenderedCount = 0;
+		if (localShadowBudget >= 0)
+		{
+			struct ShadowCand { uint32_t idx; float score; };
+			wi::vector<ShadowCand> cands;
+			cands.reserve(vis.visibleLights.size());
+			for (uint32_t li : vis.visibleLights)
+			{
+				const LightComponent& L = vis.scene->lights[li];
+				if (L.IsInactive() || !L.IsCastingShadow() || L.IsStatic())
+					continue;
+				const auto lt = L.GetType();
+				if (lt != LightComponent::POINT && lt != LightComponent::SPOT && lt != LightComponent::RECTANGLE)
+					continue; // never cap the directional sun
+				const float d = std::max(0.001f, wi::math::Distance(vis.camera->Eye, L.position));
+				cands.push_back({ li, L.GetRange() / d }); // priority: larger range / nearer = keep
+			}
+			const int budget = std::max(0, localShadowBudget);
+			if ((int)cands.size() > budget)
+			{
+				if (budget > 0)
+				{
+					std::nth_element(cands.begin(), cands.begin() + budget, cands.end(),
+						[](const ShadowCand& a, const ShadowCand& b) {
+							return a.score > b.score || (a.score == b.score && a.idx < b.idx);
+						});
+				}
+				for (size_t i = (size_t)budget; i < cands.size(); ++i)
+					localGranted[cands[i].idx] = 0; // denied -> no rect -> rendered unshadowed
+				localShadowCappedCount = (int)cands.size() - budget;
+			}
+			localShadowGrantedCount = std::min((int)cands.size(), budget);
+		}
+
 		while (iterative_scaling > 0.03f)
 		{
 			vis.shadow_packer.clear();
@@ -4009,6 +4058,8 @@ void UpdateVisibility(Visibility& vis)
 					continue;
 				if (!light.IsCastingShadow() || light.IsStatic())
 					continue;
+				if (localShadowBudget >= 0 && light.GetType() != LightComponent::DIRECTIONAL && localGranted[lightIndex] == 0)
+					continue; // GG Phase 1: denied by the local-shadow budget -> no rect -> unshadowed
 
 				const float dist = wi::math::Distance(vis.camera->Eye, light.position);
 				const float range = light.GetRange();
@@ -4808,7 +4859,7 @@ void UpdatePerFrameData(
 				}
 			}
 
-			if (light.IsCastingShadow())
+			if (light.IsCastingShadow() && (localShadowBudget < 0 || shadow_rect.w > 0))
 			{
 				shaderentity.SetFlags(ENTITY_FLAG_LIGHT_CASTING_SHADOW);
 			}
@@ -4894,7 +4945,7 @@ void UpdatePerFrameData(
 				XMStoreFloat4x4(&matrixArray[matrixCounter++], shcam.view_projection);
 			}
 
-			if (light.IsCastingShadow())
+			if (light.IsCastingShadow() && (localShadowBudget < 0 || shadow_rect.w > 0))
 			{
 				shaderentity.SetFlags(ENTITY_FLAG_LIGHT_CASTING_SHADOW);
 			}
@@ -4971,7 +5022,7 @@ void UpdatePerFrameData(
 				shaderentity.SetCubeRemapFar(cubemapDepthRemapFar);
 			}
 
-			if (light.IsCastingShadow())
+			if (light.IsCastingShadow() && (localShadowBudget < 0 || shadow_rect.w > 0))
 			{
 				shaderentity.SetFlags(ENTITY_FLAG_LIGHT_CASTING_SHADOW);
 			}
@@ -5044,7 +5095,7 @@ void UpdatePerFrameData(
 				XMStoreFloat4x4(&matrixArray[matrixCounter++], shcam.view_projection);
 			}
 
-			if (light.IsCastingShadow())
+			if (light.IsCastingShadow() && (localShadowBudget < 0 || shadow_rect.w > 0))
 			{
 				shaderentity.SetFlags(ENTITY_FLAG_LIGHT_CASTING_SHADOW);
 			}
@@ -6746,6 +6797,16 @@ void SetShadowPropsCube(int resolution)
 {
 	max_shadow_resolution_cube = resolution;
 }
+void SetLocalShadowBudget(int maxLocalShadows)
+{
+	localShadowBudget = maxLocalShadows;
+}
+void GetLocalShadowStats(int& granted, int& capped, int& rendered)
+{
+	granted = localShadowGrantedCount;
+	capped = localShadowCappedCount;
+	rendered = localShadowRenderedCount;
+}
 
 void DrawShadowmaps(
 	const Visibility& vis,
@@ -6872,10 +6933,15 @@ void DrawShadowmaps(
 		if (light.IsInactive())
 			continue;
 
-		const bool shadow = light.IsCastingShadow() && !light.IsStatic();
+		const wi::rectpacker::Rect& shadow_rect = vis.visibleLightShadowRects[lightIndex];
+		// GG Phase 1: a local light denied a slot by the budget has rect.w==0 -> skip its per-frame
+		// shadow render entirely (this is where the ~24ms is reaped). Directional is never capped.
+		const bool shadow = light.IsCastingShadow() && !light.IsStatic()
+			&& (localShadowBudget < 0 || light.GetType() == LightComponent::DIRECTIONAL || shadow_rect.w > 0);
 		if (!shadow)
 			continue;
-		const wi::rectpacker::Rect& shadow_rect = vis.visibleLightShadowRects[lightIndex];
+		if (light.GetType() != LightComponent::DIRECTIONAL)
+			localShadowRenderedCount++;
 
 		renderQueue.init();
 		renderQueue_transparent.init();

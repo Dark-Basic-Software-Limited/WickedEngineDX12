@@ -1128,6 +1128,9 @@ namespace wi::renderer
 
 	void SetShadowProps2D(int max_resolution);
 	void SetShadowPropsCube(int max_resolution);
+	// GG: cap local (point/spot/rect) shadow casters per frame (revives iShadowPointMax). -1 uncapped, 0 off.
+	void SetLocalShadowBudget(int maxLocalShadows);
+	void GetLocalShadowStats(int& granted, int& capped, int& rendered);
 
 	enum WIREFRAME_MODE
 	{

@@ -180,6 +180,11 @@ static uint64_t localShadowDecisionFrame = ~0ull;   // frame the Phase 2 decisio
 struct LocalShadowSlot { wi::ecs::Entity ent = wi::ecs::INVALID_ENTITY; int rx = 0, ry = 0, rw = 0, rh = 0; XMFLOAT3 pos = {}; float range = 0; };
 static wi::vector<LocalShadowSlot> localShadowCache; // last-rendered granted layout (sorted by Entity)
 static uint32_t localShadowCacheAtlasW = 0, localShadowCacheAtlasH = 0;
+// GGMAX far-cascade caster cull (DX11 parity): objects only shadow into the near directional cascades;
+// the far cascades (>=3) render terrain only, and the 3rd cascade drops sub-~5m objects. The far cascades
+// cover huge distances where object shadows are imperceptible - this is the bulk of the every-other-frame
+// staggered-cascade CPU spike. On by default (the DX11 build shipped it); toggle for A/B.
+static bool shadowFarCascadeCull = true;
 
 GPUBuffer indirectDebugStatsReadback[GraphicsDevice::GetBufferCount()];
 bool indirectDebugStatsReadback_available[GraphicsDevice::GetBufferCount()] = {};
@@ -6914,6 +6919,14 @@ void InvalidateLocalShadows()
 {
 	localShadowInvalidate = true; // level load / settings / resolution change -> refresh all cached local shadows
 }
+void SetShadowFarCascadeCull(bool value)
+{
+	shadowFarCascadeCull = value;
+}
+bool GetShadowFarCascadeCull()
+{
+	return shadowFarCascadeCull;
+}
 
 void DrawShadowmaps(
 	const Visibility& vis,
@@ -7084,6 +7097,10 @@ void DrawShadowmaps(
 			SHCAM* shcams = (SHCAM*)alloca(sizeof(SHCAM) * cascade_count);
 			CreateDirLightShadowCams(light, *vis.camera, shcams, cascade_count, shadow_rect, vis.scene->character_dedicated_shadows.data(), vis.scene->character_dedicated_shadows.size());
 
+			// GGMAX far-cascade caster cull (ported from the DX11 build): objects only shadow into the
+			// near cascades. Disabled when character-dedicated shadows append extra cascades (they need objects).
+			const bool ggCullFarCascades = shadowFarCascadeCull && vis.scene->character_dedicated_shadows.empty();
+
 			for (size_t i = 0; i < vis.scene->aabb_objects.size(); ++i)
 			{
 				const AABB& aabb = vis.scene->aabb_objects[i];
@@ -7104,6 +7121,20 @@ void DrawShadowmaps(
 							//GGMAX delayed cascades: no instances for skipped cascades
 							if (ggDelayedShadows && cascade < DelayedShadowCascadeState::MAX_CASCADES && !delayedShadowState.update[cascade])
 								continue;
+							// GGMAX far-cascade caster cull (DX11 parity): keep object shadows out of the far cascades.
+							if (ggCullFarCascades)
+							{
+								if (cascade >= 3)
+									continue; // far cascades -> terrain-only shadows
+								if (cascade == 2)
+								{
+									const float sx = aabb._max.x - aabb._min.x;
+									const float sy = aabb._max.y - aabb._min.y;
+									const float sz = aabb._max.z - aabb._min.z;
+									if (sx * sy < 38000.0f && sx * sz < 38000.0f && sy * sz < 38000.0f)
+										continue; // 3rd cascade -> large objects only (~5m)
+								}
+							}
 							if ((cascade < (cascade_count - object.cascadeMask)) && shcams[cascade].frustum.CheckBoxFast(aabb))
 							{
 								camera_mask |= 1 << cascade;

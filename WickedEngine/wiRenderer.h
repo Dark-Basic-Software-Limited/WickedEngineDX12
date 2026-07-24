@@ -1135,6 +1135,9 @@ namespace wi::renderer
 	void SetLocalShadowCachingEnabled(bool value);
 	bool GetLocalShadowCachingEnabled();
 	void InvalidateLocalShadows();
+	// GG: keep object shadows out of the far directional cascades (DX11 parity). On by default.
+	void SetShadowFarCascadeCull(bool value);
+	bool GetShadowFarCascadeCull();
 
 	enum WIREFRAME_MODE
 	{

@@ -126,6 +126,14 @@ bool variableRateShadingClassificationDebug = false;
 float GameSpeed = 1;
 bool debugLightCulling = false;
 bool occlusionCulling = true;
+// GGMAX delta 1.30: apparent-size object cull. Threshold = (world bounding radius / camera distance)
+// cutoff, stored as fixed-point micro-units (tangent * 1e6) so it crosses the game/engine boundary as a
+// plain uint32 atomic. 0 = disabled. Set per-frame by the game (MasterRenderer::Update) from the editor
+// "Apparent Size" slider. Consumed in UpdateVisibility's object cull loop below: an object that passes the
+// frustum but whose world AABB is too small for its distance (i.e. would render as a distant speck) is
+// dropped from visibleObjects. Scale-invariant: the world AABB radius already bakes in original size x
+// modified scale, and dividing by distance makes it a true on-screen apparent size.
+std::atomic<uint32_t> gg_apparent_cull_bits{ 0 };
 bool temporalAA = false;
 bool temporalAADEBUG = false;
 uint32_t raytraceBounceCount = 8;
@@ -3760,6 +3768,15 @@ void UpdateVisibility(Visibility& vis)
 		// Cull objects:
 		const uint32_t object_loop = (uint32_t)std::min(vis.scene->aabb_objects.size(), vis.scene->objects.GetCount());
 		vis.visibleObjects.resize(object_loop);
+
+		// GGMAX delta 1.30: apparent-size cull. Precompute the squared tangent threshold + camera eye once
+		// (the per-object test then needs no sqrt). tangent = radius/distance cutoff; 0 = disabled. Only the
+		// main view is culled this way (reflection/shadow passes clear ALLOW_OBJECTS or use their own path,
+		// but the gate below is harmless for any view since it never removes near/large objects).
+		const float apparentCullTangent = (float)gg_apparent_cull_bits.load(std::memory_order_relaxed) * 1e-6f;
+		const float apparentCullTangentSq = apparentCullTangent * apparentCullTangent;
+		const XMFLOAT3 apparentCullEye = vis.camera->Eye;
+
 		wi::jobsystem::Dispatch(ctx, object_loop, groupSize, [&](wi::jobsystem::JobArgs args) {
 
 			// Setup stream compaction:
@@ -3771,7 +3788,23 @@ void UpdateVisibility(Visibility& vis)
 
 			const AABB& aabb = vis.scene->aabb_objects[args.jobIndex];
 
-			if ((aabb.layerMask & vis.layerMask) && vis.frustum.CheckBoxFast(aabb))
+			bool visible = (aabb.layerMask & vis.layerMask) && vis.frustum.CheckBoxFast(aabb);
+
+			// GGMAX delta 1.30: apparent-size cull — drop objects that would render as a distant speck.
+			// Cull when (radius/distance) < threshold, i.e. radius^2 < threshold^2 * distance^2. The
+			// distSq > radiusSq guard keeps objects the camera is inside/next-to always visible.
+			if (visible && apparentCullTangentSq > 0.0f)
+			{
+				const float distSq = wi::math::DistanceSquared(apparentCullEye, aabb.getCenter());
+				const float radius = aabb.getRadius();
+				const float radiusSq = radius * radius;
+				if (distSq > radiusSq && radiusSq < apparentCullTangentSq * distSq)
+				{
+					visible = false;
+				}
+			}
+
+			if (visible)
 			{
 				// Local stream compaction:
 				stream_compaction.list[stream_compaction.count++] = args.groupIndex;

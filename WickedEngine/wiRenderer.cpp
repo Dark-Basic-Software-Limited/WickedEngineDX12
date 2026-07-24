@@ -170,6 +170,16 @@ static int localShadowGrantedCount = 0;   // local casters granted a shadow slot
 static int localShadowCappedCount = 0;    // local casters denied a slot (rendered fully lit)
 static int localShadowRenderedCount = 0;  // local shadows actually re-rendered this frame
 static wi::vector<wi::ecs::Entity> localShadowGrantedPrev; // last frame's granted set (Phase 1.5 hysteresis)
+// Phase 2 static-cache: when the granted local-shadow layout is unchanged, LOAD (persist) the shadow
+// atlas and skip re-rendering the cached local shadows. Any structural change forces one full-render
+// frame that repopulates the cache. All-or-nothing: a static torch bank converges to 0 re-renders/frame.
+static bool localShadowCachingEnabled = false;      // master switch (game enables it when the cap is active)
+static bool localAtlasFullClear = true;             // this frame: whole atlas clears + all locals re-render
+static bool localShadowInvalidate = true;           // settings/level change -> next decision forces a full clear
+static uint64_t localShadowDecisionFrame = ~0ull;   // frame the Phase 2 decision was produced
+struct LocalShadowSlot { wi::ecs::Entity ent = wi::ecs::INVALID_ENTITY; int rx = 0, ry = 0, rw = 0, rh = 0; XMFLOAT3 pos = {}; float range = 0; };
+static wi::vector<LocalShadowSlot> localShadowCache; // last-rendered granted layout (sorted by Entity)
+static uint32_t localShadowCacheAtlasW = 0, localShadowCacheAtlasH = 0;
 
 GPUBuffer indirectDebugStatsReadback[GraphicsDevice::GetBufferCount()];
 bool indirectDebugStatsReadback_available[GraphicsDevice::GetBufferCount()] = {};
@@ -4216,6 +4226,67 @@ void UpdateVisibility(Visibility& vis)
 				iterative_scaling = 0.0; //PE: fix - endless loop if some lights do not have shadows.
 			}
 		}
+		// --- GG Phase 2: static-cache decision. Detect any structural change in the granted local-shadow
+		// layout since the last rendered frame. If unchanged, DrawShadowmaps LOADs the atlas and skips
+		// re-rendering the cached local shadows. Any change -> one full-render frame that repopulates.
+		if (localShadowCachingEnabled && localShadowBudget >= 0)
+		{
+			static wi::vector<LocalShadowSlot> cur;
+			cur.clear();
+			for (uint32_t li : vis.visibleLights)
+			{
+				const LightComponent& L = vis.scene->lights[li];
+				if (L.IsInactive() || !L.IsCastingShadow() || L.IsStatic())
+					continue;
+				const auto lt = L.GetType();
+				if (lt != LightComponent::POINT && lt != LightComponent::SPOT && lt != LightComponent::RECTANGLE)
+					continue;
+				if (localGranted[li] == 0)
+					continue; // denied by the budget -> not cached
+				const wi::rectpacker::Rect& r = vis.visibleLightShadowRects[li];
+				if (r.w <= 0)
+					continue; // did not pack
+				LocalShadowSlot s;
+				s.ent = vis.scene->lights.GetEntity(li);
+				s.rx = r.x; s.ry = r.y; s.rw = r.w; s.rh = r.h;
+				s.pos = L.position; s.range = L.GetRange();
+				cur.push_back(s);
+			}
+			std::sort(cur.begin(), cur.end(),
+				[](const LocalShadowSlot& a, const LocalShadowSlot& b) { return a.ent < b.ent; });
+			bool changed = localShadowInvalidate
+				|| localShadowCacheAtlasW != shadowMapAtlas.desc.width
+				|| localShadowCacheAtlasH != shadowMapAtlas.desc.height
+				|| cur.size() != localShadowCache.size();
+			if (!changed)
+			{
+				for (size_t i = 0; i < cur.size(); ++i)
+				{
+					const LocalShadowSlot& a = cur[i];
+					const LocalShadowSlot& b = localShadowCache[i];
+					if (a.ent != b.ent || a.rx != b.rx || a.ry != b.ry || a.rw != b.rw || a.rh != b.rh
+						|| a.pos.x != b.pos.x || a.pos.y != b.pos.y || a.pos.z != b.pos.z || a.range != b.range)
+					{
+						changed = true;
+						break;
+					}
+				}
+			}
+			localAtlasFullClear = changed;
+			if (changed)
+			{
+				localShadowCache = cur; // this frame re-renders the whole set -> adopt as the cached layout
+				localShadowCacheAtlasW = shadowMapAtlas.desc.width;
+				localShadowCacheAtlasH = shadowMapAtlas.desc.height;
+				localShadowInvalidate = false;
+			}
+			localShadowDecisionFrame = device->GetFrameCount();
+		}
+		else
+		{
+			localAtlasFullClear = false;
+			localShadowInvalidate = true; // re-enabling caching starts with a clean full clear
+		}
 		wi::profiler::EndRange(range);
 	}
 
@@ -4815,7 +4886,8 @@ void UpdatePerFrameData(
 						|| st.rectX != shadow_rect.x || st.rectY != shadow_rect.y
 						|| st.rectW != shadow_rect.w || st.rectH != shadow_rect.h
 						|| st.atlasWidth != shadowMapAtlas.desc.width
-						|| st.atlasHeight != shadowMapAtlas.desc.height;
+						|| st.atlasHeight != shadowMapAtlas.desc.height
+						|| (localShadowCachingEnabled && localAtlasFullClear); // Phase 2: a local full-clear also re-renders the sun consistently
 					st.fullClearThisFrame = forceAll;
 
 					for (uint32_t c = 0; c < cascade_count; ++c) st.update[c] = true;
@@ -6826,6 +6898,22 @@ void GetLocalShadowStats(int& granted, int& capped, int& rendered)
 	capped = localShadowCappedCount;
 	rendered = localShadowRenderedCount;
 }
+void SetLocalShadowCachingEnabled(bool value)
+{
+	if (localShadowCachingEnabled != value)
+	{
+		localShadowCachingEnabled = value;
+		localShadowInvalidate = true; // toggling caching -> force a clean full clear next decision
+	}
+}
+bool GetLocalShadowCachingEnabled()
+{
+	return localShadowCachingEnabled;
+}
+void InvalidateLocalShadows()
+{
+	localShadowInvalidate = true; // level load / settings / resolution change -> refresh all cached local shadows
+}
 
 void DrawShadowmaps(
 	const Visibility& vis,
@@ -6872,7 +6960,16 @@ void DrawShadowmaps(
 	const bool ggDelayedShadows = delayedShadowCascadesEnabled
 		&& delayedShadowState.active
 		&& delayedShadowState.decisionFrame == device->GetFrameCount();
-	const bool ggLoadAtlas = ggDelayedShadows && !delayedShadowState.fullClearThisFrame;
+	// GG Phase 2 static-cache: persist the atlas when the local layout is unchanged so cached local
+	// shadows survive. A full clear from EITHER the sun's delayed cascades OR a local structural change
+	// forces everything to re-render this frame (consistent). When caching is off this is byte-identical
+	// to the old ggLoadAtlas = ggDelayedShadows && !fullClearThisFrame.
+	const bool wholeAtlasClear = localAtlasFullClear
+		|| (ggDelayedShadows && delayedShadowState.fullClearThisFrame);
+	const bool localCachingActive = localShadowCachingEnabled
+		&& localShadowDecisionFrame == device->GetFrameCount()
+		&& !wholeAtlasClear;
+	const bool ggLoadAtlas = (ggDelayedShadows || localCachingActive) && !wholeAtlasClear;
 
 	const RenderPassImage rp[] = {
 		RenderPassImage::DepthStencil(
@@ -6920,6 +7017,8 @@ void DrawShadowmaps(
 			if (light.IsInactive() || !light.IsCastingShadow() || light.IsStatic())
 				continue;
 			const wi::rectpacker::Rect& r = vis.visibleLightShadowRects[lightIndex];
+			if (light.GetType() != LightComponent::DIRECTIONAL && localCachingActive)
+				continue; // GG Phase 2: cached local shadow -> don't clear (keep last frame's texels)
 			switch (light.GetType())
 			{
 			case LightComponent::DIRECTIONAL:
@@ -6927,8 +7026,8 @@ void DrawShadowmaps(
 				const uint32_t cc = std::min(uint(light.cascade_distances.size() + vis.scene->character_dedicated_shadows.size()), max_viewport_count);
 				for (uint32_t c = 0; c < cc; ++c)
 				{
-					if (c < DelayedShadowCascadeState::MAX_CASCADES && !delayedShadowState.update[c])
-						continue;
+					if (ggDelayedShadows && c < DelayedShadowCascadeState::MAX_CASCADES && !delayedShadowState.update[c])
+						continue; // Phase 2: only skip cascade clears when the SUN's delayed path is active
 					ggClearRect(r.x + (int)c * r.w, r.y, r.w, r.h);
 				}
 			}
@@ -6960,7 +7059,11 @@ void DrawShadowmaps(
 		if (!shadow)
 			continue;
 		if (light.GetType() != LightComponent::DIRECTIONAL)
+		{
+			if (localCachingActive)
+				continue; // GG Phase 2: cached this frame -> reuse atlas texels via LOAD
 			localShadowRenderedCount++;
+		}
 
 		renderQueue.init();
 		renderQueue_transparent.init();

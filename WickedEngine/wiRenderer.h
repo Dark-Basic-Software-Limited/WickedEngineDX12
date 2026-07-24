@@ -1131,6 +1131,10 @@ namespace wi::renderer
 	// GG: cap local (point/spot/rect) shadow casters per frame (revives iShadowPointMax). -1 uncapped, 0 off.
 	void SetLocalShadowBudget(int maxLocalShadows);
 	void GetLocalShadowStats(int& granted, int& capped, int& rendered);
+	// GG Phase 2: cache static local shadows (render once, reuse atlas texels until something changes).
+	void SetLocalShadowCachingEnabled(bool value);
+	bool GetLocalShadowCachingEnabled();
+	void InvalidateLocalShadows();
 
 	enum WIREFRAME_MODE
 	{

@@ -121,7 +121,15 @@ enum TEXTURESLOT
 	TEXTURESLOT_COUNT
 };
 
-static const float SVT_MIP_BIAS = -2.0;
+// GG delta: stock Wicked biases SVT sampling -2.0 (two full mip levels SHARPER than the
+// Nyquist-correct LOD) for crispness. On GameGuru's virtual-textured terrain that over-sharpening
+// under-samples the ground at mid/long range, so it "swims"/shimmers as the camera creeps. The SVT
+// fetches a fixed LOD via SampleLevel(), so THIS bias — not the material sampler's aniso/mip_lod_bias
+// (which SampleLevel ignores) — is what drives terrain mip selection AND the streaming feedback,
+// keeping them in sync. Set to 0.0 (Nyquist-correct): the point where mip-based swim can't occur,
+// while the near field stays crisp. User-tuned on TESTPRO1 (A/B'd -1.0/+1.0/0.0). Toward -2.0 = more
+// crispness + more swim; toward +1.0 = more stable but the foreground softens too.
+static const float SVT_MIP_BIAS = 0.0;
 static const uint SVT_TILE_SIZE = 256u;
 static const uint SVT_TILE_BORDER = 4u;
 static const uint SVT_TILE_SIZE_PADDED = SVT_TILE_SIZE + SVT_TILE_BORDER * 2;

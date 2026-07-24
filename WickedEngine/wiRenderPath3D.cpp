@@ -739,8 +739,23 @@ namespace wi
 		camera->texture_normal_index = device->GetDescriptorIndex(&visibilityResources.texture_normals, SubresourceType::SRV);
 		camera->texture_roughness_index = device->GetDescriptorIndex(&visibilityResources.texture_roughness, SubresourceType::SRV);
 		camera->buffer_entitytiles_index = device->GetDescriptorIndex(&tiledLightResources.entityTiles, SubresourceType::SRV);
-		camera->texture_reflection_index = device->GetDescriptorIndex(&rtReflection_resolved, SubresourceType::SRV);
-		camera->texture_reflection_depth_index = device->GetDescriptorIndex(&depthBuffer_Reflection_resolved, SubresourceType::SRV);
+		// GG delta: guard the planar-reflection descriptor index with the SAME condition that gates the
+		// planar reflection render below (getReflectionsEnabled() && IsRequestedPlanarReflections()). Without
+		// this, turning reflections OFF left texture_reflection_index pointing at rtReflection_resolved, which
+		// setReflectionsEnabled(false) does NOT free and which is no longer rendered -> the ocean PS took its
+		// planar branch and sampled stale/uninitialised GPU memory (bright blocky garbage on the water).
+		// Forcing -1 when off makes oceanSurfacePS fall into its EnvironmentReflection_Global fallback (reflect
+		// the sky/global probe) — stable, ~free, and matches how DX11 (getTransparent() bind) behaved.
+		if (getReflectionsEnabled() && visibility_main.IsRequestedPlanarReflections())
+		{
+			camera->texture_reflection_index = device->GetDescriptorIndex(&rtReflection_resolved, SubresourceType::SRV);
+			camera->texture_reflection_depth_index = device->GetDescriptorIndex(&depthBuffer_Reflection_resolved, SubresourceType::SRV);
+		}
+		else
+		{
+			camera->texture_reflection_index = -1;
+			camera->texture_reflection_depth_index = -1;
+		}
 		camera->texture_refraction_index = device->GetDescriptorIndex(&rtSceneCopy, SubresourceType::SRV);
 		camera->texture_waterriples_index = device->GetDescriptorIndex(&rtWaterRipple, SubresourceType::SRV);
 		camera->texture_ao_index = device->GetDescriptorIndex(&rtAO, SubresourceType::SRV);

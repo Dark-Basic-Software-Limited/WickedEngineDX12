@@ -1928,6 +1928,16 @@ namespace wi::scene
 		}
 	}
 
+	// GGMAX delta 1.29 — wire the editor "Lower Animation & LUA Speed" 30fps animation throttle.
+	// The throttle logic already lived in RunAnimationUpdateSystem behind a hardcoded static=0 (unwired
+	// after the old game-side GGAnimBridge was removed for being too slow, 89873913). These flags let the
+	// game (MasterRenderer::Update) drive it from the checkbox, set once per frame BEFORE Scene::Update
+	// runs the animation jobs. Parity uses a real per-frame counter (the old lambda-static iAnimFrames
+	// incremented per-job across worker threads = racy, non-deterministic skip).
+	std::atomic<uint32_t> gg_anim30fps_enabled{ 0 };  // 1 = throttle eligible armatures to ~30fps
+	std::atomic<uint32_t> gg_anim30fps_frame{ 0 };    // monotonic per-frame counter for even/odd parity
+	std::atomic<uint32_t> gg_anim30fps_dist2{ 0 };    // (c) squared dist threshold in scene units; 0 = throttle all, >0 = only beyond it
+
 	void Scene::RunAnimationUpdateSystem(wi::jobsystem::context& ctx)
 	{
 		auto range = wi::profiler::BeginRangeCPU("Animations");
@@ -1938,14 +1948,20 @@ namespace wi::scene
 
 			//GGMAX
 			static uint32_t iCulledAnimations = 0;
-			static uint32_t bEnable30FpsAnimations = 0;
+			// GGMAX delta 1.29: was a hardcoded static=0 (unwired). Now driven by the editor
+			// "Lower Animation & LUA Speed" checkbox via the game (gg_anim30fps_* set each frame).
+			const uint32_t bEnable30FpsAnimations = gg_anim30fps_enabled.load(std::memory_order_relaxed);
 			static uint32_t bEnableAnimationCulling = 1;
 			//static uint32_t bEnableObjectCulling = 1;
 
 			//GGMAX
 			iCulledAnimations = 0;
-			static uint32_t iAnimFrames = 0;
-			iAnimFrames++;
+			// Deterministic every-other-frame parity from a real per-frame counter set by the game,
+			// NOT the old lambda-static iAnimFrames (which incremented per-job across worker threads = racy).
+			const uint32_t animParityFrame = gg_anim30fps_frame.load(std::memory_order_relaxed);
+			const uint32_t animThrottleDist2 = gg_anim30fps_dist2.load(std::memory_order_relaxed);
+			// (c) main-view camera position, read once per job for the distance gate (0 threshold = gate off).
+			const XMFLOAT3 animThrottleCamEye = (animThrottleDist2 > 0) ? GetCamera().Eye : XMFLOAT3(0, 0, 0);
 			// extra loop to process primary animations, before allowing secondary to 'steal' the timer value to sync child animations to primary ones
 			for (int handleprimaryandsecondary = 0; handleprimaryandsecondary < 2; handleprimaryandsecondary++)
 			{
@@ -1960,7 +1976,24 @@ namespace wi::scene
 					if (animation.updateonce) bResetKeys = true;
 					if (bEnable30FpsAnimations && animation.updateonce == false)
 					{
-						if ((iAnimFrames + animation_index) % 2 == 0)
+						// (c) distance gate: with a threshold set, keep near-camera armatures at full rate and
+						// only throttle distant ones (matches DX11 intent; avoids choppy hero characters).
+						bool bThrottleEligible = true;
+						if (animThrottleDist2 > 0)
+						{
+							const size_t oi = objects.GetIndex(animation.objectIndex);
+							if (oi < aabb_objects.size())
+							{
+								const XMFLOAT3 c = aabb_objects[oi].getCenter();
+								const float ddx = c.x - animThrottleCamEye.x;
+								const float ddy = c.y - animThrottleCamEye.y;
+								const float ddz = c.z - animThrottleCamEye.z;
+								const float d2 = ddx * ddx + ddy * ddy + ddz * ddz;
+								bThrottleEligible = (d2 > (float)animThrottleDist2);
+							}
+							// else: object has no aabb yet -> leave eligible (throttle allowed)
+						}
+						if (bThrottleEligible && ((animParityFrame + animation_index) % 2 == 0))
 						{
 							iCulledAnimations++;
 							bCulled = true;

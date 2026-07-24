@@ -1636,7 +1636,15 @@ namespace wi::terrain
 		{
 			SamplerDesc samplerDesc;
 			samplerDesc.filter = Filter::ANISOTROPIC;
-			samplerDesc.max_anisotropy = 4;
+			// GG delta: stock Wicked terrain samples at aniso x4, but every OTHER surface in the
+			// scene samples at x16 (SAMPLER_OBJECTSHADER) — and terrain is the surface most often
+			// viewed near edge-on, where x4 (only a 4:1 footprint) under-samples the minor axis and
+			// the ground "swims" as the camera creeps. x8 doubles the resolved footprint (8:1),
+			// killing the bulk of that grazing shimmer while staying within the 4-texel SVT tile
+			// border (SVT_TILE_BORDER) so aniso taps don't spill across page edges. x16 would match
+			// the rest of the scene but can reach past the 4px border at extreme grazing (faint
+			// tile-seam risk) unless the border is also widened, so x8 is the safe default.
+			samplerDesc.max_anisotropy = 8;
 			// Note: using wrap mode by intention!
 			//	Terrain itself doesn't need wrap mode, but decals will reuse the base material's sampler
 			//	and decals can use wrapped textures (texmuladd)

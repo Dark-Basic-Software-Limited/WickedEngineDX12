@@ -41,6 +41,10 @@ using namespace wi::graphics;
 
 namespace wi
 {
+	// GGMAX 1.32c: wall time of SubmitCommandLists (queue submits + Present + swapchain pacing),
+	// measured OUTSIDE the profiler's CPU-frame span. Read by the game's perf harness.
+	float gg_app_submit_present_ms = 0.0f;
+
 	void Application::Initialize()
 	{
 		if (initialized)
@@ -383,7 +387,15 @@ namespace wi
 
 		wi::input::ClearForNextFrame();
 		wi::profiler::EndFrame(cmd);
-		graphicsDevice->SubmitCommandLists();
+		{
+			// GGMAX 1.32c: attribute the frame tail OUTSIDE the profiler's CPU-frame span.
+			// SubmitCommandLists includes the queue submits + Present + swapchain pacing wait —
+			// if this is large, the frame is present/swapchain-bound, not CPU/GPU-work-bound.
+			// Plain timer into a global (profiler ranges reset across EndFrame/BeginFrame).
+			wi::Timer gg_submit_timer;
+			graphicsDevice->SubmitCommandLists();
+			gg_app_submit_present_ms = (float)gg_submit_timer.elapsed_milliseconds();
+		}
 		wi::renderer::UpdateGPUSuballocator();
 	}
 

@@ -51,6 +51,12 @@ namespace wi::graphics
 	class GraphicsDevice
 	{
 	protected:
+		// GGMAX note (2026-07-25, experiment REVERTED): BUFFERCOUNT 3 was tried against the
+		// measured 1.7-5.2ms App-SubmitPresent frame tail and changed NOTHING (76 FPS, tail
+		// unchanged) — the tail is the raw cost of the ~15 per-frame queue submit batches +
+		// Present on the main thread, not a frames-in-flight fence wait. The real fixes are
+		// submit-batch reduction (fewer cross-queue splits) or moving SubmitCommandLists off
+		// the main thread — both structural, documented in PERFORMANCE notes. Left at stock 2.
 		static constexpr uint32_t BUFFERCOUNT = 2;
 		uint64_t FRAMECOUNT = 0;
 		size_t SHADER_IDENTIFIER_SIZE = 0;

@@ -380,7 +380,11 @@ namespace wi
 		{
 			visibility_main.flags &= ~wi::renderer::Visibility::ALLOW_OCCLUSION_CULLING;
 		}
-		wi::renderer::UpdateVisibility(visibility_main);
+		{
+			auto gg_range = wi::profiler::BeginRangeCPU("RP3D-VisMain"); // GGMAX 1.32 instrumentation
+			wi::renderer::UpdateVisibility(visibility_main);
+			wi::profiler::EndRange(gg_range);
+		}
 
 		if (visibility_main.planar_reflection_visible)
 		{
@@ -397,17 +401,23 @@ namespace wi
 				wi::renderer::Visibility::ALLOW_HAIRS |
 				wi::renderer::Visibility::ALLOW_LIGHTS
 				;
+			auto gg_range = wi::profiler::BeginRangeCPU("RP3D-VisRefl"); // GGMAX 1.32 instrumentation
 			wi::renderer::UpdateVisibility(visibility_reflection);
+			wi::profiler::EndRange(gg_range);
 		}
 
 		XMUINT2 internalResolution = GetInternalResolution();
 
-		wi::renderer::UpdatePerFrameData(
-			*scene,
-			visibility_main,
-			frameCB,
-			getSceneUpdateEnabled() ? scene->dt : 0
-		);
+		{
+			auto gg_range = wi::profiler::BeginRangeCPU("RP3D-PerFrameData"); // GGMAX 1.32 instrumentation
+			wi::renderer::UpdatePerFrameData(
+				*scene,
+				visibility_main,
+				frameCB,
+				getSceneUpdateEnabled() ? scene->dt : 0
+			);
+			wi::profiler::EndRange(gg_range);
+		}
 
 		if (getFSR2Enabled())
 		{
@@ -864,6 +874,9 @@ namespace wi
 		GraphicsDevice* device = wi::graphics::GetDevice();
 		wi::jobsystem::context ctx;
 
+		// GGMAX 1.32: serial main-thread span of Render() (BeginCommandList + job dispatch + ocean record + RenderPath2D)
+		auto gg_range_serial = wi::profiler::BeginRangeCPU("RP3D-RenderSerial");
+
 		CommandList cmd_copypages;
 		if (scene->terrains.GetCount() > 0)
 		{
@@ -882,6 +895,7 @@ namespace wi
 		CommandList cmd_prepareframe = cmd;
 		wi::jobsystem::Execute(ctx, [this, cmd](wi::jobsystem::JobArgs args) {
 			GraphicsDevice* device = wi::graphics::GetDevice();
+			auto gg_range = wi::profiler::BeginRangeCPU("RP3D-rec PrepareFrame"); // GGMAX 1.32
 
 			wi::renderer::BindCameraCB(
 				*camera,
@@ -903,6 +917,7 @@ namespace wi
 			}
 			device->Barrier(barriers, num_barriers, cmd);
 
+			wi::profiler::EndRange(gg_range); // GGMAX 1.32
 		});
 
 		// async compute parallel with depth prepass
@@ -914,6 +929,7 @@ namespace wi
 			device->WaitCommandList(cmd, cmd_copypages);
 		}
 		wi::jobsystem::Execute(ctx, [this, cmd](wi::jobsystem::JobArgs args) {
+			auto gg_range = wi::profiler::BeginRangeCPU("RP3D-rec PrepareAsync"); // GGMAX 1.32
 
 			wi::renderer::BindCameraCB(
 				*camera,
@@ -950,6 +966,7 @@ namespace wi
 				);
 			}
 
+			wi::profiler::EndRange(gg_range); // GGMAX 1.32
 		});
 
 		static const uint32_t drawscene_flags =
@@ -967,6 +984,7 @@ namespace wi
 		wi::jobsystem::Execute(ctx, [this, cmd](wi::jobsystem::JobArgs args) {
 
 			GraphicsDevice* device = wi::graphics::GetDevice();
+			auto gg_range_cpu = wi::profiler::BeginRangeCPU("RP3D-rec Prepass"); // GGMAX 1.32
 
 			wi::renderer::BindCameraCB(
 				*camera,
@@ -1051,6 +1069,7 @@ namespace wi
 			// After prepass render pass: virtual texture readback (compute + copy, must be outside render pass)
 			if (customDraw_AfterPrepass) customDraw_AfterPrepass(rtPrimitiveID_render, getMSAASampleCount(), cmd);
 
+			wi::profiler::EndRange(gg_range_cpu); // GGMAX 1.32
 		});
 
 		// Main camera compute effects:
@@ -1066,6 +1085,7 @@ namespace wi
 		wi::jobsystem::Execute(ctx, [this, cmd](wi::jobsystem::JobArgs args) {
 
 			GraphicsDevice* device = wi::graphics::GetDevice();
+			auto gg_range = wi::profiler::BeginRangeCPU("RP3D-rec ComputeFX"); // GGMAX 1.32
 
 			for (size_t i = 0; i < scene->videos.GetCount(); ++i)
 			{
@@ -1195,6 +1215,7 @@ namespace wi
 				wi::renderer::PostProcess_MeshBlend_EdgeProcess(meshblendResources, cmd);
 			}
 
+			wi::profiler::EndRange(gg_range); // GGMAX 1.32
 		});
 
 		// Occlusion culling:
@@ -1206,6 +1227,7 @@ namespace wi
 			wi::jobsystem::Execute(ctx, [this, cmd](wi::jobsystem::JobArgs args) {
 
 				GraphicsDevice* device = wi::graphics::GetDevice();
+				auto gg_range = wi::profiler::BeginRangeCPU("RP3D-rec Occlusion"); // GGMAX 1.32
 
 				device->EventBegin("Occlusion Culling", cmd);
 				ScopedGPUProfiling("Occlusion Culling", cmd);
@@ -1239,6 +1261,7 @@ namespace wi
 				wi::renderer::OcclusionCulling_Resolve(visibility_main, cmd); // must be outside renderpass!
 
 				device->EventEnd(cmd);
+				wi::profiler::EndRange(gg_range); // GGMAX 1.32
 			});
 		}
 
@@ -1283,6 +1306,7 @@ namespace wi
 			cmd = device->BeginCommandList();
 			device->WaitCommandList(cmd, cmd_prepareframe_async);
 			wi::jobsystem::Execute(ctx, [cmd, this](wi::jobsystem::JobArgs args) {
+				auto gg_range = wi::profiler::BeginRangeCPU("RP3D-rec UpdateTex"); // GGMAX 1.32
 				wi::renderer::BindCommonResources(cmd);
 				wi::renderer::BindCameraCB(
 					*camera,
@@ -1293,6 +1317,7 @@ namespace wi
 				wi::renderer::RefreshLightmaps(*scene, cmd);
 				wi::renderer::RefreshEnvProbes(visibility_main, cmd);
 				wi::renderer::PaintDecals(*scene, cmd);
+				wi::profiler::EndRange(gg_range); // GGMAX 1.32
 			});
 		}
 
@@ -1485,6 +1510,7 @@ namespace wi
 		wi::jobsystem::Execute(ctx, [this, cmd](wi::jobsystem::JobArgs args) {
 
 			GraphicsDevice* device = wi::graphics::GetDevice();
+			auto gg_range_cpu = wi::profiler::BeginRangeCPU("RP3D-rec Opaque"); // GGMAX 1.32
 			device->EventBegin("Opaque Scene", cmd);
 
 			wi::renderer::BindCameraCB(
@@ -1706,6 +1732,7 @@ namespace wi
 			}
 
 			device->EventEnd(cmd);
+			wi::profiler::EndRange(gg_range_cpu); // GGMAX 1.32
 		});
 
 		if (scene->terrains.GetCount() > 0)
@@ -1738,6 +1765,7 @@ namespace wi
 		wi::jobsystem::Execute(ctx, [this, cmd](wi::jobsystem::JobArgs args) {
 
 			GraphicsDevice* device = wi::graphics::GetDevice();
+			auto gg_range = wi::profiler::BeginRangeCPU("RP3D-rec Transparent"); // GGMAX 1.32
 
 			wi::renderer::BindCameraCB(
 				*camera,
@@ -1762,19 +1790,25 @@ namespace wi
 				};
 				device->Barrier(barriers, arraysize(barriers), cmd);
 			}
+			wi::profiler::EndRange(gg_range); // GGMAX 1.32
 		});
 
 		RenderCameraComponents(ctx);
 
 		cmd = device->BeginCommandList();
 		wi::jobsystem::Execute(ctx, [this, cmd](wi::jobsystem::JobArgs args) {
+			auto gg_range = wi::profiler::BeginRangeCPU("RP3D-rec PostFX"); // GGMAX 1.32
 			RenderPostprocessChain(cmd);
 			wi::renderer::TextureStreamingReadbackCopy(*scene, cmd);
+			wi::profiler::EndRange(gg_range); // GGMAX 1.32
 		});
 
 		RenderPath2D::Render();
 
+		wi::profiler::EndRange(gg_range_serial); // GGMAX 1.32
+		auto gg_range_wait = wi::profiler::BeginRangeCPU("RP3D-RenderWait");
 		wi::jobsystem::Wait(ctx);
+		wi::profiler::EndRange(gg_range_wait); // GGMAX 1.32
 
 		first_frame = false;
 	}

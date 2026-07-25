@@ -322,9 +322,13 @@ namespace wi::terrain
 		cpu_resource_id = 0;
 	}
 
+	// GGMAX 1.33: master switch for incremental VT bookkeeping (see wiTerrain.h)
+	bool gg_vt_incremental = true;
+
 	void VirtualTexture::init(VirtualTextureAtlas& atlas, uint resolution)
 	{
 		this->resolution = resolution;
+		gg_page_dirty = true; // GGMAX 1.33: fresh mapping — must upload on first job run
 
 		lod_count = 0;
 		uint32_t tile_count = 0;
@@ -345,8 +349,10 @@ namespace wi::terrain
 			tile_count += 1; // packed mip chain
 			lod_count += 1; // packed mip chain
 			tiles.resize(tile_count);
-			if (atlas.allocate_tile(tiles[tile_count - 1]))
+			VirtualTexture* gg_stolen = nullptr; // GGMAX 1.33
+			if (atlas.allocate_tile(tiles[tile_count - 1], this, &gg_stolen))
 			{
+				if (gg_stolen) gg_stolen->gg_page_dirty = true; // GGMAX 1.33
 				// packed mip tail update:
 				UpdateRequest& request = update_requests.emplace_back();
 				request.lod = lod_count - 1;
@@ -355,8 +361,9 @@ namespace wi::terrain
 				request.x = 0;
 				request.y = 0;
 			}
-			if (atlas.allocate_tile(tiles[tile_count - 2]))
+			if (atlas.allocate_tile(tiles[tile_count - 2], this, &gg_stolen))
 			{
+				if (gg_stolen) gg_stolen->gg_page_dirty = true; // GGMAX 1.33
 				// last nonpacked mip update:
 				UpdateRequest& request = update_requests.emplace_back();
 				request.lod = lod_count - 2;
@@ -370,8 +377,10 @@ namespace wi::terrain
 		{
 			// far away chunks only have 1 tile
 			tiles.resize(tile_count);
-			if (atlas.allocate_tile(tiles.back()))
+			VirtualTexture* gg_stolen = nullptr; // GGMAX 1.33
+			if (atlas.allocate_tile(tiles.back(), this, &gg_stolen))
 			{
+				if (gg_stolen) gg_stolen->gg_page_dirty = true; // GGMAX 1.33
 				// update the only tile there is:
 				UpdateRequest& request = update_requests.emplace_back();
 				request.lod = lod_count - 1;
@@ -1902,6 +1911,7 @@ namespace wi::terrain
 		}
 
 		wi::jobsystem::Execute(virtual_texture_ctx, [this, gg_vt_frozen](wi::jobsystem::JobArgs args) {
+			auto gg_range_total = wi::profiler::BeginRangeCPU("VT-job Total"); // GGMAX 1.32 instrumentation
 
 			// Update state of physical tiles:
 			//	Potentially each physical tile is getting marked as unused here (free_frames > 0), unless GPU requested them to be resident
@@ -1995,6 +2005,28 @@ namespace wi::terrain
 			// foreign squares over the terrain during violent zooms. Aging keeps running,
 			// so genuinely off-screen tiles keep flowing into the pool even mid-flight.
 			const uint64_t gg_min_free_frames = gg_vt_frozen ? 60 : 1;
+			// GGMAX 1.33: the rebuild+sort of the free list costs ~2ms — only pay it on frames
+			// that can actually consume or invalidate it: pending allocation requests (rebuilt
+			// fresh right before fulfilment, so keep-alive resets this frame are respected),
+			// the list was consumed since the last build (main-thread chunk-init or fulfil),
+			// or it is running low (headroom for main-thread chunk-init between rebuilds).
+			// While parked with no requests, nothing consumes the list, so a stale-but-
+			// conservative list is safe — aging still runs every frame above.
+			size_t gg_total_requests = 0;
+			for (VirtualTexture* vt : virtual_textures_in_use)
+			{
+				gg_total_requests += vt->allocation_requests.size();
+			}
+			// Low-water refill is rate-limited: with a near-full atlas the free list can sit
+			// under the threshold permanently, which must not re-introduce an every-frame sort.
+			static uint32_t gg_freesort_cooldown = 0;
+			if (gg_freesort_cooldown > 0) gg_freesort_cooldown--;
+			const bool gg_low_water = atlas.free_tiles.size() < 256 && gg_freesort_cooldown == 0;
+			const bool gg_rebuild_free = !gg_vt_incremental || gg_total_requests > 0 || atlas.gg_free_dirty || gg_low_water;
+			if (gg_rebuild_free)
+			{
+			if (gg_low_water) gg_freesort_cooldown = 8;
+			auto gg_range_free = wi::profiler::BeginRangeCPU("VT-job FreeSort"); // GGMAX 1.32 instrumentation
 			atlas.free_tiles.clear();
 			for (uint8_t y = 0; y < atlas.physical_tile_count_y; ++y)
 			{
@@ -2012,6 +2044,9 @@ namespace wi::terrain
 			std::sort(atlas.free_tiles.begin(), atlas.free_tiles.end(), [&](const VirtualTextureAtlas::Tile& a, const VirtualTextureAtlas::Tile& b) {
 				return atlas.get_tile_frames(a) < atlas.get_tile_frames(b);
 			});
+			wi::profiler::EndRange(gg_range_free); // GGMAX 1.32
+			atlas.gg_free_dirty = false; // GGMAX 1.33
+			}
 
 			// Fulfill new allocation requests:
 			for (VirtualTexture* vt : virtual_textures_in_use)
@@ -2019,8 +2054,11 @@ namespace wi::terrain
 				for (auto& alloc_request : vt->allocation_requests)
 				{
 					VirtualTextureAtlas::Tile& tile = vt->tiles[alloc_request.tile_index];
-					if (atlas.allocate_tile(tile))
+					VirtualTexture* gg_stolen = nullptr; // GGMAX 1.33
+					if (atlas.allocate_tile(tile, vt, &gg_stolen))
 					{
+						if (gg_stolen) gg_stolen->gg_page_dirty = true; // GGMAX 1.33: victim's mapping broke
+						vt->gg_page_dirty = true; // GGMAX 1.33
 						VirtualTexture::UpdateRequest& request = vt->update_requests.emplace_back();
 						request.x = (uint16_t)alloc_request.x;
 						request.y = (uint16_t)alloc_request.y;
@@ -2080,9 +2118,30 @@ namespace wi::terrain
 				}
 			}
 
+			auto gg_range_pagebuf = wi::profiler::BeginRangeCPU("VT-job PageBuf"); // GGMAX 1.32 instrumentation
+			// GGMAX 1.33: a VT's page table only changes when a tile is allocated INTO it or
+			// stolen FROM it — both mark gg_page_dirty. Clean VTs skip the (huge, uncached)
+			// upload write AND their GPU copy + residency recompute stay skipped downstream,
+			// because the GPU-side pageBuffer still holds the identical data. A rotating
+			// heartbeat force-refreshes one resident VT per frame as insurance against any
+			// missed dirty path (full sweep every N frames at ~1/N of the cost).
+			static uint32_t gg_vt_frame = 0;
+			gg_vt_frame++;
+			uint32_t gg_resident_count = 0;
+			for (VirtualTexture* vt : virtual_textures_in_use)
+			{
+				if (vt->residency != nullptr)
+					gg_resident_count++;
+			}
+			const uint32_t gg_hb_index = (gg_resident_count > 0) ? (gg_vt_frame % gg_resident_count) : 0;
+			uint32_t gg_vt_index = 0;
 			for (VirtualTexture* vt : virtual_textures_in_use)
 			{
 				if (vt->residency == nullptr)
+					continue;
+
+				const bool gg_heartbeat = (gg_vt_index++ == gg_hb_index);
+				if (gg_vt_incremental && !vt->gg_page_dirty && !gg_heartbeat)
 					continue;
 
 				// Update page buffer for GPU:
@@ -2098,13 +2157,23 @@ namespace wi::terrain
 					// force memcpy into uncached memory to avoid read stall by mistake:
 					std::memcpy(page_buffer + i, &page, sizeof(page));
 				}
+				vt->gg_page_dirty = false; // GGMAX 1.33
+				vt->gg_page_upload_pending = true; // GGMAX 1.33 -> CopyVirtualTexturePageStatusGPU
+				vt->gg_residency_update_pending = true; // GGMAX 1.33 -> UpdateVirtualTexturesGPU
 			}
+			wi::profiler::EndRange(gg_range_pagebuf); // GGMAX 1.32
+			wi::profiler::EndRange(gg_range_total); // GGMAX 1.32
 		});
 	}
 
 	void Terrain::UpdateVirtualTexturesGPU(CommandList cmd) const
 	{
-		wi::jobsystem::Wait(virtual_texture_ctx);
+		{
+			auto gg_range_wait = wi::profiler::BeginRangeCPU("VT-WaitInRecord"); // GGMAX 1.32 instrumentation
+			wi::jobsystem::Wait(virtual_texture_ctx);
+			wi::profiler::EndRange(gg_range_wait);
+		}
+		auto gg_range_rec = wi::profiler::BeginRangeCPU("VT-record"); // GGMAX 1.32 instrumentation
 		GraphicsDevice* device = GetDevice();
 		device->EventBegin("Terrain - UpdateVirtualTexturesGPU", cmd);
 		auto range = wi::profiler::BeginRangeGPU("Terrain - UpdateVirtualTexturesGPU", cmd);
@@ -2115,6 +2184,11 @@ namespace wi::terrain
 		{
 			if (vt->residency == nullptr)
 				continue;
+			// GGMAX 1.33: residencyMap is a pure function of pageBuffer — skip the recompute
+			// when the page table didn't change (pageBuffer holds identical data).
+			if (gg_vt_incremental && !vt->gg_residency_update_pending)
+				continue;
+			vt->gg_residency_update_pending = false;
 			VirtualTextureResidencyUpdateCB cb;
 			cb.lodCount = vt->lod_count;
 			cb.width = vt->residency->residencyMap.desc.width;
@@ -2263,6 +2337,7 @@ namespace wi::terrain
 
 		wi::profiler::EndRange(range);
 		device->EventEnd(cmd);
+		wi::profiler::EndRange(gg_range_rec); // GGMAX 1.32
 	}
 
 	void Terrain::CopyVirtualTexturePageStatusGPU(CommandList cmd) const
@@ -2274,6 +2349,12 @@ namespace wi::terrain
 		{
 			if (vt->residency == nullptr)
 				continue;
+			// GGMAX 1.33: only copy upload slots the VT job actually wrote this frame —
+			// unwritten slots hold stale data from N frames ago and the GPU pageBuffer
+			// already has the current (unchanged) table.
+			if (gg_vt_incremental && !vt->gg_page_upload_pending)
+				continue;
+			vt->gg_page_upload_pending = false;
 			device->CopyResource(&vt->residency->pageBuffer, &vt->residency->pageBuffer_CPU_upload[vt->residency->cpu_resource_id], cmd);
 		}
 		device->EventEnd(cmd);

@@ -61,6 +61,13 @@ namespace wi::terrain
 		MATERIAL_COUNT
 	};
 
+	struct VirtualTexture; // GGMAX 1.33: fwd-decl for PhysicalTile::gg_owner
+
+	// GGMAX 1.33: master switch for the incremental virtual-texture bookkeeping
+	//	(dirty-tracked page-table uploads + lazy free-list rebuild). false = stock
+	//	every-frame behaviour (A/B and emergency fallback). Defined in wiTerrain.cpp.
+	extern bool gg_vt_incremental;
+
 	struct VirtualTextureAtlas
 	{
 		struct Map
@@ -90,8 +97,16 @@ namespace wi::terrain
 		{
 			const Tile* last_used = nullptr;
 			uint64_t free_frames = 0;
+			// GGMAX 1.33: which VirtualTexture currently owns this physical tile. Used ONLY
+			// to mark the VICTIM's page table dirty when a tile is stolen — a stale pointer
+			// is impossible because VirtualTexture::free() clears it before the VT dies.
+			VirtualTexture* gg_owner = nullptr;
 		};
 		wi::vector<PhysicalTile> physical_tiles;
+
+		// GGMAX 1.33: set whenever allocate_tile consumes from free_tiles (list shrank /
+		// residency changed) so the async job knows the cached free list must be rebuilt.
+		bool gg_free_dirty = true;
 
 		struct Residency
 		{
@@ -111,13 +126,23 @@ namespace wi::terrain
 		};
 		wi::unordered_map<uint32_t, wi::vector<wi::allocator::shared_ptr<Residency>>> free_residencies; // per resolution residencies
 
-		bool allocate_tile(Tile& tile)
+		// GGMAX 1.33: owner-aware allocation. gg_new_owner = the VT this tile is being mapped
+		// into; if the physical tile was owned by a DIFFERENT live VT (a steal), that victim is
+		// reported through gg_stolen_from so the caller can mark its page table dirty (its
+		// mapping just silently broke — check_tile_resident will fail for it from now on).
+		bool allocate_tile(Tile& tile, VirtualTexture* gg_new_owner = nullptr, VirtualTexture** gg_stolen_from = nullptr)
 		{
 			if (free_tiles.empty())
 				return false;
 			tile = free_tiles.back();
 			free_tiles.pop_back();
+			gg_free_dirty = true; // GGMAX 1.33
 			PhysicalTile& physical_tile = physical_tiles[tile.x + tile.y * physical_tile_count_x];
+			if (gg_stolen_from != nullptr)
+			{
+				*gg_stolen_from = (physical_tile.gg_owner != nullptr && physical_tile.gg_owner != gg_new_owner) ? physical_tile.gg_owner : nullptr;
+			}
+			physical_tile.gg_owner = gg_new_owner; // GGMAX 1.33
 			physical_tile.last_used = &tile;
 			physical_tile.free_frames = 0;
 			return true;
@@ -196,6 +221,12 @@ namespace wi::terrain
 				{
 					physical_tile.last_used = nullptr;
 				}
+				// GGMAX 1.33: this VT is going away — physical tiles must not keep a
+				// dangling owner pointer (it is dereferenced on steal to mark dirty).
+				if (physical_tile.gg_owner == this)
+				{
+					physical_tile.gg_owner = nullptr;
+				}
 			}
 			tiles.clear();
 			atlas.free_residency(residency);
@@ -219,6 +250,18 @@ namespace wi::terrain
 		// the OLD blendmap binding and the edit would silently never land.
 		bool pending_repaint_blendmap = false;
 		bool gg_repaint_blendmap_latched = false;
+
+		// GGMAX 1.33: incremental page-table upload state. gg_page_dirty = the CPU-side page
+		// table (tiles[] residency mapping) changed since the last upload-buffer write; set at
+		// creation, on every allocation into this VT, and on every steal FROM this VT. The
+		// async VT job consumes it (writes the upload buffer, sets the two pending flags).
+		// Each pending flag has exactly one consumer on its own command list:
+		//	gg_page_upload_pending      -> CopyVirtualTexturePageStatusGPU (copy to GPU pageBuffer)
+		//	gg_residency_update_pending -> UpdateVirtualTexturesGPU (residency map recompute)
+		// All are mutable because the recording functions are const.
+		mutable bool gg_page_dirty = true;
+		mutable bool gg_page_upload_pending = false;
+		mutable bool gg_residency_update_pending = false;
 
 		struct AllocationRequest
 		{

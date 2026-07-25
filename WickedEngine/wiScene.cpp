@@ -5587,6 +5587,7 @@ namespace wi::scene
 
 			size_t geometryAllocation = geometryAllocator.fetch_add(1);
 			std::memcpy(geometryArrayMapped + geometryAllocation, &geometry, sizeof(geometry));
+			hair.gg_geometry_index = (uint32_t)geometryAllocation; // GGMAX 1.37d: for the frozen-velocity patch
 
 			ShaderMeshInstance inst;
 			inst.init();

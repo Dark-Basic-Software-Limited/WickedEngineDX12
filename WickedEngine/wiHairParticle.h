@@ -156,6 +156,13 @@ namespace wi
 		mutable uint32_t gg_sim_runs = 0;
 		mutable XMFLOAT4X4 gg_prev_world = XMFLOAT4X4(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
 
+		// GGMAX 1.37d: this system's slot in the scene's per-frame ShaderGeometry array (written
+		// by RunHairUpdateSystem). The sim batch patches THIS entry's vb_pre on frames the sim
+		// skips, so the drawn velocity is exactly zero while the strands are frozen — without it
+		// TAA reprojected static grass from one sim-step away every skipped frame (per-frame
+		// shimmer bursts around cadence transitions = the load/paint flicker Round E convicted).
+		mutable uint32_t gg_geometry_index = ~0u;
+
 		// GGMAX 1.37b (flicker fix): the vb_pos ping-pong swap must only advance on frames the
 		// simulation actually RAN. Swapping every frame while the sim runs on a cadence made the
 		// write-target/read-source parity depend on the GAP LENGTH between sims — irregular gaps

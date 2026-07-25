@@ -135,12 +135,22 @@ bool occlusionCulling = true;
 // modified scale, and dividing by distance makes it a true on-screen apparent size.
 std::atomic<uint32_t> gg_apparent_cull_bits{ 0 };
 
-// GGMAX 1.37: hair/grass simulation static-skip (see UpdateRenderData). true = skip the sim
-// dispatch when camera parked + no wind + all visible systems settled; false = stock every-frame.
-// gg_hair_sim_wind_interval: when the camera is parked but WIND is active (sim output genuinely
-// animates), simulate every Nth frame instead of skipping entirely — sway continues in gentle
-// slow-motion (the sim integrates per-dispatch dt), invisible for idle vegetation. 1 = every frame.
-bool gg_hair_sim_static_skip = true;
+// GGMAX 1.37: hair/grass simulation static-skip (see UpdateRenderData).
+//
+// *** DISABLED BY DEFAULT 2026-07-25 (user decision after a full manual knob bisect) ***
+// A 6-knob binary search over manual fresh-launch tests convicted THIS delta alone (Round E,
+// 2/2) of an intermittent per-frame grass flicker during the level-load streaming window and
+// after grass painting. Three layered fixes were attempted and shipped dormant here:
+//   1.37b  ping-pong swap gated on sim frames (fixed real parity corruption — kept, correct)
+//   1.37c  full-rate hysteresis (60-frame cooldown before the cadence may engage)
+//   1.37d  frozen-velocity patch (vb_pre := vb_pos[0] on skipped frames so TAA sees zero
+//          velocity while strands are static)
+// 1.37b/c measurably reduced but did NOT eliminate the artifact; 1.37d (velocity-lie theory)
+// did not eliminate it either — the residual mechanism is somewhere else in the skip/draw
+// interaction and needs a frame-capture investigation (PIX/RenderDoc) to find. Until then the
+// ~1.4ms GPU win (~73 -> ~78 FPS parked on TESTPRO1) is NOT worth the artifact.
+// The runtime knob remains for future work: harness SET_HAIRSKIP <0|1> [windInterval].
+bool gg_hair_sim_static_skip = false;
 uint32_t gg_hair_sim_wind_interval = 4;
 static XMFLOAT3 gg_hair_prev_eye = XMFLOAT3(0, 0, 0);
 static XMFLOAT3 gg_hair_prev_at = XMFLOAT3(0, 0, 0);
@@ -5720,6 +5730,28 @@ void UpdateRenderData(
 				hair_update.hair->gg_sim_runs++; // GGMAX 1.37
 			}
 			wi::profiler::EndRange(range);
+		}
+		else
+		{
+			// GGMAX 1.37d: the strands will NOT move this frame — patch each visible hair's
+			// ShaderGeometry entry (still CPU-writable: the upload->GPU copy is recorded later
+			// in this same command list) so vb_pre == current position buffer. Drawn velocity
+			// is then exactly ZERO while frozen; on sim frames the unpatched entry carries the
+			// exact one-step motion. Without this, TAA reprojected static grass from one
+			// sim-step away on every skipped frame — per-frame shimmer at cadence transitions
+			// (the load/paint flicker isolated by the manual knob bisect, Round E).
+			if (vis.scene->geometryArrayMapped != nullptr)
+			{
+				for (auto& hair_update : hair_updates)
+				{
+					const HairParticleSystem& hair = *hair_update.hair;
+					if (hair.gg_geometry_index != ~0u)
+					{
+						ShaderGeometry* gg_geometry = vis.scene->geometryArrayMapped + hair.gg_geometry_index;
+						gg_geometry->vb_pre = hair.vb_pos[0].descriptor_srv;
+					}
+				}
+			}
 		}
 		hair_updates.clear();
 

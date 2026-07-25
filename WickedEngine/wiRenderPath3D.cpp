@@ -18,6 +18,15 @@ namespace wi
 	// waterline (see the ocean block in RenderPostprocessChain). false = stock always-run.
 	bool gg_skip_underwater_above_water = true;
 
+	// GGMAX 1.40: merge small command lists to cut submit fragmentation. Each BeginCommandList
+	// is a real allocator+list and every cross-list wait splits the queue submission — ~17 lists
+	// with ~10 waits leave measurable GPU idle bubbles between submits. When true:
+	//	(a) the occlusion-culling pass records at the tail of the main prepass list
+	//	(b) transparents + postprocess chain record into ONE list (camera components hoisted
+	//	    before it — their output is consumed next frame either way)
+	// false = stock list structure.
+	bool gg_render_merge_lists = true;
+
 	void RenderPath3D::DeleteGPUResources()
 	{
 		RenderPath2D::DeleteGPUResources();
@@ -982,10 +991,53 @@ namespace wi
 			wi::renderer::DRAWSCENE_MAINCAMERA
 			;
 
+		// GGMAX 1.40: occlusion-culling recording body, shared between the stock own-list path
+		// and the merged prepass-tail path. Safe on the prepass list: it renders against
+		// depthBuffer_Main which the prepass just finished writing (same-list sequencing).
+		auto gg_record_occlusion = [this](CommandList cmd) {
+			GraphicsDevice* device = wi::graphics::GetDevice();
+			auto gg_range = wi::profiler::BeginRangeCPU("RP3D-rec Occlusion"); // GGMAX 1.32
+
+			device->EventBegin("Occlusion Culling", cmd);
+			ScopedGPUProfiling("Occlusion Culling", cmd);
+
+			wi::renderer::BindCameraCB(
+				*camera,
+				camera_previous,
+				camera_reflection,
+				cmd
+			);
+
+			wi::renderer::OcclusionCulling_Reset(visibility_main, cmd); // must be outside renderpass!
+
+			RenderPassImage rp[] = {
+				RenderPassImage::DepthStencil(&depthBuffer_Main),
+			};
+			device->RenderPassBegin(rp, arraysize(rp), cmd);
+
+			Rect scissor = GetScissorInternalResolution();
+			device->BindScissorRects(1, &scissor, cmd);
+
+			Viewport vp;
+			vp.width = (float)depthBuffer_Main.GetDesc().width;
+			vp.height = (float)depthBuffer_Main.GetDesc().height;
+			device->BindViewports(1, &vp, cmd);
+
+			wi::renderer::OcclusionCulling_Render(*camera, visibility_main, cmd);
+
+			device->RenderPassEnd(cmd);
+
+			wi::renderer::OcclusionCulling_Resolve(visibility_main, cmd); // must be outside renderpass!
+
+			device->EventEnd(cmd);
+			wi::profiler::EndRange(gg_range); // GGMAX 1.32
+		};
+
 		// Main camera depth prepass:
 		cmd = device->BeginCommandList();
 		CommandList cmd_maincamera_prepass = cmd;
-		wi::jobsystem::Execute(ctx, [this, cmd](wi::jobsystem::JobArgs args) {
+		const bool gg_merge_occlusion = gg_render_merge_lists && getOcclusionCullingEnabled(); // GGMAX 1.40
+		wi::jobsystem::Execute(ctx, [this, cmd, gg_merge_occlusion, &gg_record_occlusion](wi::jobsystem::JobArgs args) {
 
 			GraphicsDevice* device = wi::graphics::GetDevice();
 			auto gg_range_cpu = wi::profiler::BeginRangeCPU("RP3D-rec Prepass"); // GGMAX 1.32
@@ -1072,6 +1124,12 @@ namespace wi
 
 			// After prepass render pass: virtual texture readback (compute + copy, must be outside render pass)
 			if (customDraw_AfterPrepass) customDraw_AfterPrepass(rtPrimitiveID_render, getMSAASampleCount(), cmd);
+
+			// GGMAX 1.40 (a): record the occlusion pass at the tail of this list instead of its own
+			if (gg_merge_occlusion)
+			{
+				gg_record_occlusion(cmd);
+			}
 
 			wi::profiler::EndRange(gg_range_cpu); // GGMAX 1.32
 		});
@@ -1222,50 +1280,14 @@ namespace wi
 			wi::profiler::EndRange(gg_range); // GGMAX 1.32
 		});
 
-		// Occlusion culling:
+		// Occlusion culling (stock own-list path — GGMAX 1.40 records it on the prepass list instead):
 		CommandList cmd_occlusionculling;
-		if (getOcclusionCullingEnabled())
+		if (getOcclusionCullingEnabled() && !gg_merge_occlusion)
 		{
 			cmd = device->BeginCommandList();
 			cmd_occlusionculling = cmd;
-			wi::jobsystem::Execute(ctx, [this, cmd](wi::jobsystem::JobArgs args) {
-
-				GraphicsDevice* device = wi::graphics::GetDevice();
-				auto gg_range = wi::profiler::BeginRangeCPU("RP3D-rec Occlusion"); // GGMAX 1.32
-
-				device->EventBegin("Occlusion Culling", cmd);
-				ScopedGPUProfiling("Occlusion Culling", cmd);
-
-				wi::renderer::BindCameraCB(
-					*camera,
-					camera_previous,
-					camera_reflection,
-					cmd
-				);
-
-				wi::renderer::OcclusionCulling_Reset(visibility_main, cmd); // must be outside renderpass!
-
-				RenderPassImage rp[] = {
-					RenderPassImage::DepthStencil(&depthBuffer_Main),
-				};
-				device->RenderPassBegin(rp, arraysize(rp), cmd);
-
-				Rect scissor = GetScissorInternalResolution();
-				device->BindScissorRects(1, &scissor, cmd);
-
-				Viewport vp;
-				vp.width = (float)depthBuffer_Main.GetDesc().width;
-				vp.height = (float)depthBuffer_Main.GetDesc().height;
-				device->BindViewports(1, &vp, cmd);
-
-				wi::renderer::OcclusionCulling_Render(*camera, visibility_main, cmd);
-
-				device->RenderPassEnd(cmd);
-
-				wi::renderer::OcclusionCulling_Resolve(visibility_main, cmd); // must be outside renderpass!
-
-				device->EventEnd(cmd);
-				wi::profiler::EndRange(gg_range); // GGMAX 1.32
+			wi::jobsystem::Execute(ctx, [this, cmd, &gg_record_occlusion](wi::jobsystem::JobArgs args) {
+				gg_record_occlusion(cmd);
 			});
 		}
 
@@ -1278,6 +1300,11 @@ namespace wi
 			{
 				// Ocean occlusion culling must be waited
 				device->WaitCommandList(cmd_ocean, cmd_occlusionculling);
+			}
+			else if (gg_merge_occlusion)
+			{
+				// GGMAX 1.40 (a): occlusion now records at the tail of the prepass list
+				device->WaitCommandList(cmd_ocean, cmd_maincamera_prepass);
 			}
 			wi::renderer::UpdateOcean(visibility_main, cmd_ocean);
 
@@ -1760,13 +1787,22 @@ namespace wi
 			});
 		}
 
+		// GGMAX 1.40 (b): camera components hoisted BEFORE the merged transparents+postFX list —
+		// their render-to-texture output is consumed by scene materials next frame either way,
+		// and hoisting keeps queue submission order intact when the two lists below become one.
+		if (gg_render_merge_lists)
+		{
+			RenderCameraComponents(ctx);
+		}
+
 		// Transparents, post processes, etc:
 		cmd = device->BeginCommandList();
 		if (cmd_ocean.IsValid())
 		{
 			device->WaitCommandList(cmd, cmd_ocean);
 		}
-		wi::jobsystem::Execute(ctx, [this, cmd](wi::jobsystem::JobArgs args) {
+		const bool gg_merge_postfx = gg_render_merge_lists; // GGMAX 1.40
+		wi::jobsystem::Execute(ctx, [this, cmd, gg_merge_postfx](wi::jobsystem::JobArgs args) {
 
 			GraphicsDevice* device = wi::graphics::GetDevice();
 			auto gg_range = wi::profiler::BeginRangeCPU("RP3D-rec Transparent"); // GGMAX 1.32
@@ -1795,17 +1831,29 @@ namespace wi
 				device->Barrier(barriers, arraysize(barriers), cmd);
 			}
 			wi::profiler::EndRange(gg_range); // GGMAX 1.32
+
+			// GGMAX 1.40 (b): postprocess chain rides the same list (one less list + submit)
+			if (gg_merge_postfx)
+			{
+				auto gg_range2 = wi::profiler::BeginRangeCPU("RP3D-rec PostFX"); // GGMAX 1.32
+				RenderPostprocessChain(cmd);
+				wi::renderer::TextureStreamingReadbackCopy(*scene, cmd);
+				wi::profiler::EndRange(gg_range2); // GGMAX 1.32
+			}
 		});
 
-		RenderCameraComponents(ctx);
+		if (!gg_render_merge_lists)
+		{
+			RenderCameraComponents(ctx);
 
-		cmd = device->BeginCommandList();
-		wi::jobsystem::Execute(ctx, [this, cmd](wi::jobsystem::JobArgs args) {
-			auto gg_range = wi::profiler::BeginRangeCPU("RP3D-rec PostFX"); // GGMAX 1.32
-			RenderPostprocessChain(cmd);
-			wi::renderer::TextureStreamingReadbackCopy(*scene, cmd);
-			wi::profiler::EndRange(gg_range); // GGMAX 1.32
-		});
+			cmd = device->BeginCommandList();
+			wi::jobsystem::Execute(ctx, [this, cmd](wi::jobsystem::JobArgs args) {
+				auto gg_range = wi::profiler::BeginRangeCPU("RP3D-rec PostFX"); // GGMAX 1.32
+				RenderPostprocessChain(cmd);
+				wi::renderer::TextureStreamingReadbackCopy(*scene, cmd);
+				wi::profiler::EndRange(gg_range); // GGMAX 1.32
+			});
+		}
 
 		RenderPath2D::Render();
 

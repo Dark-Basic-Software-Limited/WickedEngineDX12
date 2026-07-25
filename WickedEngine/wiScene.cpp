@@ -1969,6 +1969,10 @@ namespace wi::scene
 	// GGMAX delta 1.36: level-order hierarchy update master switch (false = stock chain walk).
 	bool gg_hierarchy_levelorder = true;
 
+	// GGMAX delta 1.41: ShaderMaterial recompose cache master switch (false = stock every-frame
+	// full recompose). See RunMaterialUpdateSystem.
+	bool gg_material_cache = true;
+
 	void Scene::RunAnimationUpdateSystem(wi::jobsystem::context& ctx)
 	{
 		auto range = wi::profiler::BeginRangeCPU("Animations");
@@ -4642,6 +4646,7 @@ namespace wi::scene
 				material.engineStencilRef = STENCILREF_OUTLINE;
 			}
 
+			const bool gg_was_dirty = material.IsDirty(); // GGMAX 1.41: capture before the clear
 			if (material.IsDirty())
 			{
 				material.SetDirty(false);
@@ -4658,7 +4663,24 @@ namespace wi::scene
 			}
 			material.cached_clampSampler = device->GetDescriptorIndex(wi::renderer::GetSampler(wi::enums::SAMPLER_OBJECTSHADER_CLAMP));
 
-			material.WriteShaderMaterial(materialArrayMapped + args.jobIndex);
+			// GGMAX 1.41: recompose the ShaderMaterial only when something could have changed —
+			// dirty flag, texture-streaming descriptor epoch move, per-material staggered
+			// heartbeat (insurance for direct field writes that skip SetDirty), or attachments
+			// that overwrite slots after composition. Otherwise memcpy the cached composition
+			// into the (per-frame cycled) mapped array — the mapped write itself must ALWAYS
+			// happen because the upload buffer cycles.
+			const uint32_t gg_epoch = wi::resourcemanager::gg_streaming_descriptor_epoch.load(std::memory_order_relaxed);
+			const uint32_t gg_frame = (uint32_t)device->GetFrameCount();
+			const bool gg_heartbeat = ((args.jobIndex ^ gg_frame) & 63u) == 0;
+			const bool gg_has_attachment = (videos.GetComponent(entity) != nullptr) || (material.cameraSource != INVALID_ENTITY);
+			if (!gg_material_cache || gg_was_dirty || !material.gg_shader_cache_valid ||
+				material.gg_shader_cache_epoch != gg_epoch || gg_heartbeat || gg_has_attachment)
+			{
+				material.WriteShaderMaterial(&material.gg_shader_cache);
+				material.gg_shader_cache_valid = true;
+				material.gg_shader_cache_epoch = gg_epoch;
+			}
+			std::memcpy(materialArrayMapped + args.jobIndex, &material.gg_shader_cache, sizeof(ShaderMaterial));
 
 			const VideoComponent* video = videos.GetComponent(entity);
 			if (video != nullptr)

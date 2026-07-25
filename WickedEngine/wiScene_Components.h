@@ -389,6 +389,17 @@ namespace wi::scene
 		void WriteShaderMaterial(ShaderMaterial* dest) const;
 		void WriteShaderTextureSlot(ShaderMaterial* dest, int slot, int descriptor);
 
+		// GGMAX 1.41: cached composed ShaderMaterial. The full recompose (half-packs, sin/cos,
+		// per-slot descriptor lookups) ran for EVERY material EVERY frame; the composed result
+		// only changes when the material is dirty or the texture-streaming descriptor epoch
+		// moves. RunMaterialUpdateSystem recomposes into this cache on change and memcpys it
+		// into the (per-frame cycled) mapped array otherwise. A staggered heartbeat re-composes
+		// each material every 64 frames as insurance against direct field writes that skip
+		// SetDirty. Valid only while gg_shader_cache_epoch matches the streaming epoch.
+		mutable ShaderMaterial gg_shader_cache;
+		mutable uint32_t gg_shader_cache_epoch = ~0u;
+		mutable bool gg_shader_cache_valid = false;
+
 		// Retrieve the array of textures from the material
 		void WriteTextures(const wi::graphics::GPUResource** dest, int count) const;
 

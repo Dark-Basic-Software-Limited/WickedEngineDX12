@@ -209,6 +209,11 @@ namespace wi
 		static wi::unordered_map<std::string, wi::allocator::weak_ptr<ResourceInternal>> resources;
 		static Mode mode = Mode::NO_EMBEDDING;
 
+		// GGMAX 1.41: bumped whenever texture streaming swaps a texture object or recreates
+		// subresources — any cached GPU descriptor index derived from a streamed resource is
+		// invalid across a bump. Consumed by the ShaderMaterial recompose cache in wiScene.
+		std::atomic<uint32_t> gg_streaming_descriptor_epoch{ 0 };
+
 		void SetMode(Mode param)
 		{
 			mode = param;
@@ -1065,6 +1070,10 @@ namespace wi
 		{
 			// If any streaming replacement requests arrived, replace the resources here (main thread):
 			streaming_replacement_mutex.lock(); // streaming_replacement_mutex is not a long lock, it can only be held by the single streaming thread, so we don't need to try_lock
+			if (!streaming_texture_replacements.empty())
+			{
+				gg_streaming_descriptor_epoch.fetch_add(1, std::memory_order_relaxed); // GGMAX 1.41: descriptors changed
+			}
 			for (auto& replace : streaming_texture_replacements)
 			{
 				replace.resource->texture = replace.texture;
@@ -1077,6 +1086,7 @@ namespace wi
 			GraphicsDevice* device = GetDevice();
 			if (!locker.try_lock()) // Use try lock as this is on the main thread which shouldn't hitch on long locking!
 				return; // Streaming is not that important, we can abandon it if some resource loading is holding the lock
+			bool gg_any_subresource_recreated = false; // GGMAX 1.41
 			for (auto& x : resources)
 			{
 				wi::allocator::weak_ptr<ResourceInternal>& weak_resource = x.second;
@@ -1090,6 +1100,7 @@ namespace wi
 					if (wi::math::float_equal(min_lod_clamp_absolute_next, resource->streaming_texture.min_lod_clamp_absolute))
 						continue;
 					resource->streaming_texture.min_lod_clamp_absolute = min_lod_clamp_absolute_next;
+					gg_any_subresource_recreated = true; // GGMAX 1.41: descriptors recreated below
 
 					const float min_lod_clamp_relative = min_lod_clamp_absolute_next - mip_offset;
 
@@ -1122,6 +1133,11 @@ namespace wi
 						);
 					}
 				}
+			}
+
+			if (gg_any_subresource_recreated)
+			{
+				gg_streaming_descriptor_epoch.fetch_add(1, std::memory_order_relaxed); // GGMAX 1.41
 			}
 
 			// If previous streaming jobs were not finished, we cancel this until next frame:

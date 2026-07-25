@@ -11,6 +11,7 @@
 
 #include <memory>
 #include <string>
+#include <atomic>
 
 namespace wi
 {
@@ -61,6 +62,12 @@ namespace wi
 		};
 		void SetMode(Mode param);
 		Mode GetMode();
+
+		// GGMAX 1.41: bumped whenever texture streaming swaps a texture object or recreates
+		// subresources (GPU descriptor indices derived from streamed resources are invalid
+		// across a bump). Consumers cache per-epoch (ShaderMaterial recompose cache in wiScene).
+		extern std::atomic<uint32_t> gg_streaming_descriptor_epoch;
+
 		wi::vector<std::string> GetSupportedImageExtensions();
 		wi::vector<std::string> GetSupportedSoundExtensions();
 		wi::vector<std::string> GetSupportedVideoExtensions();

@@ -5276,19 +5276,28 @@ namespace wi::scene
 				{
 					const XMFLOAT3 gg_c = aabb.getCenter();
 					const float gg_r = aabb.getRadius();
-					const bool gg_bad = !std::isfinite(gg_r) || !std::isfinite(gg_c.x) || !std::isfinite(gg_c.y) || !std::isfinite(gg_c.z) ||
-						gg_r > 400000.0f || gg_c.y > 250000.0f || gg_c.y < -250000.0f;
-					if (gg_bad)
+					const float gg_mesh_r = mesh.aabb.getRadius();
+					const bool gg_nan = !std::isfinite(gg_r) || !std::isfinite(gg_c.x) || !std::isfinite(gg_c.y) || !std::isfinite(gg_c.z) || !std::isfinite(gg_mesh_r);
+					// Matrix-garbage detector: world AABB absurd while the MESH itself is sane.
+					// Meshes that are giant BY DESIGN (editor "box" helper, radius 3.5M — it
+					// exhausted the first tripwire's cap with false positives) are excluded.
+					const bool gg_matrix_garbage = std::isfinite(gg_mesh_r) && gg_mesh_r < 300000.0f &&
+						(gg_r > 400000.0f || gg_c.y > 250000.0f || gg_c.y < -250000.0f);
+					if (gg_nan || gg_matrix_garbage)
 					{
 						static std::atomic<uint32_t> gg_trip_count{ 0 };
 						const uint32_t gg_n = gg_trip_count.fetch_add(1);
-						if (gg_n < 128)
+						if (gg_n < 4096)
 						{
 							static std::mutex gg_trip_mutex;
 							std::scoped_lock gg_lck(gg_trip_mutex);
-							FILE* gg_f = fopen("corrupt_geometry.txt", "a");
+							// one log per entity per process — spam from a single bad entity
+							// must never mask other writers
+							static wi::unordered_set<Entity> gg_seen;
+							FILE* gg_f = (gg_seen.count(entity) == 0 && gg_seen.size() <= 256) ? fopen("corrupt_geometry.txt", "a") : nullptr;
 							if (gg_f != nullptr)
 							{
+								gg_seen.insert(entity);
 								const NameComponent* gg_nm = names.GetComponent(entity);
 								const NameComponent* gg_mnm = names.GetComponent(object.meshID);
 								fprintf(gg_f, "[hit %u] entity=%llu name=\"%s\" mesh=%llu meshname=\"%s\" worldAABB c=(%.1f,%.1f,%.1f) r=%.1f meshAABB r=%.1f\n",

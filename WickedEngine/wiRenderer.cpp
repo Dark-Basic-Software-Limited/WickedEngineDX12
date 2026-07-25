@@ -734,6 +734,12 @@ PipelineState PSO_mesh_blend_resolve;
 Shader shadowClearPS_GG;
 PipelineState PSO_shadowClear_GG;
 static bool delayedShadowCascadesEnabled = false;
+// GG "Laptop" mode: how many frames the delayed FAR cascades (1..N) are held between refreshes.
+// 2 = default delayed shadows (far cascades refresh every other frame); 4 = "twice as aggressive"
+// (the editor "Laptop" checkbox). Clamped >=2 at the setter. Cascade 0 always refreshes every frame,
+// and a >64" camera move still force-refreshes any stale cascade, so raising this only trades a little
+// more far-shadow lag at a near-static camera for another ~halving of the staggered-cascade cost.
+static int delayedShadowCascadeInterval = 2;
 struct DelayedShadowCascadeState
 {
 	static constexpr uint32_t MAX_CASCADES = 8;
@@ -4939,10 +4945,13 @@ void UpdatePerFrameData(
 						// per-frame IsGenerating/IsVisible chunk set) even at a static camera. The old
 						// per-cascade /2 /3 /4 /9 cadence + load-leveling deliberately DESYNCED cascades
 						// 1/2/3 — exactly what produced the flicker. Instead: cascade 0 every frame, and
-						// cascades 1..N together every OTHER frame, so every far-cascade boundary is
-						// always self-consistent while still ~halving the staggered cascades' cost.
+						// cascades 1..N TOGETHER every `interval`th frame, so every far-cascade boundary is
+						// always self-consistent while still ~halving (interval 2) or ~quartering (interval
+						// 4 = "Laptop") the staggered cascades' cost. Cascades 1..N always move as one group,
+						// so raising the interval never re-introduces the cross-cascade desync flicker.
 						const int frame = (int)fc;
-						if ((frame % 2) != 0)
+						const int interval = delayedShadowCascadeInterval < 2 ? 2 : delayedShadowCascadeInterval;
+						if ((frame % interval) != 0)
 						{
 							for (uint32_t c = 1; c < cascade_count; ++c) st.update[c] = false;
 						}
@@ -19582,6 +19591,15 @@ bool GetDelayedShadowCascadesEnabled()
 void InvalidateDelayedShadowCascades()
 {
 	delayedShadowState.valid = false;
+}
+void SetDelayedShadowCascadeInterval(int frames)
+{
+	// far cascades (1..N) refresh every `frames`th frame together. 2 = default, 4 = "Laptop" mode.
+	delayedShadowCascadeInterval = frames < 2 ? 2 : frames;
+}
+int GetDelayedShadowCascadeInterval()
+{
+	return delayedShadowCascadeInterval;
 }
 void SetRaytraceBounceCount(uint32_t bounces)
 {

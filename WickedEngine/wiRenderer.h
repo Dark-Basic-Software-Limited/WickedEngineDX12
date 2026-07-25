@@ -1200,6 +1200,8 @@ namespace wi::renderer
 	void SetDelayedShadowCascadesEnabled(bool value);
 	bool GetDelayedShadowCascadesEnabled();
 	void InvalidateDelayedShadowCascades(); // force a full refresh (sun moved, cascade splits changed, level load)
+	void SetDelayedShadowCascadeInterval(int frames); // GG: far-cascade (1..N) refresh period in frames — 2=default delayed shadows, 4="Laptop" (twice as aggressive); clamped >=2
+	int GetDelayedShadowCascadeInterval();
 	void SetRaytraceBounceCount(uint32_t bounces);
 	uint32_t GetRaytraceBounceCount();
 	void SetRaytraceDebugBVHVisualizerEnabled(bool value);

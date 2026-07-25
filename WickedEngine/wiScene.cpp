@@ -13,6 +13,9 @@
 #include "wiAllocator.h"
 #include "wiProfiler.h"
 
+#include <mutex> // GGMAX DIAG: corrupt-geometry tripwire
+#include <cmath> // GGMAX DIAG: std::isfinite
+
 #include "shaders/ShaderInterop_SurfelGI.h"
 #include "shaders/ShaderInterop_DDGI.h"
 
@@ -5262,6 +5265,45 @@ namespace wi::scene
 				}
 
 				aabb.layerMask = layerMask;
+
+				// GGMAX DIAG (temporary, 2026-07-25 corruption hunt): corrupt-geometry tripwire.
+				// If an object's world AABB goes absurd (NaN / island-scale radius / stratospheric
+				// center), log WHO it is to corrupt_geometry.txt next to the exe. Discriminates:
+				// world AABB insane + mesh AABB sane => matrix garbage; mesh AABB insane =>
+				// vertex garbage baked at creation. Silent while giant corruption is ON SCREEN
+				// => the garbage is GPU-side (buffer/binding), not CPU transforms. Capped + rare;
+				// remove when the hunt closes.
+				{
+					const XMFLOAT3 gg_c = aabb.getCenter();
+					const float gg_r = aabb.getRadius();
+					const bool gg_bad = !std::isfinite(gg_r) || !std::isfinite(gg_c.x) || !std::isfinite(gg_c.y) || !std::isfinite(gg_c.z) ||
+						gg_r > 400000.0f || gg_c.y > 250000.0f || gg_c.y < -250000.0f;
+					if (gg_bad)
+					{
+						static std::atomic<uint32_t> gg_trip_count{ 0 };
+						const uint32_t gg_n = gg_trip_count.fetch_add(1);
+						if (gg_n < 128)
+						{
+							static std::mutex gg_trip_mutex;
+							std::scoped_lock gg_lck(gg_trip_mutex);
+							FILE* gg_f = fopen("corrupt_geometry.txt", "a");
+							if (gg_f != nullptr)
+							{
+								const NameComponent* gg_nm = names.GetComponent(entity);
+								const NameComponent* gg_mnm = names.GetComponent(object.meshID);
+								fprintf(gg_f, "[hit %u] entity=%llu name=\"%s\" mesh=%llu meshname=\"%s\" worldAABB c=(%.1f,%.1f,%.1f) r=%.1f meshAABB r=%.1f\n",
+									gg_n, (unsigned long long)entity, gg_nm ? gg_nm->name.c_str() : "?",
+									(unsigned long long)object.meshID, gg_mnm ? gg_mnm->name.c_str() : "?",
+									gg_c.x, gg_c.y, gg_c.z, gg_r, mesh.aabb.getRadius());
+								const XMFLOAT4X4& gg_w = transform.world;
+								fprintf(gg_f, "  W=[%.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f | %.1f %.1f %.1f %.4f]\n",
+									gg_w._11, gg_w._12, gg_w._13, gg_w._14, gg_w._21, gg_w._22, gg_w._23, gg_w._24,
+									gg_w._31, gg_w._32, gg_w._33, gg_w._34, gg_w._41, gg_w._42, gg_w._43, gg_w._44);
+								fclose(gg_f);
+							}
+						}
+					}
+				}
 
 				// parallel bounds computation using shared memory:
 				AABB& shared_bounds = parallel_bounds[args.groupID];

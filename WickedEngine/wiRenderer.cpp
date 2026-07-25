@@ -3783,6 +3783,9 @@ void UpdateVisibility(Visibility& vis)
 		const float apparentCullTangentSq = apparentCullTangent * apparentCullTangent;
 		const XMFLOAT3 apparentCullEye = vis.camera->Eye;
 
+		// GGMAX 1.35: frame stamp for the visibility-pause consumers (animation system).
+		const uint32_t gg_vis_frame_stamp = (uint32_t)GetDevice()->GetFrameCount();
+
 		wi::jobsystem::Dispatch(ctx, object_loop, groupSize, [&](wi::jobsystem::JobArgs args) {
 
 			// Setup stream compaction:
@@ -3815,7 +3818,8 @@ void UpdateVisibility(Visibility& vis)
 				// Local stream compaction:
 				stream_compaction.list[stream_compaction.count++] = args.groupIndex;
 
-				const ObjectComponent& object = vis.scene->objects[args.jobIndex];
+				ObjectComponent& object = vis.scene->objects[args.jobIndex]; // GGMAX 1.35: non-const for the visibility stamp
+				object.gg_last_visible_frame = gg_vis_frame_stamp; // GGMAX 1.35
 				Scene::OcclusionResult& occlusion_result = vis.scene->occlusion_results_objects[args.jobIndex];
 				bool occluded = false;
 				if (vis.flags & Visibility::ALLOW_OCCLUSION_CULLING)

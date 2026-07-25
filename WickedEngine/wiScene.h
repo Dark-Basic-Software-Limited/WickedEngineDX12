@@ -93,6 +93,20 @@ namespace wi::scene
 		wi::vector<wi::primitive::Sphere> character_dedicated_shadows;
 		wi::unordered_map<wi::ecs::Entity, wi::vector<wi::ecs::Entity>> topdown_hierarchy; // managed by BuildTopDownHierarchy() in every Update(), allows parent->children traversal
 		wi::jobsystem::context topdown_hierarchy_workload;
+
+		// GGMAX 1.36: subtree-parallel hierarchy update. Built inside the topdown workload each
+		//	frame: the ROOT entries (hierarchy entries whose parent is INVALID or not itself a
+		//	hierarchy entry). RunHierarchyUpdateSystem dispatches one job per root; each job walks
+		//	its own subtree depth-first via topdown_hierarchy, CARRYING the accumulated world
+		//	matrix and layer mask down the chain — one local-matrix build + one multiply per
+		//	entity, no cross-job dependencies, no barriers. Replaces the stock O(N x depth)
+		//	per-entity ancestor chain rebuild (~17k bone entries x depth 8-15 per frame).
+		struct GGHierRoot
+		{
+			wi::ecs::Entity entity = wi::ecs::INVALID_ENTITY;
+			wi::ecs::Entity parent = wi::ecs::INVALID_ENTITY; // root's parent (not a hierarchy entry itself; may be INVALID)
+		};
+		wi::vector<GGHierRoot> gg_hier_roots;
 		uint32_t cpu_gpu_mapped_resource_index = 0;
 
 		// AABB culling streams:

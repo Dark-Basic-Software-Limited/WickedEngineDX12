@@ -40,6 +40,10 @@ namespace wi::scene
 
 		wi::jobsystem::context ctx;
 
+		// GGMAX 1.32: stage-level CPU attribution for Scene::Update (instrumentation only, free when profiler off).
+		//	Stages are the natural jobsystem::Wait barriers of this function.
+		auto gg_range_s1 = wi::profiler::BeginRangeCPU("Scene-S1 Anim+Transform");
+
 		UpdateHumanoidFacings();
 
 		// Script system runs first, because it could create new entities and components
@@ -258,6 +262,9 @@ namespace wi::scene
 
 		wi::jobsystem::Wait(ctx); // dependencies
 
+		wi::profiler::EndRange(gg_range_s1); // GGMAX 1.32
+		auto gg_range_s2 = wi::profiler::BeginRangeCPU("Scene-S2 Hier+Mesh+Mat");
+
 		RunHierarchyUpdateSystem(ctx);
 
 		// Lightmap requests are determined at this point, so we know if we need TLAS or not:
@@ -371,6 +378,9 @@ namespace wi::scene
 
 		wi::jobsystem::Wait(ctx); // dependencies
 
+		wi::profiler::EndRange(gg_range_s2); // GGMAX 1.32
+		auto gg_range_s3 = wi::profiler::BeginRangeCPU("Scene-S3 Armature+Proc");
+
 		WaitBuildTopDownHierarchy();
 
 		RunProceduralAnimationUpdateSystem(ctx);
@@ -382,6 +392,9 @@ namespace wi::scene
 		RunWeatherUpdateSystem(ctx);
 
 		wi::jobsystem::Wait(ctx); // dependencies
+
+		wi::profiler::EndRange(gg_range_s3); // GGMAX 1.32
+		auto gg_range_s4 = wi::profiler::BeginRangeCPU("Scene-S4 Object+Light");
 
 		RunObjectUpdateSystem(ctx);
 
@@ -406,6 +419,9 @@ namespace wi::scene
 		RunFontUpdateSystem(ctx);
 
 		wi::jobsystem::Wait(ctx); // dependencies
+
+		wi::profiler::EndRange(gg_range_s4); // GGMAX 1.32
+		auto gg_range_s5 = wi::profiler::BeginRangeCPU("Scene-S5 Tail+ShaderScene");
 
 		// Merge parallel bounds computation (depends on object update system):
 		bounds = AABB();
@@ -965,6 +981,8 @@ namespace wi::scene
 			shaderscene.voxelgrid.voxelSize = voxelgrid.voxelSize;
 			shaderscene.voxelgrid.voxelSize_rcp = voxelgrid.voxelSize_rcp;
 		}
+
+		wi::profiler::EndRange(gg_range_s5); // GGMAX 1.32
 	}
 	void Scene::Clear()
 	{
@@ -1938,6 +1956,19 @@ namespace wi::scene
 	std::atomic<uint32_t> gg_anim30fps_frame{ 0 };    // monotonic per-frame counter for even/odd parity
 	std::atomic<uint32_t> gg_anim30fps_dist2{ 0 };    // (c) squared dist threshold in scene units; 0 = throttle all, >0 = only beyond it
 
+	// GGMAX delta 1.35 — pause animation EVALUATION for objects that were not visible in the
+	// main view for N consecutive frames (frustum stamp written by UpdateVisibility). Timers
+	// keep advancing (same semantics as the long-shipped IsRenderable cull just below), so
+	// characters resume at the correct point in their animation the moment they re-enter view.
+	// gg_anim_vis_pause_frames: 0 = off; else pause when (frame - last_visible) > N.
+	// gg_anim_vis_pause_neardist2: never pause objects closer than this squared distance
+	//	(protects just-behind-the-camera characters whose shadows may still be on screen).
+	std::atomic<uint32_t> gg_anim_vis_pause_frames{ 0 };
+	std::atomic<uint32_t> gg_anim_vis_pause_neardist2{ 0 };
+
+	// GGMAX delta 1.36: level-order hierarchy update master switch (false = stock chain walk).
+	bool gg_hierarchy_levelorder = true;
+
 	void Scene::RunAnimationUpdateSystem(wi::jobsystem::context& ctx)
 	{
 		auto range = wi::profiler::BeginRangeCPU("Animations");
@@ -2040,6 +2071,33 @@ namespace wi::scene
 							{
 								iCulledAnimations++;
 								bCulled = true;
+							}
+							// GGMAX 1.35: frustum-visibility pause — the object has not passed the
+							// main-view cull for N consecutive frames and is not near the camera.
+							// Timer still advances below, so it resumes in sync on re-entry.
+							const uint32_t visPauseFrames = gg_anim_vis_pause_frames.load(std::memory_order_relaxed);
+							if (!bCulled && visPauseFrames > 0)
+							{
+								const uint32_t curFrame = (uint32_t)GetDevice()->GetFrameCount();
+								if (curFrame - object->gg_last_visible_frame > visPauseFrames)
+								{
+									bool bPause = true;
+									const uint32_t nearDist2 = gg_anim_vis_pause_neardist2.load(std::memory_order_relaxed);
+									if (nearDist2 > 0)
+									{
+										const XMFLOAT3& camEye = GetCamera().Eye;
+										const float pdx = object->center.x - camEye.x;
+										const float pdy = object->center.y - camEye.y;
+										const float pdz = object->center.z - camEye.z;
+										if (pdx * pdx + pdy * pdy + pdz * pdz < (float)nearDist2)
+											bPause = false;
+									}
+									if (bPause)
+									{
+										iCulledAnimations++;
+										bCulled = true;
+									}
+								}
 							}
 							//if (bEnableObjectCulling && (object->IsOccluded() || object->IsCulled()))
 							//{
@@ -3155,6 +3213,89 @@ namespace wi::scene
 	}
 	void Scene::RunHierarchyUpdateSystem(wi::jobsystem::context& ctx)
 	{
+		// GGMAX 1.36: subtree-parallel hierarchy update — one job per subtree ROOT; each job walks
+		// its own subtree depth-first via topdown_hierarchy, CARRYING the accumulated world matrix
+		// and ancestor layer mask down the chain. One local-matrix build + one multiply per entity
+		// (stock rebuilt the ENTIRE ancestor chain per entity = O(N x depth)), no cross-job
+		// dependencies, no barriers. Math note: the product is associated differently than the
+		// stock chain walk, so results can differ in the last float ulp — visually identical.
+		// gg_hierarchy_levelorder=false restores the stock path.
+		if (gg_hierarchy_levelorder)
+		{
+			WaitBuildTopDownHierarchy(); // roots + topdown children lists must be ready (started at Update() head)
+			if (!gg_hier_roots.empty())
+			{
+				wi::jobsystem::Dispatch(ctx, (uint32_t)gg_hier_roots.size(), 8, [this](wi::jobsystem::JobArgs args) {
+
+					const GGHierRoot& root = gg_hier_roots[args.jobIndex];
+
+					struct StackItem
+					{
+						Entity entity;
+						XMFLOAT4X4 carried_world; // nearest transform-carrying ancestor's FINAL world
+						uint32_t carried_mask;    // AND of all layer-carrying ancestors' masks
+					};
+					static thread_local wi::vector<StackItem> stack; // reused per worker; jobs never nest here
+					stack.clear();
+
+					// Seed from the root's parent (not a hierarchy entry itself — its world is its
+					// local, final since TransformUpdateSystem; the stock walk stopped at it too).
+					StackItem seed;
+					seed.entity = root.entity;
+					const TransformComponent* parent_transform = transforms.GetComponent(root.parent);
+					if (parent_transform != nullptr)
+					{
+						seed.carried_world = parent_transform->world;
+					}
+					else
+					{
+						XMStoreFloat4x4(&seed.carried_world, XMMatrixIdentity());
+					}
+					const LayerComponent* parent_layer = layers.GetComponent(root.parent);
+					seed.carried_mask = (parent_layer != nullptr) ? parent_layer->layerMask : ~0u;
+					stack.push_back(seed);
+
+					uint32_t processed = 0; // cycle guard for malformed data
+					while (!stack.empty() && processed++ < 100000u)
+					{
+						const StackItem item = stack.back();
+						stack.pop_back();
+
+						XMFLOAT4X4 next_world = item.carried_world;
+						TransformComponent* transform_child = transforms.GetComponent(item.entity);
+						if (transform_child != nullptr)
+						{
+							const XMMATRIX worldmatrix = transform_child->GetLocalMatrix() * XMLoadFloat4x4(&item.carried_world);
+							XMStoreFloat4x4(&transform_child->world, worldmatrix);
+							next_world = transform_child->world;
+						}
+
+						uint32_t next_mask = item.carried_mask;
+						LayerComponent* layer_child = layers.GetComponent(item.entity);
+						if (layer_child != nullptr)
+						{
+							layer_child->propagationMask = item.carried_mask;
+							next_mask &= layer_child->layerMask;
+						}
+
+						auto it = topdown_hierarchy.find(item.entity);
+						if (it != topdown_hierarchy.end())
+						{
+							for (Entity child : it->second)
+							{
+								StackItem& c = stack.emplace_back();
+								c.entity = child;
+								c.carried_world = next_world;
+								c.carried_mask = next_mask;
+							}
+						}
+					}
+
+				});
+			}
+			return;
+		}
+
 		wi::jobsystem::Dispatch(ctx, (uint32_t)hierarchy.GetCount(), small_subtask_groupsize, [&](wi::jobsystem::JobArgs args) {
 
 			HierarchyComponent& hier = hierarchy[args.jobIndex];
@@ -9459,6 +9600,21 @@ namespace wi::scene
 				Entity entity = hierarchy.GetEntity(i);
 				topdown_hierarchy[hier.parentID].push_back(entity);
 			}
+
+			// GGMAX 1.36: collect the subtree ROOTS for the subtree-parallel hierarchy update —
+			// entries whose parent is INVALID or is not itself a hierarchy entry (so the stock
+			// ancestor walk would have stopped at that parent).
+			gg_hier_roots.clear();
+			for (size_t i = 0; i < hierarchy.GetCount(); ++i)
+			{
+				const HierarchyComponent& hier = hierarchy[i];
+				if (hier.parentID == INVALID_ENTITY || !hierarchy.Contains(hier.parentID))
+				{
+					GGHierRoot& root = gg_hier_roots.emplace_back();
+					root.entity = hierarchy.GetEntity(i);
+					root.parent = hier.parentID;
+				}
+			}
 		});
 	}
 	void Scene::WaitBuildTopDownHierarchy() const
@@ -9555,11 +9711,12 @@ namespace wi::scene
 					AnimationQueue& queue = animation_queues[animation_queue_count];
 					queue.animations.clear();
 					queue.animations.push_back(&animationA);
-					queue.entities.clear();
-					for (auto& channelA : animationA.channels)
-					{
-						queue.entities.insert(channelA.target);
-					}
+					// GGMAX 1.34: queue.entities bookkeeping removed — its ONLY reader was the
+					// dependency check above, which the earlier "assume no dependencies" delta
+					// commented out. The clear + per-channel hash-set inserts were ~10-25k
+					// write-only ops per frame at 122 playing animations (~0.8ms of the
+					// "Animation Dependencies" range). Restore together with that block if
+					// dependencies ever come back.
 					animation_queue_count++;
 				}
 			}

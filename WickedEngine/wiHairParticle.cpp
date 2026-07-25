@@ -387,6 +387,8 @@ namespace wi
 		}
 	}
 
+	bool HairParticleSystem::gg_sim_ran_last_frame = true; // GGMAX 1.37b
+
 	void HairParticleSystem::UpdateCPU(const TransformComponent& transform, const MeshComponent& mesh, float dt)
 	{
 		// GGMAX 1.37: a moved system must re-simulate (world feeds the sim CS).
@@ -436,7 +438,13 @@ namespace wi
 			CreateRenderData();
 		}
 
-		std::swap(vb_pos[0], vb_pos[1]);
+		// GGMAX 1.37b: only advance the ping-pong when the sim consumed the previous state —
+		// swapping across skipped frames broke write/read parity on irregular sim gaps
+		// (the post-P.5 grass flicker during streaming/painting).
+		if (gg_sim_ran_last_frame)
+		{
+			std::swap(vb_pos[0], vb_pos[1]);
+		}
 	}
 	void HairParticleSystem::InitializeGPUBuffersIfNeeded(
 		const HairParticleSystem* hairs,

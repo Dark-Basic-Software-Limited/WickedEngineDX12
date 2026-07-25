@@ -5697,6 +5697,15 @@ void UpdateRenderData(
 			wi::profiler::EndRange(range);
 		}
 		hair_updates.clear();
+
+		// GGMAX 1.37b: tell next frame's UpdateCPU whether to advance the ping-pong —
+		// the swap must track SIM frames, not wall frames (see wiHairParticle.h).
+		HairParticleSystem::gg_sim_ran_last_frame = gg_sim_needed;
+	}
+	else
+	{
+		// No visible hairs -> nothing simulated; keep stock swap behavior for safety.
+		HairParticleSystem::gg_sim_ran_last_frame = true;
 	}
 
 	// Impostor prepare:

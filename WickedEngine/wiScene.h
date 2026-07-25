@@ -107,6 +107,11 @@ namespace wi::scene
 			wi::ecs::Entity parent = wi::ecs::INVALID_ENTITY; // root's parent (not a hierarchy entry itself; may be INVALID)
 		};
 		wi::vector<GGHierRoot> gg_hier_roots;
+		// GGMAX 1.36 (review F9/F11): hierarchy count at snapshot-build time. The fast subtree
+		// path only runs when this matches the LIVE count — otherwise (snapshot never built for
+		// this scene e.g. Scene::Instantiate temp scenes / standalone Lua scenes, or hierarchy
+		// mutated mid-frame e.g. ragdoll attach/detach) the stock chain walk runs instead.
+		size_t gg_hier_snapshot_count = ~0ull;
 		uint32_t cpu_gpu_mapped_resource_index = 0;
 
 		// AABB culling streams:

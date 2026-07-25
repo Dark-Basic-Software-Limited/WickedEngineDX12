@@ -3223,7 +3223,13 @@ namespace wi::scene
 		if (gg_hierarchy_levelorder)
 		{
 			WaitBuildTopDownHierarchy(); // roots + topdown children lists must be ready (started at Update() head)
-			if (!gg_hier_roots.empty())
+			// Review F9/F11: the fast path is only valid when the snapshot matches the LIVE
+			// hierarchy. Mismatch cases fall through to the stock chain walk below:
+			//	- snapshot never built for this scene (Scene::Instantiate temp scene, standalone
+			//	  Lua scene, physics calling in before any Update) -> gg_hier_snapshot_count = ~0
+			//	- hierarchy mutated between the snapshot build and this call (ragdoll
+			//	  attach/detach, entity spawn/delete mid-frame) -> counts differ
+			if (gg_hier_snapshot_count == hierarchy.GetCount() && !gg_hier_roots.empty())
 			{
 				wi::jobsystem::Dispatch(ctx, (uint32_t)gg_hier_roots.size(), 8, [this](wi::jobsystem::JobArgs args) {
 
@@ -3238,14 +3244,17 @@ namespace wi::scene
 					static thread_local wi::vector<StackItem> stack; // reused per worker; jobs never nest here
 					stack.clear();
 
-					// Seed from the root's parent (not a hierarchy entry itself — its world is its
-					// local, final since TransformUpdateSystem; the stock walk stopped at it too).
+					// Seed from the root's parent (not a hierarchy entry itself). Use GetLocalMatrix()
+					// — exactly what the stock chain walk multiplied for the terminal ancestor — NOT
+					// the stored world: physics calls this system BEFORE TransformUpdateSystem, when
+					// a moved parent's world is still last frame's (review F10; for a settled
+					// non-hierarchy entity local == world, so steady state is unchanged).
 					StackItem seed;
 					seed.entity = root.entity;
 					const TransformComponent* parent_transform = transforms.GetComponent(root.parent);
 					if (parent_transform != nullptr)
 					{
-						seed.carried_world = parent_transform->world;
+						XMStoreFloat4x4(&seed.carried_world, parent_transform->GetLocalMatrix());
 					}
 					else
 					{
@@ -3292,8 +3301,9 @@ namespace wi::scene
 					}
 
 				});
+				return;
 			}
-			return;
+			// snapshot unusable -> stock chain walk below (review F9/F11)
 		}
 
 		wi::jobsystem::Dispatch(ctx, (uint32_t)hierarchy.GetCount(), small_subtask_groupsize, [&](wi::jobsystem::JobArgs args) {
@@ -9615,6 +9625,7 @@ namespace wi::scene
 					root.parent = hier.parentID;
 				}
 			}
+			gg_hier_snapshot_count = hierarchy.GetCount(); // GGMAX 1.36 (review F9/F11)
 		});
 	}
 	void Scene::WaitBuildTopDownHierarchy() const

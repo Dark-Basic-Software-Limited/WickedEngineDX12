@@ -1200,9 +1200,14 @@ namespace wi::scene
 		uint32_t sort_bits = 0;
 
 		// GGMAX 1.35: frame number (low 32 bits of device frame count) when this object last
-		// passed the MAIN-view frustum cull in wi::renderer::UpdateVisibility. Consumers
-		// (animation visibility-pause) compare against the current frame; 0 = never seen.
-		// Written by exactly one culling job per frame, read the NEXT frame — no atomics needed.
+		// passed ANY object frustum cull in wi::renderer::UpdateVisibility (main view, planar
+		// reflection, render-to-texture cameras — an object visible only in a reflection keeps
+		// animating, which is the safe direction). Consumers (animation visibility-pause)
+		// compare against the current frame; 0 = never seen. Each culling dispatch writes an
+		// object from exactly one job and the UpdateVisibility calls serialize — no atomics.
+		// NOTE: consumers read the PREVIOUS frame's stamp (animation runs before culling), so
+		// resume lands one frame after re-entry; a never-seen object shows its rest pose for
+		// its first visible frame.
 		uint32_t gg_last_visible_frame = 0;
 
 		constexpr void SetRenderable(bool value) { if (value) { _flags |= RENDERABLE; } else { _flags &= ~RENDERABLE; } }

@@ -402,6 +402,14 @@ namespace wi::terrain
 		bool gg_vt_upgrade_hysteresis = false;
 		wi::terrain::Chunk gg_prev_center_chunk = {};
 		uint32_t gg_center_stable_frames = 0;
+		// GGMAX 1.33 (review F3): per-Terrain state for the incremental-VT job — members, not
+		// lambda statics, so multiple Terrain instances never share/race them.
+		uint32_t gg_freesort_cooldown = 0;   // rate-limits the low-water free-list rebuild
+		uint32_t gg_vt_frame_counter = 0;    // drives the rotating page-buffer heartbeat
+		// GGMAX 1.33 (review F2): center chunk at the last free-list rebuild — a center change
+		// (teleport/zoom) forces a rebuild so main-thread chunk-init never pops from a list
+		// whose keep-alive info predates the move.
+		wi::terrain::Chunk gg_freesort_last_center = {};
 		// GGMAX: radius (in chunks) of the full-resolution virtual-texture zone. Stock = 2:
 		// a tiny ring the camera crosses in milliseconds, forcing VT re-inits/re-streams on
 		// every fast move. A bounded game island can sit entirely INSIDE a wider zone —

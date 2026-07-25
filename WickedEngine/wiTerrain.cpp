@@ -2019,13 +2019,17 @@ namespace wi::terrain
 			}
 			// Low-water refill is rate-limited: with a near-full atlas the free list can sit
 			// under the threshold permanently, which must not re-introduce an every-frame sort.
-			static uint32_t gg_freesort_cooldown = 0;
+			// (Review F3: Terrain members, not lambda statics — no cross-instance sharing.)
 			if (gg_freesort_cooldown > 0) gg_freesort_cooldown--;
 			const bool gg_low_water = atlas.free_tiles.size() < 256 && gg_freesort_cooldown == 0;
-			const bool gg_rebuild_free = !gg_vt_incremental || gg_total_requests > 0 || atlas.gg_free_dirty || gg_low_water;
+			// Review F2: a center-chunk change (teleport/zoom) invalidates the list's keep-alive
+			// assumptions — force a rebuild so chunk-init can't steal recently-live tiles.
+			const bool gg_center_moved = !(gg_freesort_last_center == center_chunk);
+			const bool gg_rebuild_free = !gg_vt_incremental || gg_total_requests > 0 || atlas.gg_free_dirty || gg_low_water || gg_center_moved;
 			if (gg_rebuild_free)
 			{
 			if (gg_low_water) gg_freesort_cooldown = 8;
+			gg_freesort_last_center = center_chunk; // review F2
 			auto gg_range_free = wi::profiler::BeginRangeCPU("VT-job FreeSort"); // GGMAX 1.32 instrumentation
 			atlas.free_tiles.clear();
 			for (uint8_t y = 0; y < atlas.physical_tile_count_y; ++y)
@@ -2125,8 +2129,8 @@ namespace wi::terrain
 			// because the GPU-side pageBuffer still holds the identical data. A rotating
 			// heartbeat force-refreshes one resident VT per frame as insurance against any
 			// missed dirty path (full sweep every N frames at ~1/N of the cost).
-			static uint32_t gg_vt_frame = 0;
-			gg_vt_frame++;
+			gg_vt_frame_counter++; // review F3: Terrain member, not a lambda static
+			const uint32_t gg_vt_frame = gg_vt_frame_counter;
 			uint32_t gg_resident_count = 0;
 			for (VirtualTexture* vt : virtual_textures_in_use)
 			{
@@ -2141,7 +2145,10 @@ namespace wi::terrain
 					continue;
 
 				const bool gg_heartbeat = (gg_vt_index++ == gg_hb_index);
-				if (gg_vt_incremental && !vt->gg_page_dirty && !gg_heartbeat)
+				// Review F1: also rewrite when a previous upload was never consumed — cpu_resource_id
+				// advances every job run, so if Render didn't run since the last write (load screens,
+				// path switches) the still-pending flag would otherwise copy a STALE slot later.
+				if (gg_vt_incremental && !vt->gg_page_dirty && !gg_heartbeat && !vt->gg_page_upload_pending)
 					continue;
 
 				// Update page buffer for GPU:

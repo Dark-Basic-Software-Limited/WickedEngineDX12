@@ -164,6 +164,7 @@ namespace wi
 		BLAS = {};
 		_flags &= ~REBUILD_BUFFERS;
 		regenerate_frame = true;
+		gg_sim_runs = 0; // GGMAX 1.37: fresh buffers must simulate before the static-skip may engage
 
 		const uint32_t particleCount = GetParticleCount();
 		const uint32_t gfx_vertexcount = GetVertexCount();
@@ -388,6 +389,12 @@ namespace wi
 
 	void HairParticleSystem::UpdateCPU(const TransformComponent& transform, const MeshComponent& mesh, float dt)
 	{
+		// GGMAX 1.37: a moved system must re-simulate (world feeds the sim CS).
+		if (std::memcmp(&gg_prev_world, &transform.world, sizeof(XMFLOAT4X4)) != 0)
+		{
+			gg_prev_world = transform.world;
+			gg_sim_runs = 0;
+		}
 		world = transform.world;
 
 		XMFLOAT3 _min = mesh.aabb.getMin();

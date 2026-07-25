@@ -134,6 +134,17 @@ bool occlusionCulling = true;
 // dropped from visibleObjects. Scale-invariant: the world AABB radius already bakes in original size x
 // modified scale, and dividing by distance makes it a true on-screen apparent size.
 std::atomic<uint32_t> gg_apparent_cull_bits{ 0 };
+
+// GGMAX 1.37: hair/grass simulation static-skip (see UpdateRenderData). true = skip the sim
+// dispatch when camera parked + no wind + all visible systems settled; false = stock every-frame.
+// gg_hair_sim_wind_interval: when the camera is parked but WIND is active (sim output genuinely
+// animates), simulate every Nth frame instead of skipping entirely — sway continues in gentle
+// slow-motion (the sim integrates per-dispatch dt), invisible for idle vegetation. 1 = every frame.
+bool gg_hair_sim_static_skip = true;
+uint32_t gg_hair_sim_wind_interval = 4;
+static XMFLOAT3 gg_hair_prev_eye = XMFLOAT3(0, 0, 0);
+static XMFLOAT3 gg_hair_prev_at = XMFLOAT3(0, 0, 0);
+static uint32_t gg_hair_parked_frames = 0;
 bool temporalAA = false;
 bool temporalAADEBUG = false;
 uint32_t raytraceBounceCount = 8;
@@ -5615,7 +5626,44 @@ void UpdateRenderData(
 	static thread_local wi::vector<HairParticleSystem::UpdateGPUItem> hair_updates;
 	if (!vis.visibleHairs.empty())
 	{
-		auto range = wi::profiler::BeginRangeGPU("HairParticles - Simulate", cmd);
+		// GGMAX 1.37: skip the whole hair/grass simulation when its output would be identical
+		// to last frame's — camera parked (the sim's per-strand culling + camera-bend are the
+		// only view inputs), no wind (the only time input GG uses), and every visible system
+		// settled (>=4 sims since creation/regeneration/move — fills both position ping-pong
+		// buffers; the vb_pos swap in UpdateCPU keeps running, which is safe because both
+		// buffers hold identical converged data, so draws and motion vectors stay correct).
+		// Saved ~1.9ms GPU on the TESTPRO1 gate view (2M strands). gg_hair_sim_static_skip=false
+		// restores stock every-frame simulation.
+		bool gg_sim_needed = !gg_hair_sim_static_skip;
+		{
+			const XMFLOAT3 eye = vis.camera->Eye;
+			const XMFLOAT3 at = vis.camera->At;
+			if (std::memcmp(&gg_hair_prev_eye, &eye, sizeof(eye)) != 0 ||
+				std::memcmp(&gg_hair_prev_at, &at, sizeof(at)) != 0)
+			{
+				gg_hair_prev_eye = eye;
+				gg_hair_prev_at = at;
+				gg_hair_parked_frames = 0;
+			}
+			else if (gg_hair_parked_frames < 1000000u)
+			{
+				gg_hair_parked_frames++;
+			}
+			if (gg_hair_parked_frames < 4)
+				gg_sim_needed = true;
+			else if (
+				vis.scene->weather.windDirection.x != 0 ||
+				vis.scene->weather.windDirection.y != 0 ||
+				vis.scene->weather.windDirection.z != 0)
+			{
+				// Parked but windy: the sim output genuinely animates — keep it alive at a
+				// reduced cadence (slow-motion sway) instead of freezing or full-rate.
+				const uint32_t interval = std::max(1u, gg_hair_sim_wind_interval);
+				if ((gg_hair_parked_frames % interval) == 0)
+					gg_sim_needed = true;
+			}
+		}
+
 		for (uint32_t hairIndex : vis.visibleHairs)
 		{
 			const wi::HairParticleSystem& hair = vis.scene->hairs[hairIndex];
@@ -5633,12 +5681,22 @@ void UpdateRenderData(
 					hair_update.instanceIndex = (uint32_t)vis.scene->objects.GetCount() + hairIndex;
 					hair_update.mesh = mesh;
 					hair_update.material = &material;
+					if (hair.gg_sim_runs < 4)
+						gg_sim_needed = true; // GGMAX 1.37: unsettled system forces the batch
 				}
 			}
 		}
-		HairParticleSystem::UpdateGPU(hair_updates.data(), (uint32_t)hair_updates.size(), cmd);
+		if (gg_sim_needed)
+		{
+			auto range = wi::profiler::BeginRangeGPU("HairParticles - Simulate", cmd);
+			HairParticleSystem::UpdateGPU(hair_updates.data(), (uint32_t)hair_updates.size(), cmd);
+			for (auto& hair_update : hair_updates)
+			{
+				hair_update.hair->gg_sim_runs++; // GGMAX 1.37
+			}
+			wi::profiler::EndRange(range);
+		}
 		hair_updates.clear();
-		wi::profiler::EndRange(range);
 	}
 
 	// Impostor prepare:

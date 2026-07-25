@@ -148,6 +148,14 @@ namespace wi
 		mutable bool must_rebuild_blas = true;
 		mutable bool gpu_initialized = false;
 
+		// GGMAX 1.37: static-skip bookkeeping. gg_sim_runs counts GPU simulations since the
+		// last content change (creation, CreateRenderData regeneration, or transform move —
+		// reset in those places). The batch skip in wi::renderer::UpdateRenderData only
+		// engages when every visible system has simulated enough times to fill BOTH
+		// position ping-pong buffers with settled data.
+		mutable uint32_t gg_sim_runs = 0;
+		mutable XMFLOAT4X4 gg_prev_world = XMFLOAT4X4(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+
 		void Serialize(wi::Archive& archive, wi::ecs::EntitySerializer& seri);
 
 		static void Initialize();

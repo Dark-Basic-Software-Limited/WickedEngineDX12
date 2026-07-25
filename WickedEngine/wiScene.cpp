@@ -5064,9 +5064,14 @@ namespace wi::scene
 				inst.transform.Create(worldMatrix);
 				inst.transformPrev.Create(worldMatrixPrev);
 
-				XMVECTOR S, R, T;
-				XMMatrixDecompose(&S, &R, &T, W);
-				float size = std::max(XMVectorGetX(S), std::max(XMVectorGetY(S), XMVectorGetZ(S)));
+				// GGMAX 1.38: only the scale MAGNITUDE is consumed here — basis row lengths give it
+				// without the full quaternion-extracting XMMatrixDecompose (which ran per object per
+				// frame). Row lengths equal |scale| for any TRS matrix, including negative
+				// determinants where XMMatrixDecompose outright fails.
+				const float gg_sx = XMVectorGetX(XMVector3Length(W.r[0]));
+				const float gg_sy = XMVectorGetX(XMVector3Length(W.r[1]));
+				const float gg_sz = XMVectorGetX(XMVector3Length(W.r[2]));
+				float size = std::max(gg_sx, std::max(gg_sy, gg_sz));
 
 				if (object.lightmap.IsValid())
 				{

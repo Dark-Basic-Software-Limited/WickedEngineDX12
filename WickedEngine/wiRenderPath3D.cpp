@@ -14,6 +14,10 @@ namespace wi
 {
 	static constexpr float foreground_depth_range = 0.01f;
 
+	// GGMAX 1.39: skip the underwater postprocess while the camera is safely above the
+	// waterline (see the ocean block in RenderPostprocessChain). false = stock always-run.
+	bool gg_skip_underwater_above_water = true;
+
 	void RenderPath3D::DeleteGPUResources()
 	{
 		RenderPath2D::DeleteGPUResources();
@@ -2440,14 +2444,22 @@ namespace wi
 			}
 			if (scene->weather.IsOceanEnabled())
 			{
-				wi::renderer::Postprocess_Underwater(
-					rt_first == nullptr ? *rt_read : *rt_first,
-					*rt_write,
-					cmd
-				);
+				// GGMAX 1.39: the underwater postprocess only affects a SUBMERGED camera — skip
+				// the full-screen dispatch (+ClearUAV +barriers) while the eye is safely above the
+				// waterline (margin covers wave displacement). Chain-safe: skipping a stage leaves
+				// rt_first/rt_read for the next consumer exactly like the stage never existed.
+				const float gg_waterline = scene->weather.oceanParameters.waterHeight + 200.0f;
+				if (!gg_skip_underwater_above_water || camera->Eye.y <= gg_waterline)
+				{
+					wi::renderer::Postprocess_Underwater(
+						rt_first == nullptr ? *rt_read : *rt_first,
+						*rt_write,
+						cmd
+					);
 
-				rt_first = nullptr;
-				std::swap(rt_read, rt_write);
+					rt_first = nullptr;
+					std::swap(rt_read, rt_write);
+				}
 			}
 
 			for (auto& x : custom_post_processes)

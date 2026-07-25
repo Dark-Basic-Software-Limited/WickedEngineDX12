@@ -145,6 +145,11 @@ uint32_t gg_hair_sim_wind_interval = 4;
 static XMFLOAT3 gg_hair_prev_eye = XMFLOAT3(0, 0, 0);
 static XMFLOAT3 gg_hair_prev_at = XMFLOAT3(0, 0, 0);
 static uint32_t gg_hair_parked_frames = 0;
+// GGMAX 1.37c: full-rate hysteresis. Any forcing event (unsettled/new/regenerated/moved system,
+// camera motion) holds genuine EVERY-FRAME simulation for this many frames before the cadence may
+// engage. Without it, transition windows (grass streaming at load, painting) bounce the scheduler
+// between full-rate and skipping — irregular sway hops + erratic motion vectors = residual flicker.
+static uint32_t gg_hair_fullrate_cooldown = 0;
 bool temporalAA = false;
 bool temporalAADEBUG = false;
 uint32_t raytraceBounceCount = 8;
@@ -5634,7 +5639,12 @@ void UpdateRenderData(
 		// buffers hold identical converged data, so draws and motion vectors stay correct).
 		// Saved ~1.9ms GPU on the TESTPRO1 gate view (2M strands). gg_hair_sim_static_skip=false
 		// restores stock every-frame simulation.
-		bool gg_sim_needed = !gg_hair_sim_static_skip;
+		// GGMAX 1.37c: two-tier decision. FORCING events (feature off, camera motion, any
+		// unsettled system) demand genuine full-rate and arm a cooldown; the wind cadence may
+		// only engage once everything has been calm for the whole cooldown — so transition
+		// windows (level-load streaming, painting) run bit-for-bit stock-smooth instead of
+		// bouncing between full-rate and skipping.
+		bool gg_force_fullrate = !gg_hair_sim_static_skip;
 		{
 			const XMFLOAT3 eye = vis.camera->Eye;
 			const XMFLOAT3 at = vis.camera->At;
@@ -5650,18 +5660,7 @@ void UpdateRenderData(
 				gg_hair_parked_frames++;
 			}
 			if (gg_hair_parked_frames < 4)
-				gg_sim_needed = true;
-			else if (
-				vis.scene->weather.windDirection.x != 0 ||
-				vis.scene->weather.windDirection.y != 0 ||
-				vis.scene->weather.windDirection.z != 0)
-			{
-				// Parked but windy: the sim output genuinely animates — keep it alive at a
-				// reduced cadence (slow-motion sway) instead of freezing or full-rate.
-				const uint32_t interval = std::max(1u, gg_hair_sim_wind_interval);
-				if ((gg_hair_parked_frames % interval) == 0)
-					gg_sim_needed = true;
-			}
+				gg_force_fullrate = true;
 		}
 
 		for (uint32_t hairIndex : vis.visibleHairs)
@@ -5682,9 +5681,35 @@ void UpdateRenderData(
 					hair_update.mesh = mesh;
 					hair_update.material = &material;
 					if (hair.gg_sim_runs < 4)
-						gg_sim_needed = true; // GGMAX 1.37: unsettled system forces the batch
+						gg_force_fullrate = true; // GGMAX 1.37: unsettled system forces the batch
 				}
 			}
+		}
+
+		bool gg_sim_needed;
+		if (gg_force_fullrate)
+		{
+			gg_hair_fullrate_cooldown = 60; // GGMAX 1.37c: ~1s of guaranteed stock full-rate
+			gg_sim_needed = true;
+		}
+		else if (gg_hair_fullrate_cooldown > 0)
+		{
+			gg_hair_fullrate_cooldown--;
+			gg_sim_needed = true;
+		}
+		else if (
+			vis.scene->weather.windDirection.x != 0 ||
+			vis.scene->weather.windDirection.y != 0 ||
+			vis.scene->weather.windDirection.z != 0)
+		{
+			// Calm + windy: the sim output genuinely animates — keep it alive at a reduced,
+			// perfectly REGULAR cadence (slow-motion sway) instead of freezing or full-rate.
+			const uint32_t interval = std::max(1u, gg_hair_sim_wind_interval);
+			gg_sim_needed = (gg_hair_parked_frames % interval) == 0;
+		}
+		else
+		{
+			gg_sim_needed = false; // calm + no wind: output cannot change — full skip
 		}
 		if (gg_sim_needed)
 		{

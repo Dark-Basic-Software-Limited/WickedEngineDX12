@@ -112,6 +112,14 @@ namespace wi::scene
 		// this scene e.g. Scene::Instantiate temp scenes / standalone Lua scenes, or hierarchy
 		// mutated mid-frame e.g. ragdoll attach/detach) the stock chain walk runs instead.
 		size_t gg_hier_snapshot_count = ~0ull;
+		// GGMAX 1.36b: TRUE mutation stamp — the count compare alone has a hole: a same-frame
+		// attach+detach keeps the count EQUAL while the snapshot is stale, and a freshly attached
+		// entity then renders one frame without its parent transform (visible flash; probability
+		// scales with streaming churn rate — the intermittent load-window flicker). Every
+		// hierarchy mutation site bumps this; the snapshot records it at build time and the fast
+		// path requires BOTH stamp and count to match. Atomic: physics can Attach/Detach from jobs.
+		std::atomic<uint32_t> gg_hier_mutation_counter{ 0 };
+		uint32_t gg_hier_snapshot_mutation = ~0u;
 		uint32_t cpu_gpu_mapped_resource_index = 0;
 
 		// AABB culling streams:

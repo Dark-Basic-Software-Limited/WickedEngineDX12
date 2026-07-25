@@ -1012,6 +1012,7 @@ namespace wi::scene
 		collider_count_gpu = 0;
 
 		topdown_hierarchy.clear();
+		gg_hier_mutation_counter.fetch_add(1, std::memory_order_relaxed); // GGMAX 1.36b
 	}
 	void Scene::MergeFastInternal(Scene& other)
 	{
@@ -1021,6 +1022,7 @@ namespace wi::scene
 				continue;
 			entry.second.component_manager->Merge(*other.componentLibrary.entries[entry.first].component_manager);
 		}
+		gg_hier_mutation_counter.fetch_add(1, std::memory_order_relaxed); // GGMAX 1.36b: bulk hierarchy adds
 	}
 	void Scene::Merge(Scene& other)
 	{
@@ -1207,6 +1209,15 @@ namespace wi::scene
 
 	void Scene::Entity_Remove(Entity entity, bool recursive, bool keep_sorted)
 	{
+		// GGMAX 1.36b: removing an entity that is a hierarchy entry (or a PARENT of entries)
+		// mutates the hierarchy forest — invalidate the subtree snapshot. Conservative: any
+		// removal while a hierarchy exists bumps (a non-hierarchy entity's removal is a no-op
+		// for the walk, but the bump only costs a stock-path frame).
+		if (hierarchy.GetCount() > 0)
+		{
+			gg_hier_mutation_counter.fetch_add(1, std::memory_order_relaxed);
+		}
+
 		if (recursive)
 		{
 			wi::vector<Entity> entities_to_remove;
@@ -1866,6 +1877,7 @@ namespace wi::scene
 
 		HierarchyComponent& parentcomponent = hierarchy.Create(entity);
 		parentcomponent.parentID = parent;
+		gg_hier_mutation_counter.fetch_add(1, std::memory_order_relaxed); // GGMAX 1.36b
 
 		TransformComponent* transform_parent = transforms.GetComponent(parent);
 		TransformComponent* transform_child = transforms.GetComponent(entity);
@@ -1899,6 +1911,7 @@ namespace wi::scene
 			}
 
 			hierarchy.Remove(entity);
+			gg_hier_mutation_counter.fetch_add(1, std::memory_order_relaxed); // GGMAX 1.36b
 		}
 	}
 	void Scene::Component_DetachChildren(Entity parent)
@@ -2080,7 +2093,11 @@ namespace wi::scene
 							// main-view cull for N consecutive frames and is not near the camera.
 							// Timer still advances below, so it resumes in sync on re-entry.
 							const uint32_t visPauseFrames = gg_anim_vis_pause_frames.load(std::memory_order_relaxed);
-							if (!bCulled && visPauseFrames > 0)
+							// GGMAX 1.35b: NEVER-STAMPED objects (gg_last_visible_frame == 0: just
+							// created by streaming/spawn, or not yet through their first cull) are
+							// exempt — they were born "unseen for thousands of frames" and briefly
+							// snapped between paused and playing during load churn.
+							if (!bCulled && visPauseFrames > 0 && object->gg_last_visible_frame != 0)
 							{
 								const uint32_t curFrame = (uint32_t)GetDevice()->GetFrameCount();
 								if (curFrame - object->gg_last_visible_frame > visPauseFrames)
@@ -3227,13 +3244,16 @@ namespace wi::scene
 		if (gg_hierarchy_levelorder)
 		{
 			WaitBuildTopDownHierarchy(); // roots + topdown children lists must be ready (started at Update() head)
-			// Review F9/F11: the fast path is only valid when the snapshot matches the LIVE
-			// hierarchy. Mismatch cases fall through to the stock chain walk below:
+			// Review F9/F11 + 1.36b: the fast path is only valid when the snapshot matches the
+			// LIVE hierarchy. Mismatch cases fall through to the stock chain walk below:
 			//	- snapshot never built for this scene (Scene::Instantiate temp scene, standalone
-			//	  Lua scene, physics calling in before any Update) -> gg_hier_snapshot_count = ~0
-			//	- hierarchy mutated between the snapshot build and this call (ragdoll
-			//	  attach/detach, entity spawn/delete mid-frame) -> counts differ
-			if (gg_hier_snapshot_count == hierarchy.GetCount() && !gg_hier_roots.empty())
+			//	  Lua scene, physics calling in before any Update) -> stamps initialized to ~0
+			//	- hierarchy mutated since the snapshot build (ragdoll attach/detach, entity
+			//	  spawn/delete, streaming churn) -> MUTATION STAMP differs. The count compare
+			//	  alone missed same-frame attach+detach pairs (equal count, stale snapshot) —
+			//	  freshly attached entities flashed one frame without their parent transform.
+			if (gg_hier_snapshot_mutation == gg_hier_mutation_counter.load(std::memory_order_acquire) &&
+				gg_hier_snapshot_count == hierarchy.GetCount() && !gg_hier_roots.empty())
 			{
 				wi::jobsystem::Dispatch(ctx, (uint32_t)gg_hier_roots.size(), 8, [this](wi::jobsystem::JobArgs args) {
 
@@ -9641,6 +9661,9 @@ namespace wi::scene
 			// GGMAX 1.36: collect the subtree ROOTS for the subtree-parallel hierarchy update —
 			// entries whose parent is INVALID or is not itself a hierarchy entry (so the stock
 			// ancestor walk would have stopped at that parent).
+			// 1.36b: record the mutation stamp FIRST (acquire) — if a mutation lands while this
+			// job runs, the stamp comparison at consume time fails and the stock path runs.
+			gg_hier_snapshot_mutation = gg_hier_mutation_counter.load(std::memory_order_acquire);
 			gg_hier_roots.clear();
 			for (size_t i = 0; i < hierarchy.GetCount(); ++i)
 			{

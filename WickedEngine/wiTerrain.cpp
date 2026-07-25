@@ -1887,6 +1887,15 @@ namespace wi::terrain
 					material->textures[map_type].lod_clamp = (float)vt.lod_count - 2;
 				}
 				vt.blendmap = chunk_data.blendmap;
+				// GGMAX 1.42: the writes above changed the material's composed state (descriptor
+				// indices, texMulAdd, lod_clamp) WITHOUT SetDirty — harmless pre-1.41 because
+				// RunMaterialUpdateSystem recomposed every material every frame, but the 1.41
+				// recompose cache would keep serving the STALE composition for up to 63 frames
+				// (heartbeat) after any VT rebind: the chunk samples the previous residency/
+				// feedback maps (pooled, possibly re-issued to ANOTHER chunk) or stale single-
+				// tile coordinates — grey/foreign chunk textures during load, reload and
+				// resolution-ring crossings. Mark dirty so the cache recomposes this frame.
+				material->SetDirty();
 			}
 
 			// GGMAX: blendmap-edit repaint — pick up the recreated blendmap texture here

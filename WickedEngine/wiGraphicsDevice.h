@@ -115,6 +115,16 @@ namespace wi::graphics
 		// The CPU will wait until all submitted GPU work is finished execution
 		virtual void WaitForGPU() const = 0;
 
+		// GGMAX 1.43: fully quiesce the GPU AND release every deferred-destroyed resource
+		// (buffers, textures, bindless descriptor slots) immediately, instead of over the
+		// next BUFFERCOUNT frames. Used by the game's in-place level-reload path: the old
+		// level frees thousands of GPU resources while the renderer keeps presenting, and
+		// letting their heap memory + descriptor slots recycle lazily UNDER the new level's
+		// creation storm produced wrong-texture / garbage-vertex draws (reload corruption,
+		// 2026-07-25 hunt). Returns the number of deferred items released (diagnostic).
+		// Default no-op for backends that do not implement it.
+		virtual uint64_t FlushDeferredDestroys() { return 0; }
+
 		// The current PipelineState cache will be cleared. It is useful to clear this when reloading shaders, to avoid accumulating unused pipeline states
 		virtual void ClearPipelineStateCache() = 0;
 

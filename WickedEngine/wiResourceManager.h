@@ -116,6 +116,15 @@ namespace wi
 		//	Launching or finalizing background streaming jobs is attempted here
 		void UpdateStreamingResources(float dt);
 
+		// GGMAX 1.44 (in-place level-reload corruption fix): quiesce the texture-streaming
+		// system across a level reload. Begin: pause streaming, join the in-flight streaming
+		// job and DROP any pending texture replacements (they belong to the dying session —
+		// applying or continuing them across the reload wrote another file's bytes into live
+		// textures: the "blue palms / wrong texture content" corruption, streaming-off A/B
+		// confirmed 2026-07-26). End: resume streaming; the new level re-streams cleanly.
+		void GGReloadGuardBegin();
+		void GGReloadGuardEnd();
+
 		// Returns true if any of the loaded resources are outdated compared to their files
 		bool CheckResourcesOutdated();
 

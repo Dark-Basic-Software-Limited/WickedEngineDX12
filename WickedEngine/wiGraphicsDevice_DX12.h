@@ -315,6 +315,7 @@ namespace wi::graphics
 		void OnDeviceRemoved();
 
 		void WaitForGPU() const override;
+		uint64_t FlushDeferredDestroys() override; // GGMAX 1.43
 		void ClearPipelineStateCache() override;
 		size_t GetActivePipelineCount() const override { return pipelines_global.size(); }
 

@@ -5774,6 +5774,30 @@ std::mutex queue_locker;
 		}
 	}
 
+	// GGMAX 1.43: see wiGraphicsDevice.h. WaitForGPU() drains every queue, so nothing on the
+	// GPU can still reference a deferred-destroyed resource; Update(FRAMECOUNT + 1, 0) then
+	// releases the ENTIRE destroy backlog including items queued this frame (the +1 nudges
+	// the handler's framecount by one; the next real SubmitCommandLists realigns it and the
+	// BUFFERCOUNT slack absorbs the offset).
+	uint64_t GraphicsDevice_DX12::FlushDeferredDestroys()
+	{
+		WaitForGPU();
+		uint64_t backlog = 0;
+		{
+			std::scoped_lock lck(allocationhandler->destroylocker);
+			backlog =
+				allocationhandler->destroyer_allocations.size() +
+				allocationhandler->destroyer_resources.size() +
+				allocationhandler->destroyer_queryheaps.size() +
+				allocationhandler->destroyer_pipelines.size() +
+				allocationhandler->destroyer_rootSignatures.size() +
+				allocationhandler->destroyer_bindless_res.size() +
+				allocationhandler->destroyer_bindless_sam.size();
+		}
+		allocationhandler->Update(FRAMECOUNT + 1, 0);
+		return backlog;
+	}
+
 	void GraphicsDevice_DX12::ClearPipelineStateCache()
 	{
 		allocationhandler->destroylocker.lock();

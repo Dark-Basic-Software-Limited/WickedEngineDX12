@@ -1066,8 +1066,21 @@ namespace wi
 			return streaming_threshold;
 		}
 
+		// GGMAX DIAG (2026-07-26 reload-corruption hunt): pause the whole texture-streaming
+		// system (no min-lod updates, no mip stream in/out, no texture replacements).
+		// Textures stay at their initially-loaded resolution. A/B probe: if the reload
+		// corruption (wrong texture content) disappears with streaming paused, the
+		// streaming path is the writer. Driven by harness SET_STREAMING <0|1>.
+		// CONFIRMED 2026-07-26: streaming paused = zero corruption across reloads.
+		bool gg_streaming_paused = false;
+
+		// GGMAX 1.44: see wiResourceManager.h. Implemented below UpdateStreamingResources
+		// (needs streaming_ctx / replacement queue visibility).
+
 		void UpdateStreamingResources(float dt)
 		{
+			if (gg_streaming_paused)
+				return;
 			// If any streaming replacement requests arrived, replace the resources here (main thread):
 			streaming_replacement_mutex.lock(); // streaming_replacement_mutex is not a long lock, it can only be held by the single streaming thread, so we don't need to try_lock
 			if (!streaming_texture_replacements.empty())
@@ -1292,6 +1305,23 @@ namespace wi
 					}
 				}
 			});
+		}
+
+		// GGMAX 1.44: quiesce streaming across an in-place level reload (see header).
+		void GGReloadGuardBegin()
+		{
+			gg_streaming_paused = true;
+			wi::jobsystem::Wait(streaming_ctx); // join the in-flight streaming job
+			streaming_replacement_mutex.lock();
+			// Pending replacements were computed against the dying session's resources —
+			// drop them; survivors will simply re-stream under the new session.
+			streaming_texture_replacements.clear();
+			streaming_replacement_mutex.unlock();
+			streaming_texture_jobs.clear(); // release held shared_ptrs to old resources
+		}
+		void GGReloadGuardEnd()
+		{
+			gg_streaming_paused = false;
 		}
 
 		bool CheckResourcesOutdated()

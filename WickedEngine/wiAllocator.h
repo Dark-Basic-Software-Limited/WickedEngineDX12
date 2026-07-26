@@ -19,9 +19,34 @@
 #include <cassert>
 #include <algorithm>
 #include <deque>
+#include <map>
+#include <cstdio>
+#include <cstdarg>
 
 namespace wi::allocator
 {
+	// GGMAX 1.46 (reload-corruption hunt): the shared mesh suballocator was caught handing out
+	// out-of-range offsets (CreateAliasingResource E_INVALIDARG -> device removed) under mass
+	// mesh churn; the silent version of that failure is two live allocations overlapping = one
+	// mesh's upload stomping another's bytes (records correct, pixels wrong). These guards make
+	// the loud mode a graceful reject and the silent mode a named log line in alloc_tripwire.txt.
+	inline bool gg_alloc_tripwire = true;              // live-range overlap tracking + logging
+	inline uint32_t gg_deferred_extra_hold = 8;        // extra frames before a freed range is reusable
+	inline void gg_tripwire_log(const char* fmt, ...)
+	{
+#ifdef _WIN32
+		FILE* f = nullptr;
+		if (fopen_s(&f, "alloc_tripwire.txt", "a") != 0) f = nullptr;
+#else
+		FILE* f = fopen("alloc_tripwire.txt", "a");
+#endif
+		if (f == nullptr) return;
+		va_list args;
+		va_start(args, fmt);
+		vfprintf(f, fmt, args);
+		va_end(args);
+		fclose(f);
+	}
 	// Allocation of consecutive bytes, but no freeing, instead the whole allocator can be reset
 	struct LinearAllocator
 	{
@@ -119,6 +144,7 @@ namespace wi::allocator
 			bool deferred_release_enabled = false;
 			uint64_t deferred_release_frame = 0;
 			std::deque<std::pair<OffsetAllocator::Allocation, uint64_t>> deferred_release_queue;
+			std::map<uint32_t, uint32_t> live_pages; // GGMAX 1.46: outstanding page ranges (offset -> page count) for the overlap tripwire
 		};
 		std::shared_ptr<AllocatorInternal> allocator; // shared ptr is used to let any allocations extend the lifeftime of the allocator
 
@@ -149,8 +175,16 @@ namespace wi::allocator
 				return;
 			std::scoped_lock lck(allocator->locker);
 			allocator->deferred_release_frame = framecount;
-			while (!allocator->deferred_release_queue.empty() && allocator->deferred_release_queue.front().second + buffercount < framecount)
+			// GGMAX 1.46: hold freed ranges a few extra frames — mid-frame message pumps during
+			// level load can advance FRAMECOUNT without the usual fence-wait pacing, making the
+			// bare buffercount window unsafe for reuse-while-GPU-still-reads.
+			while (!allocator->deferred_release_queue.empty() && allocator->deferred_release_queue.front().second + buffercount + gg_deferred_extra_hold < framecount)
 			{
+				if (gg_alloc_tripwire)
+				{
+					gg_tripwire_log("R %p %u\n", (void*)allocator.get(), (unsigned)allocator->deferred_release_queue.front().first.offset);
+					allocator->live_pages.erase(allocator->deferred_release_queue.front().first.offset); // GGMAX 1.46
+				}
 				allocator->allocator.free(allocator->deferred_release_queue.front().first);
 				allocator->deferred_release_queue.pop_front();
 			}
@@ -223,11 +257,21 @@ namespace wi::allocator
 					{
 						// can only be reclaimed after buffering amount of frames passed, this is usually used for GPU resources:
 						allocator->deferred_release_queue.push_back(std::make_pair(internal_state->allocation, allocator->deferred_release_frame));
+						// GGMAX 1.46: range stays in live_pages until the drain actually frees it
+						if (gg_alloc_tripwire)
+						{
+							gg_tripwire_log("D %p %u\n", (void*)allocator.get(), (unsigned)internal_state->allocation.offset);
+						}
 					}
 					else
 					{
 						// reclaimed immediately:
 						allocator->allocator.free(internal_state->allocation);
+						if (gg_alloc_tripwire)
+						{
+							gg_tripwire_log("F %p %u\n", (void*)allocator.get(), (unsigned)internal_state->allocation.offset);
+							allocator->live_pages.erase(internal_state->allocation.offset); // GGMAX 1.46
+						}
 					}
 					allocator->internal_blocks.free(internal_state);
 				}
@@ -249,6 +293,38 @@ namespace wi::allocator
 			Allocation alloc;
 			if (offsetallocation.offset != OffsetAllocator::Allocation::NO_SPACE)
 			{
+				// GGMAX 1.46: an out-of-range grant means the free-list metadata is corrupt.
+				// Reject it (caller falls back to a standalone buffer) instead of letting
+				// CreateAliasingResource fail with E_INVALIDARG and remove the device.
+				if (offsetallocation.offset + pages > page_count)
+				{
+					gg_tripwire_log("OOB-ALLOC offset=%u pages=%u page_count=%u (metadata corrupt) -> rejected\n",
+						(unsigned)offsetallocation.offset, (unsigned)pages, (unsigned)page_count);
+					allocator->allocator.free(offsetallocation);
+					return alloc;
+				}
+				// GGMAX 1.46: overlap tripwire — a grant intersecting a LIVE range is the silent
+				// double-booking that lets one mesh's upload stomp another's bytes.
+				if (gg_alloc_tripwire)
+				{
+					gg_tripwire_log("A %p %u %u pc=%u\n", (void*)allocator.get(), (unsigned)offsetallocation.offset, (unsigned)pages, (unsigned)page_count);
+					auto next = allocator->live_pages.lower_bound(offsetallocation.offset);
+					if (next != allocator->live_pages.begin())
+					{
+						auto prev = std::prev(next);
+						if (prev->first + prev->second > offsetallocation.offset)
+						{
+							gg_tripwire_log("OVERLAP-ALLOC new=[%u,+%u) collides prev=[%u,+%u)\n",
+								(unsigned)offsetallocation.offset, (unsigned)pages, (unsigned)prev->first, (unsigned)prev->second);
+						}
+					}
+					if (next != allocator->live_pages.end() && next->first < offsetallocation.offset + pages)
+					{
+						gg_tripwire_log("OVERLAP-ALLOC new=[%u,+%u) collides next=[%u,+%u)\n",
+							(unsigned)offsetallocation.offset, (unsigned)pages, (unsigned)next->first, (unsigned)next->second);
+					}
+					allocator->live_pages[offsetallocation.offset] = pages;
+				}
 				alloc.allocator = allocator;
 				alloc.internal_state = allocator->internal_blocks.allocate();
 				alloc.internal_state->refcount.store(1);
@@ -261,6 +337,7 @@ namespace wi::allocator
 		// returns true if no pages are allocated
 		inline bool is_empty() const
 		{
+			std::scoped_lock lck(allocator->locker); // GGMAX 1.46: storageReport walks free-lists; racing a concurrent free() was a torn read
 			return allocator->allocator.storageReport().totalFreeSpace == page_count;
 		}
 	};

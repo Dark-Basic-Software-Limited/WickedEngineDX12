@@ -43,18 +43,30 @@ namespace wi::allocator
 #endif
 	inline void gg_tripwire_log(const char* fmt, ...)
 	{
+		// GGMAX 1.46c: serialized + persistent-handle logging. The per-call fopen-append version
+		// TORE 982 lines under concurrent multi-thread traffic in organic capture #2 — and the
+		// poisoning op was almost certainly among them. Mutex + one handle + per-line sequence
+		// number = lossless, strictly ordered op history. NOTE: the handle opens once in the
+		// LAUNCH cwd (exe dir), so the whole session logs to ONE file — no more exe-dir/Files split.
+		static std::mutex log_mutex;
+		static FILE* log_file = nullptr;
+		static unsigned long long log_seq = 0;
+		std::scoped_lock lck(log_mutex);
+		if (log_file == nullptr)
+		{
 #ifdef _WIN32
-		FILE* f = nullptr;
-		if (fopen_s(&f, "alloc_tripwire.txt", "a") != 0) f = nullptr;
+			if (fopen_s(&log_file, "alloc_tripwire.txt", "a") != 0) log_file = nullptr;
 #else
-		FILE* f = fopen("alloc_tripwire.txt", "a");
+			log_file = fopen("alloc_tripwire.txt", "a");
 #endif
-		if (f == nullptr) return;
+			if (log_file == nullptr) return;
+		}
+		fprintf(log_file, "#%llu ", ++log_seq);
 		va_list args;
 		va_start(args, fmt);
-		vfprintf(f, fmt, args);
+		vfprintf(log_file, fmt, args);
 		va_end(args);
-		fclose(f);
+		fflush(log_file);
 	}
 	// Allocation of consecutive bytes, but no freeing, instead the whole allocator can be reset
 	struct LinearAllocator

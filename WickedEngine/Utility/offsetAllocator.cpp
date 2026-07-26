@@ -360,6 +360,15 @@ namespace OffsetAllocator
 #ifdef DEBUG_VERBOSE
 		printf("Getting node %u from freelist[%u]\n", nodeIndex, m_freeOffset + 1);
 #endif
+		// GGMAX 1.47: FULL node reset before reuse. The upstream original assigns a whole new
+		// aggregate here ( m_nodes[nodeIndex] = {.dataOffset = ..., .dataSize = ..., .binListNext = ...} )
+		// which implicitly clears used / binListPrev / neighborPrev / neighborNext. This port's
+		// field-by-field writes left those STALE on recycled nodes -> refused neighbor merges,
+		// unlinks through stale binListPrev, self-looped bin lists, and ultimately the same page
+		// range granted to multiple live meshes (the GGMAX reload/travel-churn GPU corruption).
+		// Deterministically reproduced + fix validated by replaying a captured 7629-op game
+		// workload through this allocator with full node-graph integrity checks per op.
+		m_nodes[nodeIndex] = Node();
 		m_nodes[nodeIndex].dataOffset = dataOffset;
 		m_nodes[nodeIndex].dataSize = size;
 		m_nodes[nodeIndex].binListNext = topNodeIndex;

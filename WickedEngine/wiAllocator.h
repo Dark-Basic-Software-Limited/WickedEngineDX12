@@ -22,6 +22,9 @@
 #include <map>
 #include <cstdio>
 #include <cstdarg>
+#ifdef _MSC_VER
+#include <intrin.h> // GGMAX 1.46b: _InterlockedExchangePointer for the Allocation::Reset steal-guard
+#endif
 
 namespace wi::allocator
 {
@@ -32,6 +35,12 @@ namespace wi::allocator
 	// the loud mode a graceful reject and the silent mode a named log line in alloc_tripwire.txt.
 	inline bool gg_alloc_tripwire = true;              // live-range overlap tracking + logging
 	inline uint32_t gg_deferred_extra_hold = 8;        // extra frames before a freed range is reusable
+#ifdef _WIN32
+	extern "C" __declspec(dllimport) unsigned long __stdcall GetCurrentThreadId(void);
+	inline unsigned long gg_tripwire_tid() { return GetCurrentThreadId(); }
+#else
+	inline unsigned long gg_tripwire_tid() { return 0; }
+#endif
 	inline void gg_tripwire_log(const char* fmt, ...)
 	{
 #ifdef _WIN32
@@ -182,7 +191,7 @@ namespace wi::allocator
 			{
 				if (gg_alloc_tripwire)
 				{
-					gg_tripwire_log("R %p %u\n", (void*)allocator.get(), (unsigned)allocator->deferred_release_queue.front().first.offset);
+					gg_tripwire_log("R %p %u m=%u t=%lu\n", (void*)allocator.get(), (unsigned)allocator->deferred_release_queue.front().first.offset, (unsigned)allocator->deferred_release_queue.front().first.metadata, gg_tripwire_tid());
 					allocator->live_pages.erase(allocator->deferred_release_queue.front().first.offset); // GGMAX 1.46
 				}
 				allocator->allocator.free(allocator->deferred_release_queue.front().first);
@@ -250,33 +259,44 @@ namespace wi::allocator
 			}
 			void Reset()
 			{
-				if (IsValid() && (internal_state->refcount.fetch_sub(1) <= 1))
+				// GGMAX 1.46b: atomically claim the state pointer so a RACING second Reset on
+				// the same object (e.g. cross-thread mesh delete/rebuild) can't double-decrement
+				// the refcount — that underflow eventually frees someone else's node, which
+				// double-inserts it into a bin and self-loops the free list (observed as the
+				// same page range granted dozens of times in a row).
+#ifdef _WIN32
+				AllocationInternal* st = (AllocationInternal*)_InterlockedExchangePointer((void**)&internal_state, nullptr);
+#else
+				AllocationInternal* st = internal_state;
+				internal_state = nullptr;
+#endif
+				std::shared_ptr<AllocatorInternal> keep = std::move(allocator); // keep alive through the free block
+				if (st != nullptr && keep != nullptr && (st->refcount.fetch_sub(1) <= 1))
 				{
-					std::scoped_lock lck(allocator->locker);
-					if (allocator->deferred_release_enabled)
+					std::scoped_lock lck(keep->locker);
+					if (keep->deferred_release_enabled)
 					{
 						// can only be reclaimed after buffering amount of frames passed, this is usually used for GPU resources:
-						allocator->deferred_release_queue.push_back(std::make_pair(internal_state->allocation, allocator->deferred_release_frame));
+						keep->deferred_release_queue.push_back(std::make_pair(st->allocation, keep->deferred_release_frame));
 						// GGMAX 1.46: range stays in live_pages until the drain actually frees it
 						if (gg_alloc_tripwire)
 						{
-							gg_tripwire_log("D %p %u\n", (void*)allocator.get(), (unsigned)internal_state->allocation.offset);
+							gg_tripwire_log("D %p %u m=%u t=%lu\n", (void*)keep.get(), (unsigned)st->allocation.offset, (unsigned)st->allocation.metadata, gg_tripwire_tid());
 						}
 					}
 					else
 					{
 						// reclaimed immediately:
-						allocator->allocator.free(internal_state->allocation);
+						keep->allocator.free(st->allocation);
 						if (gg_alloc_tripwire)
 						{
-							gg_tripwire_log("F %p %u\n", (void*)allocator.get(), (unsigned)internal_state->allocation.offset);
-							allocator->live_pages.erase(internal_state->allocation.offset); // GGMAX 1.46
+							gg_tripwire_log("F %p %u m=%u t=%lu\n", (void*)keep.get(), (unsigned)st->allocation.offset, (unsigned)st->allocation.metadata, gg_tripwire_tid());
+							keep->live_pages.erase(st->allocation.offset); // GGMAX 1.46
 						}
 					}
-					allocator->internal_blocks.free(internal_state);
+					keep->internal_blocks.free(st);
 				}
 				allocator = {};
-				internal_state = nullptr;
 				byte_offset = ~0ull;
 			}
 
@@ -307,7 +327,7 @@ namespace wi::allocator
 				// double-booking that lets one mesh's upload stomp another's bytes.
 				if (gg_alloc_tripwire)
 				{
-					gg_tripwire_log("A %p %u %u pc=%u\n", (void*)allocator.get(), (unsigned)offsetallocation.offset, (unsigned)pages, (unsigned)page_count);
+					gg_tripwire_log("A %p %u %u pc=%u m=%u t=%lu\n", (void*)allocator.get(), (unsigned)offsetallocation.offset, (unsigned)pages, (unsigned)page_count, (unsigned)offsetallocation.metadata, gg_tripwire_tid());
 					auto next = allocator->live_pages.lower_bound(offsetallocation.offset);
 					if (next != allocator->live_pages.begin())
 					{

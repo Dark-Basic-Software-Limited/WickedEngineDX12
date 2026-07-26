@@ -27,6 +27,16 @@ namespace wi
 	// false = stock list structure.
 	bool gg_render_merge_lists = true;
 
+	// GGMAX 1.48c: lean-async (knob defined in wiGraphicsDevice_DX12.cpp; see comment there).
+	// When true, the four tiny helper lists (VT copy-pages, ocean sim + readback, VT
+	// tile-request + writeback) run on QUEUE_GRAPHICS instead of async COPY/COMPUTE —
+	// the two big compute lists (prepare-async, main compute effects) stay async.
+	namespace graphics { extern bool gg_lean_async; }
+	static inline wi::graphics::QUEUE_TYPE gg_lean(wi::graphics::QUEUE_TYPE q)
+	{
+		return wi::graphics::gg_lean_async ? wi::graphics::QUEUE_GRAPHICS : q;
+	}
+
 	void RenderPath3D::DeleteGPUResources()
 	{
 		RenderPath2D::DeleteGPUResources();
@@ -893,7 +903,7 @@ namespace wi
 		CommandList cmd_copypages;
 		if (scene->terrains.GetCount() > 0)
 		{
-			cmd_copypages = device->BeginCommandList(QUEUE_COPY);
+			cmd_copypages = device->BeginCommandList(gg_lean(QUEUE_COPY)); // GGMAX 1.48c
 			wi::jobsystem::Execute(ctx, [this, cmd_copypages](wi::jobsystem::JobArgs args) {
 				for (size_t i = 0; i < scene->terrains.GetCount(); ++i)
 				{
@@ -1295,7 +1305,7 @@ namespace wi
 		if (scene->weather.IsOceanEnabled() && scene->ocean.IsValid())
 		{
 			// Ocean simulation can be updated async to opaque passes:
-			cmd_ocean = device->BeginCommandList(QUEUE_COMPUTE);
+			cmd_ocean = device->BeginCommandList(gg_lean(QUEUE_COMPUTE)); // GGMAX 1.48c (sim is ~0.2ms — fences cost more than the overlap wins)
 			if (cmd_occlusionculling.IsValid())
 			{
 				// Ocean occlusion culling must be waited
@@ -1309,7 +1319,7 @@ namespace wi
 			wi::renderer::UpdateOcean(visibility_main, cmd_ocean);
 
 			// Copying to readback is done on copy queue to use DMA instead of compute warps:
-			CommandList cmd_oceancopy = device->BeginCommandList(QUEUE_COPY);
+			CommandList cmd_oceancopy = device->BeginCommandList(gg_lean(QUEUE_COPY)); // GGMAX 1.48c
 			device->WaitCommandList(cmd_oceancopy, cmd_ocean);
 			wi::renderer::ReadbackOcean(visibility_main, cmd_oceancopy);
 		}
@@ -1768,7 +1778,7 @@ namespace wi
 
 		if (scene->terrains.GetCount() > 0)
 		{
-			CommandList cmd_allocation_tilerequest = device->BeginCommandList(QUEUE_COMPUTE);
+			CommandList cmd_allocation_tilerequest = device->BeginCommandList(gg_lean(QUEUE_COMPUTE)); // GGMAX 1.48c
 			device->WaitCommandList(cmd_allocation_tilerequest, cmd); // wait for opaque scene
 			wi::jobsystem::Execute(ctx, [this, cmd_allocation_tilerequest](wi::jobsystem::JobArgs args) {
 				for (size_t i = 0; i < scene->terrains.GetCount(); ++i)
@@ -1777,7 +1787,7 @@ namespace wi
 				}
 			});
 
-			CommandList cmd_writeback_tilerequest = device->BeginCommandList(QUEUE_COPY);
+			CommandList cmd_writeback_tilerequest = device->BeginCommandList(gg_lean(QUEUE_COPY)); // GGMAX 1.48c
 			device->WaitCommandList(cmd_writeback_tilerequest, cmd_allocation_tilerequest);
 			wi::jobsystem::Execute(ctx, [this, cmd_writeback_tilerequest](wi::jobsystem::JobArgs args) {
 				for (size_t i = 0; i < scene->terrains.GetCount(); ++i)

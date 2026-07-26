@@ -56,6 +56,15 @@ namespace wi::graphics
 	// Runtime-safe to toggle between frames (harness SET_SINGLEQUEUE).
 	bool gg_single_queue = false;
 
+	// GGMAX 1.48c: lean-async. Keeps the two BIG compute lists async (prepare-async with the
+	// hair sim + main compute effects — the overlap that measurably wins ~1ms GPU wall) but
+	// moves the four TINY helper lists (terrain VT copy-pages, ocean sim + readback copy,
+	// VT tile-request + writeback) onto the graphics queue, cutting the per-frame cross-queue
+	// fence hops from 12 to ~4. Same correctness argument as 1.48b: WaitCommandList only
+	// points at lower list ids and submission is in id order, so same-queue dependencies are
+	// ordering-guaranteed and their fences are dropped. Harness SET_LEANASYNC.
+	bool gg_lean_async = false;
+
 namespace dx12_internal
 {
 	// Bindless allocation limits:
@@ -6039,9 +6048,9 @@ std::mutex queue_locker;
 		CommandList_DX12& commandlist = GetCommandList(cmd);
 		CommandList_DX12& commandlist_wait_for = GetCommandList(wait_for);
 		assert(commandlist_wait_for.id < commandlist.id); // can't wait for future command list!
-		// GGMAX 1.48b: same-queue dependency is guaranteed by in-order submission
+		// GGMAX 1.48b/c: same-queue dependency is guaranteed by in-order submission
 		// (lower id submits first on the same queue) — skip the fence entirely.
-		if (gg_single_queue && commandlist.queue == commandlist_wait_for.queue)
+		if ((gg_single_queue || gg_lean_async) && commandlist.queue == commandlist_wait_for.queue)
 		{
 			return;
 		}

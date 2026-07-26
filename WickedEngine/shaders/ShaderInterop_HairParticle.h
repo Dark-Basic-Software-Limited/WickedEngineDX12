@@ -57,8 +57,13 @@ CBUFFER(HairParticleCB, CBSLOT_OTHER_HAIRPARTICLE)
 
 	float xHairGravityPower;
 	uint xHairBillboardCount;
-	float xHair_padding0;
-	float xHair_padding1;
+	// GGMAX 1.49 grass strand LOD (0 = disabled -> stock behavior). Beyond Step2Dist only
+	// every 2nd strand draws; beyond Step4Dist only every 4th. Survivors widen by
+	// xHairGGLodWidthBoost (once at step 2, squared at step 4) to preserve screen coverage.
+	// Deterministic per strand (hashed strand id + camera distance only), so the pattern is
+	// stable at a parked camera — no temporal pops (the 1.37 lesson).
+	float xHairGGLodStep2Dist;
+	float xHairGGLodStep4Dist;
 
 	// GG-MAX Stage 3 Option B: per-strand visibility from a world-space paint mask.
 	// xHairGrassType > 0 turns it on; the simulate CS samples a Texture2D<float> bound
@@ -81,7 +86,7 @@ CBUFFER(HairParticleCB, CBSLOT_OTHER_HAIRPARTICLE)
 	float xHairGrassMaxHeight;
 	float xHairGrassMinHeightUnderwater;
 	float xHairGrassMaxHeightUnderwater;
-	float xHair_padding_alt0;
+	float xHairGGLodWidthBoost; // GGMAX 1.49 (see above); 1.0 = no widening
 	float xHair_padding_alt1;
 	float xHair_padding_alt2;
 

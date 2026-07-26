@@ -32,6 +32,15 @@ namespace wi
 	// usage — but DX12 will validate that the SRV slot has a bound resource regardless,
 	// so we need this placeholder to keep non-GG hair systems happy.
 	static wi::graphics::Texture grass_visibility_placeholder;
+
+	// GGMAX 1.49: grass strand LOD (GG grass systems only; character hair untouched).
+	// Default OFF — a visual trade (far strands decimate 2x/4x, survivors widen), so the
+	// user decides the default. Harness: SET_GRASSLOD <0|1> [step2frac step4frac boost].
+	bool gg_grass_lod = false;
+	float gg_grass_lod_step2_frac = 0.35f;  // fraction of viewDistance where 2x decimation starts
+	float gg_grass_lod_step4_frac = 0.60f;  // fraction of viewDistance where 4x decimation starts
+	float gg_grass_lod_width_boost = 1.8f;  // width multiplier per decimation step
+
 	static DepthStencilState dss_default, dss_equal, dss_shadow;
 	static RasterizerState rs, ncrs, wirers, rs_shadow;
 	static BlendState bs;
@@ -572,6 +581,15 @@ namespace wi
 			hcb.xHairGrassMaxHeight = hair.grass_max_height;
 			hcb.xHairGrassMinHeightUnderwater = hair.grass_min_height_underwater;
 			hcb.xHairGrassMaxHeightUnderwater = hair.grass_max_height_underwater;
+
+			// GGMAX 1.49: grass strand LOD. Zeroed hcb (= disabled) unless the knob is on
+			// AND this is a GG grass system — upstream/character hair never decimates.
+			if (gg_grass_lod && hair.grass_type != 0)
+			{
+				hcb.xHairGGLodStep2Dist = hair.viewDistance * gg_grass_lod_step2_frac;
+				hcb.xHairGGLodStep4Dist = hair.viewDistance * gg_grass_lod_step4_frac;
+				hcb.xHairGGLodWidthBoost = gg_grass_lod_width_boost;
+			}
 
 			device->UpdateBuffer(&hair.constantBuffer, &hcb, cmd);
 			wi::renderer::PushBarrier(GPUBarrier::Buffer(&hair.constantBuffer, ResourceState::COPY_DST, ResourceState::CONSTANT_BUFFER));

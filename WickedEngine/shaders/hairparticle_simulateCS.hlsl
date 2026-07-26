@@ -192,14 +192,29 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 Gid : SV_GroupID, uint groupIn
 	float3 diff = GetCamera().position - base;
 	const float distsq = dot(diff, diff);
 	const bool distance_culled = distsq > sqr(xHairViewDistance);
-	
+
+	// GGMAX 1.49 grass strand LOD: beyond Step2Dist keep every 2nd strand, beyond Step4Dist
+	// every 4th; survivors widen below to preserve coverage. Selection is a pure function of
+	// (strand id hash, camera distance) — stable at a parked camera, no temporal pops. The
+	// hash decorrelates the drop pattern from emission order so no visible rows appear.
+	uint gg_lod_step = 1;
+	half gg_lod_boost = 1;
+	if (xHairGGLodStep2Dist > 0)
+	{
+		if (distsq > sqr(xHairGGLodStep2Dist)) { gg_lod_step = 2; gg_lod_boost = (half)xHairGGLodWidthBoost; }
+		if (distsq > sqr(xHairGGLodStep4Dist)) { gg_lod_step = 4; gg_lod_boost *= (half)xHairGGLodWidthBoost; }
+	}
+	uint gg_lod_hash = DTid.x * 2654435761u;
+	gg_lod_hash ^= gg_lod_hash >> 16;
+	const bool gg_lod_dropped = (gg_lod_step > 1) && ((gg_lod_hash & (gg_lod_step - 1u)) != 0);
+
 	// Frustum culling the whole strand at once:
 	//	intentionally overestimated, to not disappear as soon in different views (shadow map, etc)
 	ShaderSphere sphere;
 	sphere.center = base;
 	sphere.radius = xHairLength;
 	//draw_sphere(sphere.center, sphere.radius);
-	const bool visible = !distance_culled && GetCamera().frustum.intersects(sphere);
+	const bool visible = !distance_culled && !gg_lod_dropped && GetCamera().frustum.intersects(sphere);
 		
 	// Optimization: reduce to 1 atomic operation per wave
 	const uint waveAppendCount = WaveActiveCountBits(visible);
@@ -244,7 +259,8 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 Gid : SV_GroupID, uint groupIn
 	len *= xHairLength;
 	len *= atlas_rect.size;
 	len /= (half)xHairSegmentCount;
-	const float2 frame = float2(atlas_rect.aspect * xHairAspect * xHairSegmentCount, 1) * len * 0.5;
+	float2 frame = float2(atlas_rect.aspect * xHairAspect * xHairSegmentCount, 1) * len * 0.5;
+	frame.x *= gg_lod_boost; // GGMAX 1.49: surviving far strands widen to preserve coverage
 	const float segment_radius = max(frame.x, frame.y);
 
 	//draw_line(base, base + tangent, float4(1, 0, 0, 1));

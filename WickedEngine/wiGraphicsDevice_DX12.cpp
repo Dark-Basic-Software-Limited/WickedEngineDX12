@@ -36,6 +36,26 @@ using namespace Microsoft::WRL;
 
 namespace wi::graphics
 {
+	// GGMAX 1.48a: submit-tail attribution (print-only; read by the game's GET_PERF_DATA).
+	// Phases of SubmitCommandLists, last completed frame:
+	float gg_submit_ms_close = 0;    // Close() + batched submit loop (incl. dependency splits)
+	float gg_submit_ms_fences = 0;   // per-queue frame-fence signals + final flush
+	float gg_submit_ms_present = 0;  // swapchain Present
+	float gg_submit_ms_sync = 0;     // cross-queue frame sync + descriptor heap signals
+	float gg_submit_ms_stall = 0;    // next-buffer fence stall + allocation handler update
+	uint32_t gg_submit_lists = 0;    // command lists closed this frame
+	uint32_t gg_submit_batches = 0;  // ExecuteCommandLists invocations this frame
+	uint32_t gg_submit_deps = 0;     // command lists carrying cross-queue waits/signals
+	static uint32_t gg_submit_batches_accum = 0;
+
+	// GGMAX 1.48b: single-queue experiment. When true, COMPUTE/COPY command lists are
+	// begun on the GRAPHICS queue instead, and same-queue WaitCommandList dependencies
+	// are dropped (in-order submission already guarantees them: WaitCommandList asserts
+	// the awaited list has a LOWER id, and SubmitCommandLists submits in id order).
+	// Purpose: measure/eliminate GPU fence-hop bubbles from the 7 async lists per frame.
+	// Runtime-safe to toggle between frames (harness SET_SINGLEQUEUE).
+	bool gg_single_queue = false;
+
 namespace dx12_internal
 {
 	// Bindless allocation limits:
@@ -1620,6 +1640,7 @@ std::mutex queue_locker;
 			(UINT)submit_cmds.size(),
 			submit_cmds.data()
 		);
+		gg_submit_batches_accum++; // GGMAX 1.48a (only called from SubmitCommandLists)
 
 		submit_cmds.clear();
 	}
@@ -5233,6 +5254,12 @@ std::mutex queue_locker;
 	{
 		HRESULT hr;
 
+		// GGMAX 1.48b: route async-queue lists onto the graphics queue (see gg_single_queue)
+		if (gg_single_queue && (queue == QUEUE_COMPUTE || queue == QUEUE_COPY))
+		{
+			queue = QUEUE_GRAPHICS;
+		}
+
 		cmd_locker.lock();
 		uint32_t cmd_current = cmd_count++;
 		if (cmd_current >= commandlists.size())
@@ -5339,6 +5366,12 @@ std::mutex queue_locker;
 		std::scoped_lock lock(queue_locker); // queue operations are not thread-safe on XBOX
 #endif // PLATFORM_XBOX
 
+		// GGMAX 1.48a: phase attribution of the submit tail
+		wi::Timer gg_phase_timer;
+		double gg_phase_prev = 0;
+		gg_submit_batches_accum = 0;
+		uint32_t gg_deps_accum = 0;
+
 		// Submit current frame:
 		{
 			uint32_t cmd_last = cmd_count;
@@ -5357,6 +5390,8 @@ std::mutex queue_locker;
 
 				CommandQueue& queue = queues[commandlist.queue];
 				const bool dependency = !commandlist.signals.empty() || !commandlist.waits.empty();
+				if (dependency)
+					gg_deps_accum++; // GGMAX 1.48a
 
 				if (dependency)
 				{
@@ -5407,6 +5442,11 @@ std::mutex queue_locker;
 				}
 				commandlist.pipelines_worker.clear();
 			}
+			gg_submit_lists = cmd_last; // GGMAX 1.48a
+			{
+				double now = gg_phase_timer.elapsed_milliseconds();
+				gg_submit_ms_close = (float)(now - gg_phase_prev); gg_phase_prev = now;
+			}
 
 			// Mark the completion of queues for this frame:
 			for (int q = 0; q < QUEUE_COUNT; ++q)
@@ -5421,6 +5461,10 @@ std::mutex queue_locker;
 
 				dx12_check(queue.queue->Signal(frame_fence_cpu[GetBufferIndex()][q].Get(), 1)); // gpu will write 1 into the fence when finished with the work (1 = free to reuse)
 				dx12_check(queue.queue->Signal(frame_fence_gpu[GetBufferIndex()][q].Get(), FRAMECOUNT));
+			}
+			{
+				double now = gg_phase_timer.elapsed_milliseconds();
+				gg_submit_ms_fences = (float)(now - gg_phase_prev); gg_phase_prev = now;
 			}
 
 			for (uint32_t cmd = 0; cmd < cmd_last; ++cmd)
@@ -5461,6 +5505,10 @@ std::mutex queue_locker;
 #endif // PLATFORM_XBOX
 				}
 			}
+			{
+				double now = gg_phase_timer.elapsed_milliseconds();
+				gg_submit_ms_present = (float)(now - gg_phase_prev); gg_phase_prev = now;
+			}
 		}
 
 		// Sync up every queue to every other queue at the end of the frame:
@@ -5482,6 +5530,10 @@ std::mutex queue_locker;
 
 		descriptorheap_res.SignalGPU(queues[QUEUE_GRAPHICS].queue.Get());
 		descriptorheap_sam.SignalGPU(queues[QUEUE_GRAPHICS].queue.Get());
+		{
+			double now = gg_phase_timer.elapsed_milliseconds();
+			gg_submit_ms_sync = (float)(now - gg_phase_prev); gg_phase_prev = now;
+		}
 
 		// From here, we begin a new frame, this affects GetBufferIndex()!
 		FRAMECOUNT++;
@@ -5502,6 +5554,14 @@ std::mutex queue_locker;
 		}
 
 		allocationhandler->Update(FRAMECOUNT, BUFFERCOUNT);
+
+		{
+			// GGMAX 1.48a: publish the frame's counters
+			double now = gg_phase_timer.elapsed_milliseconds();
+			gg_submit_ms_stall = (float)(now - gg_phase_prev);
+			gg_submit_batches = gg_submit_batches_accum;
+			gg_submit_deps = gg_deps_accum;
+		}
 	}
 
 	void GraphicsDevice_DX12::OnDeviceRemoved()
@@ -5979,6 +6039,12 @@ std::mutex queue_locker;
 		CommandList_DX12& commandlist = GetCommandList(cmd);
 		CommandList_DX12& commandlist_wait_for = GetCommandList(wait_for);
 		assert(commandlist_wait_for.id < commandlist.id); // can't wait for future command list!
+		// GGMAX 1.48b: same-queue dependency is guaranteed by in-order submission
+		// (lower id submits first on the same queue) — skip the fence entirely.
+		if (gg_single_queue && commandlist.queue == commandlist_wait_for.queue)
+		{
+			return;
+		}
 		Semaphore semaphore = new_semaphore();
 		commandlist.waits.push_back(semaphore);
 		commandlist_wait_for.signals.push_back(semaphore);

@@ -55,7 +55,7 @@ namespace wi::allocator
 		if (log_file == nullptr)
 		{
 #ifdef _WIN32
-			if (fopen_s(&log_file, "alloc_tripwire.txt", "a") != 0) log_file = nullptr;
+			log_file = _fsopen("alloc_tripwire.txt", "a", 0x40); // _SH_DENYNO: external tools can read the log while the game runs
 #else
 			log_file = fopen("alloc_tripwire.txt", "a");
 #endif

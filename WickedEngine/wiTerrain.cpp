@@ -440,6 +440,12 @@ namespace wi::terrain
 	{
 		SetGenerationStarted(true);
 		Generation_Cancel();
+		// GGMAX 1.45: the async VT job may still be running (it holds raw VT pointers via
+		// virtual_textures_in_use and allocates/steals from the atlas). Freeing every VT
+		// below while it runs is a use-after-free — the pre-existing travel-churn /
+		// level-switch corruption (missing chunks, far-field garbage, AMD DEVICE_HUNG,
+		// user-repro 2026-07-26). Join it before any teardown.
+		wi::jobsystem::Wait(virtual_texture_ctx);
 		generator->scene.Clear();
 
 		// save material parameters:
@@ -653,6 +659,7 @@ namespace wi::terrain
 
 		if (terrainEntity == INVALID_ENTITY)
 		{
+			wi::jobsystem::Wait(virtual_texture_ctx); // GGMAX 1.45: same use-after-free race as Generation_Restart
 			for (auto it = chunks.begin(); it != chunks.end(); it++)
 			{
 				ChunkData& chunk_data = it->second;
@@ -782,6 +789,11 @@ namespace wi::terrain
 		// Ensure that enough grass chunks are generated so that grass view distance will not cause popping:
 		grass_chunk_dist = int(grass_properties.viewDistance / chunk_width + 0.5f);
 
+		// GGMAX 1.45: one-shot flag — the removal branch below joins the async VT job at
+		// most once per Generation_Update call, and only on frames that actually tear a
+		// chunk down (frames without removals keep the full VT-job overlap).
+		bool gg_vt_teardown_joined = false;
+
 		for (auto it = chunks.begin(); it != chunks.end();)
 		{
 			const Chunk& chunk = it->first;
@@ -837,6 +849,16 @@ namespace wi::terrain
 			{
 				if (dist > removal_threshold)
 				{
+					// GGMAX 1.45: the async VT job holds raw pointers to this VT (last frame's
+					// virtual_textures_in_use) and mutates the shared atlas. free()+erase under
+					// a live job = use-after-free — the dominant teardown site during sustained
+					// camera travel (a chunk falls behind removal_threshold every few frames).
+					// Join once per Generation_Update call, only on frames that actually remove.
+					if (!gg_vt_teardown_joined)
+					{
+						wi::jobsystem::Wait(virtual_texture_ctx);
+						gg_vt_teardown_joined = true;
+					}
 					if (chunk_data.vt != nullptr)
 					{
 						chunk_data.vt->free(atlas);

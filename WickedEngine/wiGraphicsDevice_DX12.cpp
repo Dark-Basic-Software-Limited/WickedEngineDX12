@@ -29,6 +29,8 @@ DEFINE_GUID(D3D12_VIDEO_DECODE_PROFILE_H264, 0x1b81be68, 0xa0c7, 0x11d3, 0xb9, 0
 #include <pix.h>
 
 #include <sstream>
+#include <fstream> // GGMAX 1.51: dred_report.txt post-mortem
+#include <ctime>   // GGMAX 1.51: report timestamp
 #include <algorithm>
 #include <intrin.h> // _BitScanReverse64
 
@@ -64,6 +66,14 @@ namespace wi::graphics
 	// points at lower list ids and submission is in id order, so same-queue dependencies are
 	// ordering-guaranteed and their fences are dropped. Harness SET_LEANASYNC.
 	bool gg_lean_async = false;
+
+	// GGMAX 1.51: DRED post-mortem capture in RELEASE builds. Stock Wicked only enables DRED
+	// (auto-breadcrumbs + page-fault tracking) together with the debug layer, so a shipping
+	// build's OnDeviceRemoved dump has nothing to report. Armed by an empty "dred.txt" next to
+	// the EXE at launch (delete the file to disarm — breadcrumb writes cost a few % GPU while
+	// armed). On device removal the full DRED report (last in-flight op per command list, page
+	// fault VA + owning live/freed resources) is appended to exe-dir dred_report.txt.
+	bool gg_dred_armed = false;
 
 namespace dx12_internal
 {
@@ -2252,6 +2262,25 @@ std::mutex queue_locker;
 			ss << "Failed to load D3D12CreateVersionedRootSignatureDeserializer! ERROR: " << std::hex << GetLastError();
 			wi::helper::messageBox(ss.str(), "Error!");
 			wi::platform::Exit();
+		}
+
+		// GGMAX 1.51: arm DRED without the debug layer when dred.txt sits next to the EXE (see knob).
+		if (validationMode == ValidationMode::Disabled)
+		{
+			const std::string dredflag = wi::helper::GetDirectoryFromPath(wi::helper::GetExecutablePath()) + "dred.txt";
+			if (wi::helper::FileExists(dredflag) || wi::helper::FileExists("dred.txt"))
+			{
+				auto D3D12GetDebugInterface = (PFN_D3D12_GET_DEBUG_INTERFACE)wiGetProcAddress(dx12, "D3D12GetDebugInterface");
+				ComPtr<ID3D12DeviceRemovedExtendedDataSettings1> pDredSettings;
+				if (D3D12GetDebugInterface != nullptr && SUCCEEDED(D3D12GetDebugInterface(PPV_ARGS(pDredSettings))))
+				{
+					pDredSettings->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+					pDredSettings->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+					pDredSettings->SetBreadcrumbContextEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+					gg_dred_armed = true;
+					wi::backlog::post("GGMAX 1.51: DRED armed (dred.txt found) — device-removal post-mortem will append to dred_report.txt");
+				}
+			}
 		}
 
 		if (validationMode != ValidationMode::Disabled)
@@ -5816,6 +5845,25 @@ std::mutex queue_locker;
 		if (!log.empty())
 		{
 			wi::backlog::post(log, wi::backlog::LogLevel::Error);
+		}
+
+		// GGMAX 1.51: persist the post-mortem next to the EXE — the backlog may never flush to
+		// disk once Exit() runs, and the message boxes outlive the process. Appends, so repeated
+		// crashes across sessions accumulate in one file.
+		{
+			const std::string report_path = wi::helper::GetDirectoryFromPath(wi::helper::GetExecutablePath()) + "dred_report.txt";
+			std::ofstream report(report_path, std::ios::app);
+			if (report)
+			{
+				std::time_t now = std::time(nullptr);
+				std::tm tmv = {};
+				localtime_s(&tmv, &now);
+				char stamp[64] = {};
+				std::strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S", &tmv);
+				report << "==== D3D12 device removed at " << stamp << " | cause: " << removedReasonString
+					<< " | DRED " << (gg_dred_armed ? "ARMED" : "NOT ARMED — create an empty dred.txt next to the EXE and reproduce") << " ====\n";
+				report << log << "\n";
+			}
 		}
 
 		std::string message = "D3D12: device removed, cause: ";

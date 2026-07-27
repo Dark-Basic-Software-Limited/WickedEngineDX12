@@ -34,9 +34,10 @@ namespace wi
 	static wi::graphics::Texture grass_visibility_placeholder;
 
 	// GGMAX 1.49b: grass strand LOD (GG grass systems only; character hair untouched).
-	// Default OFF — a visual trade (far strands decimate 2x/4x, survivors widen), so the
-	// user decides the default. Harness: SET_GRASSLOD <0|1> [step2frac step4frac boost].
-	bool gg_grass_lod = false;
+	// DEFAULT ON since 2026-07-27 — user-confirmed in a game-mode walk (with the game-side
+	// tier AUTO coupling: no square pops, no flicker) and explicitly requested as default.
+	// Kill switch / A-B: harness SET_GRASSLOD <0|1> [step2frac step4frac boost].
+	bool gg_grass_lod = true;
 	float gg_grass_lod_step2_frac = 0.35f;  // fraction of viewDistance where 2x decimation starts
 	float gg_grass_lod_step4_frac = 0.60f;  // fraction of viewDistance where 4x decimation starts
 	float gg_grass_lod_width_boost = 2.0f;  // widening endpoint per decimation step: 2.0 = exactly

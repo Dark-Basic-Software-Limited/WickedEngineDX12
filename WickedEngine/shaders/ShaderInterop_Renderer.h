@@ -1592,7 +1592,7 @@ struct LensFlarePush
 struct WetmapPush
 {
 	int wetmap;
-	uint padding;
+	uint gg_force_dry;	// GGMAX 1.50 (was padding): nonzero = write wet=0 and exit (GG grass wetmap opt-out)
 	uint instanceID;
 	float rain_amount;
 };

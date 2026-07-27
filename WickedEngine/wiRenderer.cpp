@@ -152,6 +152,16 @@ std::atomic<uint32_t> gg_apparent_cull_bits{ 0 };
 // The runtime knob remains for future work: harness SET_HAIRSKIP <0|1> [windInterval].
 bool gg_hair_sim_static_skip = false;
 uint32_t gg_hair_sim_wind_interval = 4;
+// GGMAX 1.50: GG grass wetmap opt-out (default OFF = grass stays permanently dry).
+// Root cause of the "dark grass slowly brightens over 15-30s" editor/game artifact: the GG perf
+// early-out in hairparticle_simulateCS skips all vertex writes for strands that are distance/
+// frustum/LOD culled, so their entries in the ping-pong position buffer stay at the cleared raw
+// zero = world (0,0,0), which on an island level is deep below the ocean. RefreshWetmaps (runs
+// every frame while an ocean exists) reads those positions and pins such strands at wet~0.8 with
+// drying disabled; hairparticlePS then renders wet strands with albedo lerped toward black, and
+// they only dry (0.02-0.08/s = 15-30s) once drawn. DX11 grass never had wetmaps, so parity = dry.
+// true restores stock Wicked wetting on grass for A/B: harness SET_GRASSWET <0|1>.
+bool gg_grass_wetmap = false;
 static XMFLOAT3 gg_hair_prev_eye = XMFLOAT3(0, 0, 0);
 static XMFLOAT3 gg_hair_prev_at = XMFLOAT3(0, 0, 0);
 static uint32_t gg_hair_parked_frames = 0;
@@ -11734,6 +11744,9 @@ void RefreshWetmaps(const Visibility& vis, CommandList cmd)
 		if (push.wetmap < 0)
 			continue;
 
+		// GGMAX 1.50: GG grass (grass_type != 0) is force-dried instead of wetted — culled strands'
+		// zero positions read as underwater and would ratchet to wet~0.8 (dark on reveal). See knob.
+		push.gg_force_dry = (!gg_grass_wetmap && hair.grass_type != 0) ? 1u : 0u;
 		push.instanceID = uint32_t(vis.scene->objects.GetCount() + hairIndex);
 		device->PushConstants(&push, sizeof(push), cmd);
 

@@ -5,6 +5,18 @@ PUSHCONSTANT(push, WetmapPush);
 [numthreads(64, 1, 1)]
 void main(uint DTid : SV_DispatchThreadID)
 {
+	// GGMAX 1.50: force-dry path. GG grass strands that are culled (never simulated) hold raw-zero
+	// positions that decode to world origin = below the island waterline, so the ocean branch below
+	// would ratchet them to wet~0.8 and they render near-black on reveal. GG grass opts out of
+	// wetness entirely (DX11 parity); character hair keeps the stock path.
+	[branch]
+	if (push.gg_force_dry != 0)
+	{
+		RWBuffer<float> wetmap_dry = bindless_rwbuffers_float[descriptor_index(push.wetmap)];
+		wetmap_dry[DTid] = 0;
+		return;
+	}
+
 	ShaderMeshInstance meshinstance = load_instance(push.instanceID);
 	ShaderGeometry geometry = load_geometry(meshinstance.geometryOffset);
 	if(geometry.vb_pos_wind < 0)

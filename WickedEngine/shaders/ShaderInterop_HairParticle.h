@@ -57,11 +57,13 @@ CBUFFER(HairParticleCB, CBSLOT_OTHER_HAIRPARTICLE)
 
 	float xHairGravityPower;
 	uint xHairBillboardCount;
-	// GGMAX 1.49 grass strand LOD (0 = disabled -> stock behavior). Beyond Step2Dist only
-	// every 2nd strand draws; beyond Step4Dist only every 4th. Survivors widen by
-	// xHairGGLodWidthBoost (once at step 2, squared at step 4) to preserve screen coverage.
-	// Deterministic per strand (hashed strand id + camera distance only), so the pattern is
-	// stable at a parked camera — no temporal pops (the 1.37 lesson).
+	// GGMAX 1.49b grass strand LOD (Step2Dist 0 = disabled -> stock behavior). Around
+	// Step2Dist half the strands drop, around Step4Dist half the remainder — each strand at
+	// its own hash-jittered radius (+-15%) so camera motion causes sparse single-blade events,
+	// never a synchronized ring (the 1.49 two-shade shimmer). Survivors widen by an exact
+	// hyperbolic 1/survivorFraction ramp aligned to the drop window; at WidthBoost=2.0 the
+	// expected screen coverage is conserved through both bands. Deterministic per strand
+	// (hashed strand id + camera distance only): bit-stable at a parked camera (1.37 lesson).
 	float xHairGGLodStep2Dist;
 	float xHairGGLodStep4Dist;
 
@@ -86,7 +88,7 @@ CBUFFER(HairParticleCB, CBSLOT_OTHER_HAIRPARTICLE)
 	float xHairGrassMaxHeight;
 	float xHairGrassMinHeightUnderwater;
 	float xHairGrassMaxHeightUnderwater;
-	float xHairGGLodWidthBoost; // GGMAX 1.49 (see above); 1.0 = no widening
+	float xHairGGLodWidthBoost; // GGMAX 1.49b widening endpoint per halving; 2.0 = coverage-neutral, <2 = far thinning
 	float xHair_padding_alt1;
 	float xHair_padding_alt2;
 

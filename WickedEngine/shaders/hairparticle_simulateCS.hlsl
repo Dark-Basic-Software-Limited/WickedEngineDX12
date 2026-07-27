@@ -193,20 +193,45 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 Gid : SV_GroupID, uint groupIn
 	const float distsq = dot(diff, diff);
 	const bool distance_culled = distsq > sqr(xHairViewDistance);
 
-	// GGMAX 1.49 grass strand LOD: beyond Step2Dist keep every 2nd strand, beyond Step4Dist
-	// every 4th; survivors widen below to preserve coverage. Selection is a pure function of
-	// (strand id hash, camera distance) — stable at a parked camera, no temporal pops. The
-	// hash decorrelates the drop pattern from emission order so no visible rows appear.
-	uint gg_lod_step = 1;
+	// GGMAX 1.49b grass strand LOD (motion-clean rework of 1.49). Two mechanisms, both pure
+	// functions of (strand id hash, camera distance) so a parked camera is bit-stable:
+	//  - DROPS: half the strands (hash bit 0) drop around Step2Dist, half the remainder
+	//    (hash bit 1) around Step4Dist — but each strand drops at its OWN radius, jittered
+	//    ±15% by its hash. 1.49's single hard ring made a whole radius-band flip in lockstep
+	//    while the camera moved = visible two-shade shimmer sweeping the mid field (user-
+	//    reported); jitter atomizes the transition into sparse single-blade events.
+	//  - WIDTH: survivors widen by a CONTINUOUS distance ramp (1 -> boost across the Step2
+	//    zone, boost -> boost^2 across the Step4 zone) instead of 1.49's step change, so
+	//    camera motion produces slow smooth growth, never a per-frame width pop (and no
+	//    velocity spike for TAA).
+	bool gg_lod_dropped = false;
 	half gg_lod_boost = 1;
 	if (xHairGGLodStep2Dist > 0)
 	{
-		if (distsq > sqr(xHairGGLodStep2Dist)) { gg_lod_step = 2; gg_lod_boost = (half)xHairGGLodWidthBoost; }
-		if (distsq > sqr(xHairGGLodStep4Dist)) { gg_lod_step = 4; gg_lod_boost *= (half)xHairGGLodWidthBoost; }
+		uint gg_lod_hash = DTid.x * 2654435761u;
+		gg_lod_hash ^= gg_lod_hash >> 16;
+		const float gg_dist = sqrt(distsq);
+		// per-strand jitter in [0.85, 1.15] — each strand drops at its own radius inside the band
+		const float gg_j2 = 0.85 + 0.3 * (float)((gg_lod_hash >> 2) & 1023u) / 1023.0;
+		const float gg_j4 = 0.85 + 0.3 * (float)((gg_lod_hash >> 12) & 1023u) / 1023.0;
+		const bool gg_has4 = xHairGGLodStep4Dist > 0; // hardening: step4<=0 must mean "no 4x stage", not "drop everywhere"
+		if (gg_lod_hash & 1u)
+			gg_lod_dropped = gg_dist > xHairGGLodStep2Dist * gg_j2;
+		else if ((gg_lod_hash & 2u) && gg_has4)
+			gg_lod_dropped = gg_dist > xHairGGLodStep4Dist * gg_j4;
+		// EXACT coverage compensation (adversarial-review fix): survivors widen by
+		// 1/survivorFraction, ramped over the SAME [0.85,1.15]*R window the drops occupy.
+		// t = fraction of the band's droppers already gone at this distance (uniform jitter
+		// makes that linear in d); each band loses half its remaining population, so the
+		// exact per-band factor is hyperbolic 1/(1-0.5t), hitting exactly 2.0 per halving
+		// (the earlier linear ramp over a wider window left a +16%/-26% coverage wiggle).
+		const float gg_t2 = saturate((gg_dist / xHairGGLodStep2Dist - 0.85) / 0.3);
+		const float gg_t4 = gg_has4 ? saturate((gg_dist / xHairGGLodStep4Dist - 0.85) / 0.3) : 0.0;
+		const float gg_exact = (1.0 / (1.0 - 0.5 * gg_t2)) * (1.0 / (1.0 - 0.5 * gg_t4)); // 1 -> 4
+		// the knob scales the widening: 2.0 = exactly coverage-neutral (the default),
+		// below 2.0 = deliberate far-field thinning for extra perf
+		gg_lod_boost = (half)(1.0 + (gg_exact - 1.0) * (max(xHairGGLodWidthBoost, 1.0) * 0.5));
 	}
-	uint gg_lod_hash = DTid.x * 2654435761u;
-	gg_lod_hash ^= gg_lod_hash >> 16;
-	const bool gg_lod_dropped = (gg_lod_step > 1) && ((gg_lod_hash & (gg_lod_step - 1u)) != 0);
 
 	// Frustum culling the whole strand at once:
 	//	intentionally overestimated, to not disappear as soon in different views (shadow map, etc)

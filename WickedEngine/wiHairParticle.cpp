@@ -33,13 +33,15 @@ namespace wi
 	// so we need this placeholder to keep non-GG hair systems happy.
 	static wi::graphics::Texture grass_visibility_placeholder;
 
-	// GGMAX 1.49: grass strand LOD (GG grass systems only; character hair untouched).
+	// GGMAX 1.49b: grass strand LOD (GG grass systems only; character hair untouched).
 	// Default OFF — a visual trade (far strands decimate 2x/4x, survivors widen), so the
 	// user decides the default. Harness: SET_GRASSLOD <0|1> [step2frac step4frac boost].
 	bool gg_grass_lod = false;
 	float gg_grass_lod_step2_frac = 0.35f;  // fraction of viewDistance where 2x decimation starts
 	float gg_grass_lod_step4_frac = 0.60f;  // fraction of viewDistance where 4x decimation starts
-	float gg_grass_lod_width_boost = 1.8f;  // width multiplier per decimation step
+	float gg_grass_lod_width_boost = 2.0f;  // widening endpoint per decimation step: 2.0 = exactly
+	                                        // coverage-neutral per halving; <2.0 = deliberate far
+	                                        // thinning (extra perf, visibly sparser far grass)
 
 	static DepthStencilState dss_default, dss_equal, dss_shadow;
 	static RasterizerState rs, ncrs, wirers, rs_shadow;
@@ -582,12 +584,14 @@ namespace wi
 			hcb.xHairGrassMinHeightUnderwater = hair.grass_min_height_underwater;
 			hcb.xHairGrassMaxHeightUnderwater = hair.grass_max_height_underwater;
 
-			// GGMAX 1.49: grass strand LOD. Zeroed hcb (= disabled) unless the knob is on
+			// GGMAX 1.49b: grass strand LOD. Zeroed hcb (= disabled) unless the knob is on
 			// AND this is a GG grass system — upstream/character hair never decimates.
 			if (gg_grass_lod && hair.grass_type != 0)
 			{
 				hcb.xHairGGLodStep2Dist = hair.viewDistance * gg_grass_lod_step2_frac;
-				hcb.xHairGGLodStep4Dist = hair.viewDistance * gg_grass_lod_step4_frac;
+				// step4 below step2 would still be continuous but not the documented shape —
+				// clamp host-side (the shader independently hardens against step4 <= 0)
+				hcb.xHairGGLodStep4Dist = std::max(hair.viewDistance * gg_grass_lod_step4_frac, hcb.xHairGGLodStep2Dist);
 				hcb.xHairGGLodWidthBoost = gg_grass_lod_width_boost;
 			}
 

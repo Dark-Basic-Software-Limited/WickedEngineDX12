@@ -324,13 +324,14 @@ namespace wi::terrain
 
 	// GGMAX 1.33: master switch for incremental VT bookkeeping (see wiTerrain.h)
 	bool gg_vt_incremental = true;
-	// GGMAX 1.53: terrain VT tiling share-mip count K — the K mips below a region's mip0 keep
-	// mip0's texture repeat count (pure downsamples = invisible trilinear transitions near the
-	// camera); beyond K the stock repeat-halving anti-tiling resumes for the far field. 0 = stock
-	// (every mip re-baked at half repeats — visible two-scale cross-fade bands near the camera in
-	// inch-scale worlds). Live-tunable: harness SET_TERRAINTILE <K> (the game queues a fast
-	// repaint of resident chunk VTs on change; streamed-in tiles pick the policy up naturally).
-	uint32_t gg_terrain_tile_share_mips = 1;
+	// GGMAX 1.53b: terrain VT tiling repeat CAP — every bake rung finer than this many repeats
+	// per chunk region bakes the SAME cap-scale layout (pure downsample chain = invisible
+	// trilinear transitions from the camera through the mid field); rungs at/below the cap keep
+	// the stock repeat-halving anti-tiling for the far field. World-anchored, so resolution
+	// rings/promotions cannot cause seams or scale pops. 0 = stock (scale cross-fades start at
+	// the camera). Chunk ≈ 5120 in: cap 8 ≈ 16m texture repeat, 16 ≈ 8m, 32 ≈ 4m. Live-tunable:
+	// harness SET_TERRAINTILE <cap> (queues a fast repaint of resident chunk VTs on change).
+	uint32_t gg_terrain_tile_share_mips = 16;
 
 	void VirtualTexture::init(VirtualTextureAtlas& atlas, uint resolution)
 	{
@@ -2322,8 +2323,8 @@ namespace wi::terrain
 					continue;
 				push.blendmap_buffer_offset = (uint)mem.offset;
 
-				// GGMAX 1.53: region mip0 resolution + tiling share-mips for the CS sampling policy
-				push.gg_tile_share = (std::min(gg_terrain_tile_share_mips, 255u) << 24u) | (vt->resolution & 0xFFFFFFu);
+				// GGMAX 1.53b: tiling repeat cap for the CS sampling policy (bits 24..31; 0 = stock)
+				push.gg_tile_share = std::min(gg_terrain_tile_share_mips, 255u) << 24u;
 
 				for (auto& request : vt->update_requests)
 				{

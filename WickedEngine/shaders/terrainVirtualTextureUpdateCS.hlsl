@@ -15,28 +15,38 @@ static const uint2 block_offsets[16] = {
 	uint2(0, 3), uint2(1, 3), uint2(2, 3), uint2(3, 3),
 };
 
-// GGMAX 1.53: distance-tiling policy for terrain material sampling.
+// GGMAX 1.53b: distance-tiling policy for terrain material sampling (v2 — repeat CAP).
 // Stock bakes each VT mip with the texture repeat count halved per mip (repeats = region
 // resolution / texture size, floored at 1) — an anti-tiling feature (fewer, larger repeats at
 // distance), but adjacent VT mips then hold DIFFERENT tilings, and the renderer's trilinear
-// blend between them (SampleVirtual) cross-fades two UV scales of the same texture — a visible
-// swimming band that sits close to the camera in inch-scale worlds.
-// Policy: the K mips below mip0 keep mip0's repeat count (their bakes become true downsamples
-// of the same layout = invisible transitions); beyond K the halving resumes, pushing the first
-// scale cross-fade K mips further out while keeping the far-field anti-tiling.
-// push.gg_tile_share: bits 0..23 = region mip0 resolution, bits 24..31 = K. K=0 = stock output.
+// blend between them (SampleVirtual) cross-fades two UV scales of the same texture — visible
+// swimming bands that start right at the camera in inch-scale worlds (a near chunk's ladder
+// runs 64,32,16,8,... repeats and the fine rungs sit within walking distance).
+// v1 anchored a share window to the TOP of each chunk's ladder — wrong: the top rungs are
+// sub-magnification (never seen), so K only multiplied the visible rungs' density (user: "the
+// transition moved CLOSER"). v2 caps the ladder instead: every rung finer than `cap` bakes the
+// SAME cap-scale layout (pure downsample chain = invisible transitions from the camera through
+// the mid field); rungs at/below the cap keep stock halving = far anti-tiling preserved. The
+// cap is world-anchored (repeats per chunk region), so chunk resolution rings and promotions
+// cannot introduce seams or scale pops, and the dial directly sets the terrain texture's world
+// feature size (chunk ≈ 5120 in: cap 8 ≈ 16m repeat, 16 ≈ 8m, 32 ≈ 4m).
+// push.gg_tile_share bits 24..31 = cap (0 = stock output, bit-for-bit).
 // Returns: xy = UV scale (repeat count per axis), z = texture LOD to sample.
 float3 gg_tile_uv_scale_lod(float2 dim)
 {
 	const float res = 1.0 / push.resolution_rcp;
-	const float res0 = max((float)(push.gg_tile_share & 0xFFFFFFu), res);
-	const float K = (float)(push.gg_tile_share >> 24u);
-	const float m = log2(res0 / res); // which VT mip of the region this bake fills
-	const float res_eff = res0 * exp2(-max(0.0, m - K)); // K=0: == res (stock); within the share window: == res0
-	const float2 diff = dim / res_eff;
-	const float lod = log2(max(diff.x, diff.y));
-	const float2 overscale = lod < 0 ? diff : float2(1, 1);
-	return float3(1.0 / overscale, max(0.0, lod) + log2(res_eff / res));
+	const float cap = (float)(push.gg_tile_share >> 24u);
+	const float2 diff = dim * push.resolution_rcp;
+	const float lod_stock = log2(max(diff.x, diff.y));
+	const float2 overscale = lod_stock < 0 ? diff : float2(1, 1);
+	float2 repeats = 1.0 / overscale; // stock repeat count (>= 1 per axis)
+	if (cap > 0)
+	{
+		const float rescale = min(1.0, cap / max(repeats.x, repeats.y));
+		repeats = max(float2(1, 1), repeats * rescale); // uniform rescale keeps texture aspect
+	}
+	const float lod = log2(max(dim.x * repeats.x, dim.y * repeats.y) * push.resolution_rcp);
+	return float3(repeats, max(0.0, lod));
 }
 
 [numthreads(8, 8, 1)]

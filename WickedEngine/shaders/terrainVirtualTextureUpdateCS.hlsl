@@ -30,20 +30,30 @@ static const uint2 block_offsets[16] = {
 // cap is world-anchored (repeats per chunk region), so chunk resolution rings and promotions
 // cannot introduce seams or scale pops, and the dial directly sets the terrain texture's world
 // feature size (chunk ≈ 5120 in: cap 8 ≈ 16m repeat, 16 ≈ 8m, 32 ≈ 4m).
-// push.gg_tile_share bits 24..31 = cap (0 = stock output, bit-for-bit).
+// push.gg_tile_share bits 24..31 = cap (0 = stock output, bit-for-bit); bits 16..23 = hold —
+// the halving ladder is DELAYED by <hold> rungs before it starts descending from the cap, so
+// the FIRST visible scale cross-fade moves ~1.4x further from the camera per +1 hold while the
+// feature size (cap) stays fixed. The far anti-tiling still engages beyond the held range.
 // Returns: xy = UV scale (repeat count per axis), z = texture LOD to sample.
 float3 gg_tile_uv_scale_lod(float2 dim)
 {
 	const float res = 1.0 / push.resolution_rcp;
 	const float cap = (float)(push.gg_tile_share >> 24u);
+	const float hold = (float)((push.gg_tile_share >> 16u) & 0xFFu);
 	const float2 diff = dim * push.resolution_rcp;
 	const float lod_stock = log2(max(diff.x, diff.y));
 	const float2 overscale = lod_stock < 0 ? diff : float2(1, 1);
-	float2 repeats = 1.0 / overscale; // stock repeat count (>= 1 per axis)
+	float2 repeats;
 	if (cap > 0)
 	{
+		// shifted ladder, PRE-floor (the floor would erase rung positions past repeats==1)
+		repeats = res * exp2(hold) / dim;
 		const float rescale = min(1.0, cap / max(repeats.x, repeats.y));
 		repeats = max(float2(1, 1), repeats * rescale); // uniform rescale keeps texture aspect
+	}
+	else
+	{
+		repeats = 1.0 / overscale; // stock repeat count (>= 1 per axis)
 	}
 	const float lod = log2(max(dim.x * repeats.x, dim.y * repeats.y) * push.resolution_rcp);
 	return float3(repeats, max(0.0, lod));

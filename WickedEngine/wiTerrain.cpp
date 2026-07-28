@@ -330,8 +330,12 @@ namespace wi::terrain
 	// the stock repeat-halving anti-tiling for the far field. World-anchored, so resolution
 	// rings/promotions cannot cause seams or scale pops. 0 = stock (scale cross-fades start at
 	// the camera). Chunk ≈ 5120 in: cap 8 ≈ 16m texture repeat, 16 ≈ 8m, 32 ≈ 4m. Live-tunable:
-	// harness SET_TERRAINTILE <cap> (queues a fast repaint of resident chunk VTs on change).
+	// harness SET_TERRAINTILE <cap> [hold] (queues a fast repaint of resident chunk VTs on change).
 	uint32_t gg_terrain_tile_share_mips = 16;
+	// GGMAX 1.53c: hold — delays the halving ladder by this many rungs before it descends from
+	// the cap, pushing the FIRST visible scale cross-fade ~1.4x further out per +1 while the
+	// feature size stays fixed. 0 = the cap's natural handoff distance.
+	uint32_t gg_terrain_tile_hold_mips = 4;
 
 	void VirtualTexture::init(VirtualTextureAtlas& atlas, uint resolution)
 	{
@@ -2323,8 +2327,9 @@ namespace wi::terrain
 					continue;
 				push.blendmap_buffer_offset = (uint)mem.offset;
 
-				// GGMAX 1.53b: tiling repeat cap for the CS sampling policy (bits 24..31; 0 = stock)
-				push.gg_tile_share = std::min(gg_terrain_tile_share_mips, 255u) << 24u;
+				// GGMAX 1.53b/c: tiling repeat cap (bits 24..31; 0 = stock) + ladder hold (bits 16..23)
+				push.gg_tile_share = (std::min(gg_terrain_tile_share_mips, 255u) << 24u)
+					| (std::min(gg_terrain_tile_hold_mips, 255u) << 16u);
 
 				for (auto& request : vt->update_requests)
 				{

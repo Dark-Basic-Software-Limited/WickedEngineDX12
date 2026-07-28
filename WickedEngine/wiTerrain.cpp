@@ -324,6 +324,13 @@ namespace wi::terrain
 
 	// GGMAX 1.33: master switch for incremental VT bookkeeping (see wiTerrain.h)
 	bool gg_vt_incremental = true;
+	// GGMAX 1.53: terrain VT tiling share-mip count K — the K mips below a region's mip0 keep
+	// mip0's texture repeat count (pure downsamples = invisible trilinear transitions near the
+	// camera); beyond K the stock repeat-halving anti-tiling resumes for the far field. 0 = stock
+	// (every mip re-baked at half repeats — visible two-scale cross-fade bands near the camera in
+	// inch-scale worlds). Live-tunable: harness SET_TERRAINTILE <K> (the game queues a fast
+	// repaint of resident chunk VTs on change; streamed-in tiles pick the policy up naturally).
+	uint32_t gg_terrain_tile_share_mips = 1;
 
 	void VirtualTexture::init(VirtualTextureAtlas& atlas, uint resolution)
 	{
@@ -2314,6 +2321,9 @@ namespace wi::terrain
 				if (push.blendmap_buffer < 0)
 					continue;
 				push.blendmap_buffer_offset = (uint)mem.offset;
+
+				// GGMAX 1.53: region mip0 resolution + tiling share-mips for the CS sampling policy
+				push.gg_tile_share = (std::min(gg_terrain_tile_share_mips, 255u) << 24u) | (vt->resolution & 0xFFFFFFu);
 
 				for (auto& request : vt->update_requests)
 				{

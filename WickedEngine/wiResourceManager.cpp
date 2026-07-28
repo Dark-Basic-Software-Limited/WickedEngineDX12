@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <mutex>
 #include <unordered_map>
+#include <fstream> // GGMAX 1.52b: resource_hijack.txt tripwire
 
 using namespace wi::graphics;
 
@@ -922,6 +923,21 @@ namespace wi
 			locker.lock();
 			wi::allocator::weak_ptr<ResourceInternal>& weak_resource = resources[name];
 			wi::allocator::shared_ptr<ResourceInternal> resource = weak_resource.lock();
+
+			// GGMAX 1.52b tripwire: a cache hit whose internal names a DIFFERENT file means the
+			// name->resource binding was hijacked (the pooled weak_ptr underflow fixed by 1.52,
+			// or any undiscovered sibling). Self-heal by treating it as a cache miss, and log
+			// the evidence next to the EXE. Post-1.52 this should never fire.
+			if (resource != nullptr && !resource->filename.empty() && resource->filename != name)
+			{
+				const std::string report_path = wi::helper::GetDirectoryFromPath(wi::helper::GetExecutablePath()) + "resource_hijack.txt";
+				std::ofstream hijack_report(report_path, std::ios::app);
+				if (hijack_report)
+				{
+					hijack_report << "requested \"" << name << "\" but cache entry holds \"" << resource->filename << "\" — rebinding fresh\n";
+				}
+				resource.reset();
+			}
 
 			uint64_t timestamp = 0;
 			if(!container_filename.empty())

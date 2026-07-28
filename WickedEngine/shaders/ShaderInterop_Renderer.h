@@ -30,7 +30,9 @@ struct alignas(16) ShaderScene
 	float3 aabb_extents;		// enclosing AABB abs(max - min)
 	uint materialCount;
 	float3 aabb_extents_rcp;	// enclosing AABB 1.0f / abs(max - min)
-	float padding6;
+	// GGMAX 1.55: global env-probe brightness multiplier (1 = stock). Restores the DX11
+	// "Global Probe Brightness" slider (EnvironmentProbeComponent::SetBrightness was removed).
+	float gg_envprobe_brightness;
 
 	ShaderWeather weather;
 

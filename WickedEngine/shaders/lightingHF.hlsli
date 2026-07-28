@@ -621,6 +621,9 @@ inline half3 EnvironmentReflection_Global(in Surface surface)
 	envColor += cubemap.SampleLevel(sampler_linear_clamp, surface.clearcoat.R, MIP).rgb * surface.clearcoat.F;
 #endif // CLEARCOAT
 
+	// GGMAX 1.55: global env-probe brightness (1 = stock) — restores the DX11 slider
+	envColor *= (half)GetScene().gg_envprobe_brightness;
+
 #endif // ENVMAPRENDERING
 
 	return envColor;

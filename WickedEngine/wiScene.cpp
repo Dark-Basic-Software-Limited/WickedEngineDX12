@@ -34,6 +34,10 @@ namespace wi::scene
 {
 	static constexpr uint32_t small_subtask_groupsize = 256u;
 
+	// GGMAX 1.55: global env-probe brightness multiplier (1 = stock), set by the game's
+	// "Global Probe Brightness" slider; consumed in lightingHF EnvironmentReflection_Global.
+	float gg_envprobe_brightness = 1.0f;
+
 	void Scene::Update(float dt)
 	{
 		GraphicsDevice* device = wi::graphics::GetDevice();
@@ -881,6 +885,10 @@ namespace wi::scene
 		{
 			shaderscene.globalprobe = -1;
 		}
+
+		// GGMAX 1.55: global env-probe brightness knob (see ShaderInterop ShaderScene)
+		extern float gg_envprobe_brightness;
+		shaderscene.gg_envprobe_brightness = gg_envprobe_brightness;
 
 		shaderscene.impostorInstanceOffset = impostorInstanceOffset;
 		shaderscene.TLAS = device->GetDescriptorIndex(&TLAS, SubresourceType::SRV);

@@ -331,10 +331,12 @@ namespace wi::terrain
 	// rings/promotions cannot cause seams or scale pops. 0 = stock (scale cross-fades start at
 	// the camera). Chunk ≈ 5120 in: cap 8 ≈ 16m texture repeat, 16 ≈ 8m, 32 ≈ 4m. Live-tunable:
 	// harness SET_TERRAINTILE <cap> [hold] (queues a fast repaint of resident chunk VTs on change).
-	uint32_t gg_terrain_tile_share_mips = 16;
+	uint32_t gg_terrain_tile_share_mips = 32; // USER-TUNED 2026-07-28: "human scaled" underfoot detail (~4m repeat)
 	// GGMAX 1.53c: hold — delays the halving ladder by this many rungs before it descends from
 	// the cap, pushing the FIRST visible scale cross-fade ~1.4x further out per +1 while the
 	// feature size stays fixed. 0 = the cap's natural handoff distance.
+	// USER-TUNED 2026-07-28 (live walk on the snowy/moss test scene, bracketed 8->6->5->4):
+	// 4 = handoff invisible while walking, horizon breaks up before it reads as wallpaper.
 	uint32_t gg_terrain_tile_hold_mips = 4;
 
 	void VirtualTexture::init(VirtualTextureAtlas& atlas, uint resolution)

@@ -83,7 +83,12 @@ float3 AccurateAtmosphericScattering(float2 pixelPosition, float3 rayOrigin, flo
 
     if (darkMode)
     {
-        totalColor = max(pow(saturate(dot(sunDirection, rayDirection)), 64) * sunColor, 0) * luminance * 1.0;
+        // GGREDUCED 1.56: sunColor arrives with intensity pre-applied (GetSunColor) in this
+        // engine, making the light-shaft sun mask ~sunEnergy x hotter than the DX11-era code
+        // (which fed the raw light color here). Normalize to unit peak: hue preserved, DX11
+        // mask magnitude restored, and a dim (dusk/night) sun still darkens the mask.
+        float3 sunColorNorm = sunColor / max(max(sunColor.r, max(sunColor.g, sunColor.b)), 1.0);
+        totalColor = max(pow(saturate(dot(sunDirection, rayDirection)), 64) * sunColorNorm, 0) * luminance * 1.0;
     }
 
 	if (GetFrame().options & OPTION_BIT_HEIGHT_FOG)
@@ -141,6 +146,18 @@ float3 GetDynamicSkyColor(in float2 pixel, in float3 V, bool sun_enabled = true,
     else
     {
 		sky = lerp(GetHorizonColor(), GetZenithColor(), saturate(V.y * 0.5f + 0.5f));
+
+		// GGREDUCED 1.56: honor dark_enabled in the simple-gradient sky path (DX11 parity).
+		// The light shaft sun mask (sunPS.hlsl) renders the sky with dark_enabled=true and
+		// expects a sun-disc-only image; without this the full sky gradient enters the mask
+		// and the radial blur washes the whole screen white. GetSunColor() has intensity
+		// pre-applied, so normalize to unit peak like the realistic-sky dark mode above.
+		if (dark_enabled)
+		{
+			float3 sunColor = GetSunColor();
+			sunColor /= max(max(sunColor.r, max(sunColor.g, sunColor.b)), 1.0);
+			sky = max(pow(saturate(dot(GetSunDirection(), V)), 64) * sunColor, 0);
+		}
     }
 
 	sky *= GetWeather().sky_exposure;

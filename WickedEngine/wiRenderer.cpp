@@ -799,6 +799,12 @@ struct DelayedShadowCascadeState
 	int rectX = -1, rectY = -1, rectW = -1, rectH = -1;
 	uint32_t atlasWidth = 0, atlasHeight = 0;
 	uint64_t decisionFrame = ~0ull;
+	// GGMAX 1.59: character-dedicated slots are PREPENDED to the cascade array, shifting the
+	// sun cascades' raw slot indices. The stagger offsets by this count (dedicated slots and
+	// sun cascade 0 refresh every frame; only sun cascades 1..N stagger), and a COUNT CHANGE
+	// between frames forces a full refresh — the frozen per-slot matrices would otherwise be
+	// applied to different cascades than they were captured from.
+	uint32_t dedicatedCount = ~0u;
 };
 static DelayedShadowCascadeState delayedShadowState;
 
@@ -4979,12 +4985,15 @@ void UpdatePerFrameData(
 				//GGMAX delayed shadow cascades: decide per-cascade refresh and freeze
 				//the matrices of skipped cascades so shaders sample them with the
 				//exact view-projection they were last rendered with. Only the first
-				//shadow-casting directional light gets the treatment (GG has one sun);
-				//character dedicated shadows shift the cascade indices, so their
-				//presence disables the feature for the frame.
+				//shadow-casting directional light gets the treatment (GG has one sun).
+				//GGMAX 1.59: dedicated character slots no longer disable the feature —
+				//the stagger group is OFFSET past them (dedicated slots + sun cascade 0
+				//refresh every frame; sun cascades 1..N stagger), and a count change
+				//forces a full refresh so frozen matrices never cross cascades.
+				const uint32_t gg_dedicated_count = (uint32_t)vis.scene->character_dedicated_shadows.size();
 				const bool ggDelayed = delayedShadowCascadesEnabled
-					&& vis.scene->character_dedicated_shadows.empty()
 					&& cascade_count <= DelayedShadowCascadeState::MAX_CASCADES
+					&& cascade_count > gg_dedicated_count
 					&& delayedShadowState.decisionFrame != device->GetFrameCount();
 				if (ggDelayed)
 				{
@@ -4995,6 +5004,7 @@ void UpdatePerFrameData(
 
 					const bool forceAll = !st.valid
 						|| st.lightEntity != lightEnt
+						|| st.dedicatedCount != gg_dedicated_count // 1.59: slot indices shifted — frozen matrices unusable
 						|| st.rectX != shadow_rect.x || st.rectY != shadow_rect.y
 						|| st.rectW != shadow_rect.w || st.rectH != shadow_rect.h
 						|| st.atlasWidth != shadowMapAtlas.desc.width
@@ -5021,7 +5031,9 @@ void UpdatePerFrameData(
 						const int interval = delayedShadowCascadeInterval < 2 ? 2 : delayedShadowCascadeInterval;
 						if ((frame % interval) != 0)
 						{
-							for (uint32_t c = 1; c < cascade_count; ++c) st.update[c] = false;
+							// 1.59: dedicated slots (0..N-1, animated characters) and sun cascade 0
+							// (slot N) refresh every frame; only sun cascades 1.. stagger.
+							for (uint32_t c = gg_dedicated_count + 1; c < cascade_count; ++c) st.update[c] = false;
 						}
 						//camera translation override (64 world units, DX11): a real move
 						//refreshes stale cascades immediately
@@ -5049,6 +5061,7 @@ void UpdatePerFrameData(
 						matrixArray[matrixCounter++] = st.cachedVP[c];
 					}
 					st.lightEntity = lightEnt;
+					st.dedicatedCount = gg_dedicated_count; // 1.59
 					st.rectX = shadow_rect.x; st.rectY = shadow_rect.y;
 					st.rectW = shadow_rect.w; st.rectH = shadow_rect.h;
 					st.atlasWidth = shadowMapAtlas.desc.width;
@@ -7306,8 +7319,11 @@ void DrawShadowmaps(
 			CreateDirLightShadowCams(light, *vis.camera, shcams, cascade_count, shadow_rect, vis.scene->character_dedicated_shadows.data(), vis.scene->character_dedicated_shadows.size());
 
 			// GGMAX far-cascade caster cull (ported from the DX11 build): objects only shadow into the
-			// near cascades. Disabled when character-dedicated shadows append extra cascades (they need objects).
-			const bool ggCullFarCascades = shadowFarCascadeCull && vis.scene->character_dedicated_shadows.empty();
+			// near cascades. GGMAX 1.59: dedicated-aware — dedicated slots (raw indices < count) are
+			// never culled (they exist to hold the character), and the sun-cascade thresholds are
+			// offset past them instead of disabling the cull outright.
+			const bool ggCullFarCascades = shadowFarCascadeCull;
+			const uint32_t ggDedicatedCount = (uint32_t)vis.scene->character_dedicated_shadows.size();
 
 			for (size_t i = 0; i < vis.scene->aabb_objects.size(); ++i)
 			{
@@ -7330,11 +7346,14 @@ void DrawShadowmaps(
 							if (ggDelayedShadows && cascade < DelayedShadowCascadeState::MAX_CASCADES && !delayedShadowState.update[cascade])
 								continue;
 							// GGMAX far-cascade caster cull (DX11 parity): keep object shadows out of the far cascades.
-							if (ggCullFarCascades)
+							// 1.59: thresholds apply to the SUN cascade index (raw slot minus dedicated count);
+							// dedicated slots themselves are exempt.
+							if (ggCullFarCascades && cascade >= ggDedicatedCount)
 							{
-								if (cascade >= 3)
+								const uint32_t sun_cascade = cascade - ggDedicatedCount;
+								if (sun_cascade >= 3)
 									continue; // far cascades -> terrain-only shadows
-								if (cascade == 2)
+								if (sun_cascade == 2)
 								{
 									const float sx = aabb._max.x - aabb._min.x;
 									const float sy = aabb._max.y - aabb._min.y;

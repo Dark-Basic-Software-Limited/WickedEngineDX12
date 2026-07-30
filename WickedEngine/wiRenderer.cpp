@@ -4255,7 +4255,11 @@ void UpdateVisibility(Visibility& vis)
 			}
 			if (!vis.shadow_packer.rects.empty())
 			{
-				if (vis.shadow_packer.pack(8192))
+				// GGMAX 1.58b: atlas cap 8192 -> 16384 (D3D12 max texture dim). At 8192 the five
+				// 2048 sun cascades (10240 wide) could never fit, so the packer's iterative_scaling
+				// silently HALVED them to 1024/cascade — the DX11 build's Texture2DArray ran true
+				// 2048. With 16384 the "2048" quality setting finally means 2048.
+				if (vis.shadow_packer.pack(16384))
 				{
 					for (auto& rect : vis.shadow_packer.rects)
 					{

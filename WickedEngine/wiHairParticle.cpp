@@ -953,7 +953,11 @@ namespace wi
 		}
 		else
 		{
-			rs.depth_bias = -10;
+			// GGMAX 1.58: upstream latent bug — this branch wrote rs.depth_bias (the MAIN hair
+			// rasterizer) instead of rs_shadow, so under a float shadow format hair shadows got
+			// bias 0 and the main pass got a bogus -10. Fixed; -1 matches the DX11-era fork's
+			// hair shadow bias on its D32 maps.
+			rs_shadow.depth_bias = -1;
 		}
 
 

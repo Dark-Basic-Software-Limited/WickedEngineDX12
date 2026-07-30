@@ -2371,8 +2371,13 @@ void SetUpStates()
 	}
 	else
 	{
-		rs.depth_bias = -10;
-		rs.slope_scaled_depth_bias = -3.4f;
+		// GGMAX 1.58: DX11-era parity numbers for float shadow depth. The DX11 fork shipped
+		// DepthBias=-1 / SlopeScaled=-4.0 / clamp 0 on its D32 maps for years without acne or
+		// flicker (float bias units are exponent-scaled and tiny; the receiver-side feathered
+		// compare in the sampler does the tolerance work). Upstream's untested -10/-3.4 kept
+		// here for reference only.
+		rs.depth_bias = -1;
+		rs.slope_scaled_depth_bias = -4.0f;
 		rs.depth_bias_clamp = 0;
 	}
 	rs.depth_clip_enable = false;

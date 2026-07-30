@@ -77,6 +77,8 @@ inline void light_directional(in ShaderEntity light, in Surface surface, inout L
 		if ((GetFrame().options & OPTION_BIT_RAYTRACED_SHADOWS) == 0 || GetCamera().texture_rtshadow_index < 0 || (GetCamera().options & SHADERCAMERA_OPTION_USE_SHADOW_MASK) == 0)
 #endif // SHADOW_MASK_ENABLED
 		{
+			// GGMAX 1.58: camera distance drives the feathered sampler's 8..1 tap count (DX11 parity)
+			const float gg_camera_distance = length(GetCamera().position - surface.P);
 			// Loop through cascades from closest (smallest) to furthest (largest)
 			[loop]
 			for (min16uint cascade = 0; cascade < light.GetShadowCascadeCount(); ++cascade)
@@ -104,7 +106,7 @@ inline void light_directional(in ShaderEntity light, in Surface surface, inout L
 					light_color *= shadow_2D(light, shadow_pos.z, shadow_uv.xy, cascade);
 					break;
 #else
-					const half3 shadow_main = shadow_2D(light, shadow_pos.z, shadow_uv.xy, cascade, surface.pixel);
+					const half3 shadow_main = shadow_2D_feathered(light, shadow_pos.z, shadow_uv.xy, cascade, gg_camera_distance); // GGMAX 1.58
 					
 					// If we are on cascade edge threshold and not the last cascade, then fallback to a larger cascade:
 					[branch]
@@ -115,7 +117,7 @@ inline void light_directional(in ShaderEntity light, in Surface surface, inout L
 						shadow_pos = mul(load_entitymatrix(light.GetMatrixIndex() + cascade), float4(surface.P, 1)).xyz;
 						shadow_pos.z += GetFrame().gg_shadow_receiver_bias; // GGMAX 1.57
 						shadow_uv = clipspace_to_uv(shadow_pos);
-						const half3 shadow_fallback = shadow_2D(light, shadow_pos.z, shadow_uv.xy, cascade, surface.pixel);
+						const half3 shadow_fallback = shadow_2D_feathered(light, shadow_pos.z, shadow_uv.xy, cascade, gg_camera_distance); // GGMAX 1.58
 
 						light_color *= lerp(shadow_main, shadow_fallback, cascade_fade);
 					}

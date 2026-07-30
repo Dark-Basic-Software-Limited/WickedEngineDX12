@@ -244,6 +244,74 @@ inline half3 shadow_2D(in ShaderEntity light, in float z, in float2 shadow_uv, i
 	return sample_shadow(shadow_uv, z, shadow_border_clamp(light, cascade), light.GetType() == ENTITY_TYPE_RECTLIGHT ? (half2(light.GetRadius(), light.GetLength()) * 0.025) : light.GetRadius(), pixel);
 }
 
+// GGMAX 1.58: DX11-era feathered gather PCF for DIRECTIONAL cascades — verbatim port of the
+// DX11 fork's shadowCmpLookup/shadowCascade (WickedRepo lightingHF.hlsli:48-184). What it does
+// differently from sample_shadow above:
+//   - depths fetched RAW via point-clamp Gather (through the float bindless view — the half4
+//     view would quantize D32 below the feather width) and compared in ALU,
+//   - occlusion gets a graded depth FEATHER: saturate((stored - receiver) * 65536/(cascade+1))
+//     so marginal occluders shade partially instead of binary-popping (the DX11 anti-flicker
+//     tolerance the hard SampleCmp path lost),
+//   - manual bilinear of the 4 gathered results,
+//   - distance-based tap count: 8 taps near the camera stepping down to 1 beyond ~2334 units.
+// Directional-only; spot/point keep the stock path. Designed against D32 float shadow depth.
+static const float2 gg_feather_taps[8] =
+{
+	float2( 0.0f,  0.0f),
+	float2(-1.0f, -1.0f),
+	float2( 1.0f,  1.0f),
+	float2( 1.0f, -1.0f),
+	float2(-1.0f,  1.0f),
+	float2( 1.0f,  0.0f),
+	float2(-1.0f,  0.0f),
+	float2( 0.0f, -1.0f),
+};
+
+inline half3 shadow_2D_feathered(in ShaderEntity light, in float z, in float2 shadow_uv, in uint cascade, in float camera_distance)
+{
+	shadow_uv.x += cascade;
+	shadow_uv = mad(shadow_uv, light.shadowAtlasMulAdd.xy, light.shadowAtlasMulAdd.zw);
+	const float4 uv_clamping = shadow_border_clamp(light, cascade);
+
+	Texture2D texture_shadowatlas_f = bindless_textures[descriptor_index(GetFrame().texture_shadowatlas_index)];
+
+	// Manual bilinear weights on the atlas-physical texel grid. Computed ONCE from the center
+	// tap and shared: the tap offsets below are exact whole texels so the fraction is identical.
+	float4 interp;
+	interp.xy = frac(shadow_uv * (float2)GetFrame().shadow_atlas_resolution - 0.5);
+	interp.zw = 1 - interp.xy;
+	interp = interp.zxzx * interp.wwyy;
+
+	const float scaleFactor = 65536.0 / (cascade + 1u); // feather widens per cascade (DX11 constant, D32-scale)
+	const int samplenum = 8 - (int)min(camera_distance * 0.003f, 7.0f); // 8 near .. 1 far (DX11 formula)
+
+	float occlusion = 0;
+	[loop]
+	for (int i = 0; i < samplenum; ++i)
+	{
+		float2 tap_uv = mad(gg_feather_taps[i], GetFrame().shadow_atlas_resolution_rcp.xy, shadow_uv);
+		tap_uv = clamp(tap_uv, uv_clamping.xy, uv_clamping.zw);
+		float4 depthSamples = texture_shadowatlas_f.GatherRed(sampler_point_clamp, tap_uv);
+		float4 occl = depthSamples > z; // reversed-Z: stored nearer the light than receiver = occluded
+		occl *= saturate((depthSamples - z) * scaleFactor);
+		occlusion += dot(occl.wzxy, interp);
+	}
+	half3 shadow = (half3)(1 - occlusion / samplenum);
+
+#ifndef DISABLE_TRANSPARENT_SHADOWMAP
+	Texture2D<half4> texture_shadowatlas_transparent = bindless_textures_half4[descriptor_index(GetFrame().texture_shadowatlas_transparent_index)];
+	half4 transparent_shadow = texture_shadowatlas_transparent.SampleLevel(sampler_linear_clamp, clamp(shadow_uv, uv_clamping.xy, uv_clamping.zw), 0);
+#ifdef TRANSPARENT_SHADOWMAP_SECONDARY_DEPTH_CHECK
+	if (transparent_shadow.a > z)
+#endif // TRANSPARENT_SHADOWMAP_SECONDARY_DEPTH_CHECK
+	{
+		shadow *= transparent_shadow.rgb;
+	}
+#endif // DISABLE_TRANSPARENT_SHADOWMAP
+
+	return shadow;
+}
+
 inline half3 shadow_cube(in ShaderEntity light, in float3 Lunnormalized, min16uint2 pixel = 0)
 {
 	const float remapped_distance = light.GetCubemapDepthRemapNear() + light.GetCubemapDepthRemapFar() / (max(max(abs(Lunnormalized.x), abs(Lunnormalized.y)), abs(Lunnormalized.z)) * 0.989); // little bias to avoid artifact

@@ -2050,7 +2050,16 @@ namespace wi::scene
 								const float d2 = ddx * ddx + ddy * ddy + ddz * ddz;
 								bThrottleEligible = (d2 > (float)animThrottleDist2);
 							}
-							// else: object has no aabb yet -> leave eligible (throttle allowed)
+							else
+							{
+								// GGMAX 1.61: an UNRESOLVABLE proxy must NOT throttle. The old fallback
+								// ("no aabb yet -> leave eligible") permanently half-rated any character
+								// whose animation objectIndex pin went stale (CC characters pin to an
+								// arbitrary unordered_map mesh) — a full-screen hero character stepping
+								// at 30fps reads as normal-map/texture flicker (user repro: one character
+								// at a time, healed by re-select which re-pins). Fail toward full rate.
+								bThrottleEligible = false;
+							}
 						}
 						if (bThrottleEligible && ((animParityFrame + animation_index) % 2 == 0))
 						{

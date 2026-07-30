@@ -82,10 +82,20 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThreadID)
 	}
 	
 	half4 tan = 0;
+	// GGMAX 1.64: carry the tangent handedness in a dedicated FLOAT, read via the float4
+	// bindless table. Byte forensics (DUMP_SOTAN) proved the streamed-out tan.w was NEVER the
+	// source handedness: each 64-thread wave stored one wave-uniform garbage value (source
+	// buffer 100% canonical, so_nor/so_pos w-lanes intact, corruption exactly wave-granular) —
+	// a packed-half register lifecycle hazard around the partial update `tan.xyz = ...`.
+	// Frame-unstable garbage = the intermittent character "texture flicker"; frame-stable
+	// garbage = the ever-present wrong red/green handedness patchwork.
+	float gg_tan_w = 0;
 	[branch]
 	if (push.vb_tan >= 0)
 	{
-		tan = bindless_buffers_half4[descriptor_index(push.vb_tan)][vertexID];
+		float4 gg_tan_src = bindless_buffers_float4[descriptor_index(push.vb_tan)][vertexID];
+		tan = half4(gg_tan_src);
+		gg_tan_w = gg_tan_src.w;
 	}
 	
 	float3 pos = pos_wind.xyz;
@@ -180,6 +190,7 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThreadID)
 	[branch]
 	if (push.so_tan >= 0)
 	{
-		bindless_rwbuffers_float4[descriptor_index(push.so_tan)][vertexID] = tan;
+		// GGMAX 1.64: explicit float store with the float-carried handedness (see above)
+		bindless_rwbuffers_float4[descriptor_index(push.so_tan)][vertexID] = float4((float3)tan.xyz, gg_tan_w);
 	}
 }

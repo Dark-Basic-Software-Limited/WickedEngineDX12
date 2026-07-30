@@ -787,6 +787,9 @@ int gg_debugvis = 0;
 // GGMAX 1.62c: route raster tangents to bind-pose buffers (skip so_tan patch) — see wiScene.cpp
 // RunMeshUpdateSystem. Harness SET_BINDPOSE_TAN <0|1>.
 bool gg_force_bindpose_tangents = false;
+// GGMAX 1.62e: suspect kill-switch for the streamout-stomping hunt — 0 skips the whole
+// RefreshWetmaps update pass (object + hair loops). Harness SET_WETMAPS <0|1>.
+bool gg_wetmap_updates_enabled = true;
 // GG "Laptop" mode: how many frames the delayed FAR cascades (1..N) are held between refreshes.
 // 2 = default delayed shadows (far cascades refresh every other frame); 4 = "twice as aggressive"
 // (the editor "Laptop" checkbox). Clamped >=2 at the setter. Cascade 0 always refreshes every frame,
@@ -11763,6 +11766,8 @@ void RefreshLightmaps(const Scene& scene, CommandList cmd)
 void RefreshWetmaps(const Visibility& vis, CommandList cmd)
 {
 	if (!vis.scene->IsWetmapProcessingRequired())
+		return;
+	if (!gg_wetmap_updates_enabled) // GGMAX 1.62e suspect kill-switch (SET_WETMAPS)
 		return;
 
 	device->EventBegin("RefreshWetmaps", cmd);

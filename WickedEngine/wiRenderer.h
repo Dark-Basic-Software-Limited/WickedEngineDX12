@@ -1401,6 +1401,8 @@ namespace wi::renderer
 	// GGMAX 1.62c: raster tangents from bind-pose buffers instead of skinned streamout
 	// (diagnostic lever for the per-load tangent-w instability; harness SET_BINDPOSE_TAN)
 	extern bool gg_force_bindpose_tangents;
+	// GGMAX 1.62e: wetmap update pass kill-switch (streamout-stomp suspect A/B; SET_WETMAPS)
+	extern bool gg_wetmap_updates_enabled;
 
 };
 

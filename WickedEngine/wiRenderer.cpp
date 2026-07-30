@@ -780,6 +780,10 @@ static bool delayedShadowCascadesEnabled = false;
 // DEFAULT 0 (stock): bracketing 0-64 ULPs on the neck-flicker repro showed no measurable
 // change at 1Hz sampling — kept as experiment infrastructure until a 60fps-eye verdict.
 float gg_shadow_receiver_bias = 0.0f;
+// GGMAX 1.62: tangent-frame visualization mode for skinned normal-map flicker forensics.
+// 0=off, 1=world tangent, 2=vertex normal, 3=bumped normal, 4=handedness, 5=map sample.
+// Set from the game harness (SET_TANGENTVIS); object PS early-outs with the debug color.
+int gg_debugvis = 0;
 // GG "Laptop" mode: how many frames the delayed FAR cascades (1..N) are held between refreshes.
 // 2 = default delayed shadows (far cascades refresh every other frame); 4 = "twice as aggressive"
 // (the editor "Laptop" checkbox). Clamped >=2 at the setter. Cascade 0 always refreshes every frame,
@@ -4576,6 +4580,7 @@ void UpdatePerFrameData(
 
 	frameCB.capsuleshadow_fade_angle = uint32_t(XMConvertFloatToHalf(CAPSULE_SHADOW_FADE)) | uint32_t(XMConvertFloatToHalf(std::max(0.001f, CAPSULE_SHADOW_ANGLE * 0.5f))) << 16u;
 	frameCB.gg_shadow_receiver_bias = gg_shadow_receiver_bias; // GGMAX 1.57
+	frameCB.gg_debugvis = gg_debugvis; // GGMAX 1.62 tangent-vis
 
 	frameCB.options = 0;
 	if (GetTemporalAAEnabled())

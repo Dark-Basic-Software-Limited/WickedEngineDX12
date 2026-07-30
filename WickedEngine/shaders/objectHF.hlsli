@@ -586,6 +586,19 @@ float4 main(PixelInput input, in bool is_frontface : SV_IsFrontFace APPEND_COVER
 	
 	surface.T.xyz = normalize(surface.T.xyz);
 
+#ifndef PREPASS
+	// GGMAX 1.62: tangent-frame visualization (harness SET_TANGENTVIS) — per-frame stability
+	// forensics for the skinned normal-map flicker. Early-out with raw data as color.
+	[branch]
+	switch (GetFrame().gg_debugvis)
+	{
+	case 1: return float4(surface.T.xyz * 0.5 + 0.5, 1);                       // world tangent
+	case 2: return float4(normalize(input.nor) * 0.5 + 0.5, 1);                // vertex normal
+	case 4: return surface.T.w < 0 ? float4(1, 0, 0, 1) : float4(0, 1, 0, 1);  // handedness
+	default: break;
+	}
+#endif // PREPASS
+
 #ifdef PARALLAXOCCLUSIONMAPPING
 	[branch]
 	if (material.textures[DISPLACEMENTMAP].IsValid())
@@ -770,6 +783,16 @@ float4 main(PixelInput input, in bool is_frontface : SV_IsFrontFace APPEND_COVER
 	{
 		surface.N = normalize(mul(surface.bumpColor, TBN));
 	}
+#ifndef PREPASS
+	// GGMAX 1.62 tangent-vis (continued): post-bump modes
+	[branch]
+	switch (GetFrame().gg_debugvis)
+	{
+	case 3: return float4(surface.N * 0.5 + 0.5, 1);                                    // final bumped normal
+	case 5: return float4(surface.bumpColor.rg * 0.5 + 0.5, 0, 1);                      // strength-scaled map sample
+	default: break;
+	}
+#endif // PREPASS
 #endif // OBJECTSHADER_USE_TANGENT
 #endif // WATER
 

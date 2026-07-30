@@ -1284,7 +1284,11 @@ struct alignas(16) FrameCB
 	// positive pushes the receiver toward the light). Restores the DX11-era receiver depth
 	// tolerance the new hard-SampleCmp path lost — cures animated self-shadow flicker. 0 = stock.
 	float		gg_shadow_receiver_bias;
-	int			padding1;
+	// GGMAX 1.62: tangent-frame visualization for skinned-flicker forensics (harness
+	// SET_TANGENTVIS). 0=off, 1=world tangent RGB, 2=interpolated vertex normal RGB,
+	// 3=final bumped normal RGB, 4=tangent handedness (red=-1 green=+1),
+	// 5=strength-scaled normal-map sample rg. Object PS early-outs with the debug color.
+	int			gg_debugvis;
 
 	float		blue_noise_phase;
 	int			texture_random64x64_index;

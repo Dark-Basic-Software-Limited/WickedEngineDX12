@@ -770,6 +770,16 @@ PipelineState PSO_mesh_blend_resolve;
 Shader shadowClearPS_GG;
 PipelineState PSO_shadowClear_GG;
 static bool delayedShadowCascadesEnabled = false;
+// GGMAX 1.57: receiver-side depth bias for directional cascade shadows, in reversed-Z NDC
+// units (positive = receiver reads closer to the light = less self-shadow acne). The DX11-era
+// fork's shadow compare had a graded depth feather (scaleFactor = 65536/(cascade+1)) that gave
+// ~1-2 D16-ULPs of receiver tolerance; the new hard SampleCmp path has none, so ANIMATED
+// (skinned) characters self-shadow-flicker where the depth margin oscillates with the pose
+// (user repro: back/neck of an idling character). Default 2 ULPs of the D16 shadow atlas.
+// Live-tunable via the game harness SET_SHADOWBIAS <ulps>; 0 = stock behavior.
+// DEFAULT 0 (stock): bracketing 0-64 ULPs on the neck-flicker repro showed no measurable
+// change at 1Hz sampling — kept as experiment infrastructure until a 60fps-eye verdict.
+float gg_shadow_receiver_bias = 0.0f;
 // GG "Laptop" mode: how many frames the delayed FAR cascades (1..N) are held between refreshes.
 // 2 = default delayed shadows (far cascades refresh every other frame); 4 = "twice as aggressive"
 // (the editor "Laptop" checkbox). Clamped >=2 at the setter. Cascade 0 always refreshes every frame,
@@ -2350,13 +2360,21 @@ void SetUpStates()
 	{
 		rs.depth_bias = -1;
 		rs.slope_scaled_depth_bias = -4.0f;
+		// GGMAX 1.57b: CLAMP the slope-scaled bias. With clamp 0 (= unbounded) the -4x slope
+		// term explodes on grazing triangles: in D16 the bias unit is a full 1/65536 of the
+		// cascade Z range (the DX11-era D32_FLOAT maps had a ~128x smaller unit for the same
+		// numbers), so a grazing caster (shoulder/collar under a low sun) gets pushed tens of
+		// world-inches away from the light and its cast shadow onto NEARBY receivers vanishes.
+		// Animation wiggles triangles in/out of the explosion -> whole shadow blobs toggling
+		// per frame on animated characters (user repro: back/neck flicker). Cap at 16 ULPs.
+		rs.depth_bias_clamp = -16.0f / 65536.0f;
 	}
 	else
 	{
 		rs.depth_bias = -10;
 		rs.slope_scaled_depth_bias = -3.4f;
+		rs.depth_bias_clamp = 0;
 	}
-	rs.depth_bias_clamp = 0;
 	rs.depth_clip_enable = false;
 	rs.multisample_enable = false;
 	rs.antialiased_line_enable = false;
@@ -4534,6 +4552,7 @@ void UpdatePerFrameData(
 	}
 
 	frameCB.capsuleshadow_fade_angle = uint32_t(XMConvertFloatToHalf(CAPSULE_SHADOW_FADE)) | uint32_t(XMConvertFloatToHalf(std::max(0.001f, CAPSULE_SHADOW_ANGLE * 0.5f))) << 16u;
+	frameCB.gg_shadow_receiver_bias = gg_shadow_receiver_bias; // GGMAX 1.57
 
 	frameCB.options = 0;
 	if (GetTemporalAAEnabled())

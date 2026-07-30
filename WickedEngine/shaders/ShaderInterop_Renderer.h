@@ -1280,7 +1280,10 @@ struct alignas(16) FrameCB
 
 	uint		capsuleshadow_fade_angle;
 	int			indirect_debugbufferindex;
-	int			padding0;
+	// GGMAX 1.57: receiver-side depth bias for DIRECTIONAL cascade shadows (reversed-Z NDC;
+	// positive pushes the receiver toward the light). Restores the DX11-era receiver depth
+	// tolerance the new hard-SampleCmp path lost — cures animated self-shadow flicker. 0 = stock.
+	float		gg_shadow_receiver_bias;
 	int			padding1;
 
 	float		blue_noise_phase;

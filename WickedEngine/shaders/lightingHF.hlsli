@@ -84,6 +84,7 @@ inline void light_directional(in ShaderEntity light, in Surface surface, inout L
 				// Project into shadow map space (no need to divide by .w because ortho projection!):
 				const float4x4 cascade_projection = load_entitymatrix(light.GetMatrixIndex() + cascade);
 				float3 shadow_pos = mul(cascade_projection, float4(surface.P, 1)).xyz;
+				shadow_pos.z += GetFrame().gg_shadow_receiver_bias; // GGMAX 1.57: receiver tolerance (see ShaderInterop_Renderer.h)
 				float3 shadow_uv = clipspace_to_uv(shadow_pos);
 
 				// Determine if pixel is inside current cascade bounds and compute shadow if it is:
@@ -112,6 +113,7 @@ inline void light_directional(in ShaderEntity light, in Surface surface, inout L
 						// Project into next shadow cascade (no need to divide by .w because ortho projection!):
 						cascade += 1;
 						shadow_pos = mul(load_entitymatrix(light.GetMatrixIndex() + cascade), float4(surface.P, 1)).xyz;
+						shadow_pos.z += GetFrame().gg_shadow_receiver_bias; // GGMAX 1.57
 						shadow_uv = clipspace_to_uv(shadow_pos);
 						const half3 shadow_fallback = shadow_2D(light, shadow_pos.z, shadow_uv.xy, cascade, surface.pixel);
 

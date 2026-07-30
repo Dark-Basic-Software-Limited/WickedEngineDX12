@@ -1519,12 +1519,23 @@ namespace wi::scene
 			desc.misc_flags |= ResourceMiscFlag::RAY_TRACING;
 		}
 
+		// GGMAX 1.60: skinned normal/tangent STREAMOUT at 16-bit float (source buffers stay 8-bit
+		// SNORM). The per-frame skinning compute re-quantized the animated tangent frame to
+		// 1/127.5 steps through the old 8-bit streamout views — every vertex's tangent snapped in
+		// ~0.45 degree hops on different frames, making normal-mapped shading twinkle/jump patchily
+		// on idling characters (user repro: CC skirt pattern differs between near-identical poses
+		// whenever Normal Strength > 0, amplified by strength 4; rock-stable at 0 because the
+		// tangent frame is then unused). DX11 skinned in full float in the VS and never had this.
+		// Cost: +4 bytes/vertex x2 buffers, SKINNED meshes only.
+		constexpr Format GG_SO_NORTAN_FORMAT = Format::R16G16B16A16_FLOAT;
+		constexpr uint64_t GG_SO_NORTAN_STRIDE = 8ull; // R16G16B16A16
+
 		const uint64_t alignment = device->GetMinOffsetAlignment(&desc) * sizeof(Vertex_POS32); // additional alignment for RGB32F
 		desc.size =
 			AlignTo(vertex_positions.size() * sizeof(Vertex_POS32W), alignment) + // pos
 			AlignTo(vertex_positions.size() * sizeof(Vertex_POS32W), alignment) + // prevpos
-			AlignTo(vertex_normals.size() * sizeof(Vertex_NOR), alignment) +
-			AlignTo(vertex_tangents.size() * sizeof(Vertex_TAN), alignment)
+			AlignTo(vertex_normals.size() * GG_SO_NORTAN_STRIDE, alignment) +
+			AlignTo(vertex_tangents.size() * GG_SO_NORTAN_STRIDE, alignment)
 			;
 
 		bool success = device->CreateBuffer(&desc, nullptr, &streamoutBuffer);
@@ -1552,10 +1563,10 @@ namespace wi::scene
 		if (vb_nor.IsValid())
 		{
 			so_nor.offset = buffer_offset;
-			so_nor.size = vb_nor.size;
+			so_nor.size = vertex_normals.size() * GG_SO_NORTAN_STRIDE; // GGMAX 1.60: 16-bit float streamout
 			buffer_offset += AlignTo(so_nor.size, alignment);
-			so_nor.subresource_srv = device->CreateSubresource(&streamoutBuffer, SubresourceType::SRV, so_nor.offset, so_nor.size, &Vertex_NOR::FORMAT);
-			so_nor.subresource_uav = device->CreateSubresource(&streamoutBuffer, SubresourceType::UAV, so_nor.offset, so_nor.size, &Vertex_NOR::FORMAT);
+			so_nor.subresource_srv = device->CreateSubresource(&streamoutBuffer, SubresourceType::SRV, so_nor.offset, so_nor.size, &GG_SO_NORTAN_FORMAT);
+			so_nor.subresource_uav = device->CreateSubresource(&streamoutBuffer, SubresourceType::UAV, so_nor.offset, so_nor.size, &GG_SO_NORTAN_FORMAT);
 			so_nor.descriptor_srv = device->GetDescriptorIndex(&streamoutBuffer, SubresourceType::SRV, so_nor.subresource_srv);
 			so_nor.descriptor_uav = device->GetDescriptorIndex(&streamoutBuffer, SubresourceType::UAV, so_nor.subresource_uav);
 		}
@@ -1563,10 +1574,10 @@ namespace wi::scene
 		if (vb_tan.IsValid())
 		{
 			so_tan.offset = buffer_offset;
-			so_tan.size = vb_tan.size;
+			so_tan.size = vertex_tangents.size() * GG_SO_NORTAN_STRIDE; // GGMAX 1.60: 16-bit float streamout
 			buffer_offset += AlignTo(so_tan.size, alignment);
-			so_tan.subresource_srv = device->CreateSubresource(&streamoutBuffer, SubresourceType::SRV, so_tan.offset, so_tan.size, &Vertex_TAN::FORMAT);
-			so_tan.subresource_uav = device->CreateSubresource(&streamoutBuffer, SubresourceType::UAV, so_tan.offset, so_tan.size, &Vertex_TAN::FORMAT);
+			so_tan.subresource_srv = device->CreateSubresource(&streamoutBuffer, SubresourceType::SRV, so_tan.offset, so_tan.size, &GG_SO_NORTAN_FORMAT);
+			so_tan.subresource_uav = device->CreateSubresource(&streamoutBuffer, SubresourceType::UAV, so_tan.offset, so_tan.size, &GG_SO_NORTAN_FORMAT);
 			so_tan.descriptor_srv = device->GetDescriptorIndex(&streamoutBuffer, SubresourceType::SRV, so_tan.subresource_srv);
 			so_tan.descriptor_uav = device->GetDescriptorIndex(&streamoutBuffer, SubresourceType::UAV, so_tan.subresource_uav);
 		}

@@ -117,9 +117,22 @@ inline void light_directional(in ShaderEntity light, in Surface surface, inout L
 						shadow_pos = mul(load_entitymatrix(light.GetMatrixIndex() + cascade), float4(surface.P, 1)).xyz;
 						shadow_pos.z += GetFrame().gg_shadow_receiver_bias; // GGMAX 1.57
 						shadow_uv = clipspace_to_uv(shadow_pos);
-						const half3 shadow_fallback = shadow_2D_feathered(light, shadow_pos.z, shadow_uv.xy, cascade, gg_camera_distance); // GGMAX 1.58
-
-						light_color *= lerp(shadow_main, shadow_fallback, cascade_fade);
+						// GGMAX 1.59c: only blend when the pixel actually lies INSIDE the next cascade.
+						// Concentric sun cascades always satisfy this (edge fade unchanged). Character
+						// DEDICATED slots do not: slot i's Z-edge band would otherwise blend with slot
+						// i+1 (a DIFFERENT character's map) at out-of-range UVs, and the border clamp
+						// smears that foreign slot's edge texels across the band — the rectangular
+						// ground artifacts near characters.
+						[branch]
+						if (is_saturated(shadow_uv))
+						{
+							const half3 shadow_fallback = shadow_2D_feathered(light, shadow_pos.z, shadow_uv.xy, cascade, gg_camera_distance); // GGMAX 1.58
+							light_color *= lerp(shadow_main, shadow_fallback, cascade_fade);
+						}
+						else
+						{
+							light_color *= shadow_main;
+						}
 					}
 					else
 					{

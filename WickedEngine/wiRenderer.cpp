@@ -3144,14 +3144,14 @@ inline void CreateDirLightShadowCams(const LightComponent& light, CameraComponen
 			XMStoreFloat3(&_max, vMax);
 			float ext = abs(_center.z - _min.z);
 			ext *= 4;
-			// GGMAX 1.59b: dedicated character slots have tiny spheres (r ~36in), so ext*4 is only
-			// ~12ft of depth — up-sun casters (terrain banks, monuments) inside the CULLING range
-			// below get depth-CLAMPED to the near plane (depth clip is off) and stamp false
-			// full-occlusion rectangles across the slot's ground footprint (user repro: dark
-			// rectangular strips on sand near characters). Match the projection Z to the culling
-			// extension so everything rendered carries a REAL depth; D32 keeps ample precision.
-			if (dedicated_cascade)
-				ext = std::max(ext, std::min(2000.0f, farPlane) * 0.5f);
+			// GGMAX 1.59c note: stock Z range restored for dedicated slots (1.59b's extensions
+			// REVERTED). The rectangular ground artifacts near characters were never caused by
+			// near-plane depth clamping (clamped casters are geometrically correct blockers in
+			// ortho) — they were the cascade Z-EDGE BLEND BAND sampling the NEXT matrix slot,
+			// which for dedicated slot i is ANOTHER character's slot with unrelated content
+			// (border-clamped edge texels smeared across the band). Fixed at the true root in
+			// lightingHF.hlsli: the blend fallback now requires the pixel to actually be inside
+			// the next cascade (is_saturated), which concentric sun cascades always satisfy.
 			_min.z = _center.z - ext;
 			_max.z = _center.z + ext;
 

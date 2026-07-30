@@ -4510,12 +4510,18 @@ namespace wi::scene
 				{
 					geometry.vb_nor = mesh.vb_nor.descriptor_srv;
 				}
-				if (mesh.so_tan.IsValid())
+				if (mesh.so_tan.IsValid() && !wi::renderer::gg_force_bindpose_tangents)
 				{
 					geometry.vb_tan = mesh.so_tan.descriptor_srv;
 				}
 				else
 				{
+					// GGMAX 1.62c: harness SET_BINDPOSE_TAN — route raster tangents to the
+					// BIND-POSE buffer, bypassing the skinned streamout. Discriminator for the
+					// per-load "tangent w coin-flip" affliction: if the flip dies here, the
+					// poisoned stage is the so_tan streamout content; if it persists, the
+					// consumer path. (Bind-pose tangents on an animated mesh = mild static
+					// mis-orientation, acceptable for a diagnostic lever.)
 					geometry.vb_tan = mesh.vb_tan.descriptor_srv;
 				}
 				geometry.vb_col = mesh.vb_col.descriptor_srv;

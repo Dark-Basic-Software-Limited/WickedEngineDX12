@@ -784,6 +784,9 @@ float gg_shadow_receiver_bias = 0.0f;
 // 0=off, 1=world tangent, 2=vertex normal, 3=bumped normal, 4=handedness, 5=map sample.
 // Set from the game harness (SET_TANGENTVIS); object PS early-outs with the debug color.
 int gg_debugvis = 0;
+// GGMAX 1.62c: route raster tangents to bind-pose buffers (skip so_tan patch) — see wiScene.cpp
+// RunMeshUpdateSystem. Harness SET_BINDPOSE_TAN <0|1>.
+bool gg_force_bindpose_tangents = false;
 // GG "Laptop" mode: how many frames the delayed FAR cascades (1..N) are held between refreshes.
 // 2 = default delayed shadows (far cascades refresh every other frame); 4 = "twice as aggressive"
 // (the editor "Laptop" checkbox). Clamped >=2 at the setter. Cascade 0 always refreshes every frame,

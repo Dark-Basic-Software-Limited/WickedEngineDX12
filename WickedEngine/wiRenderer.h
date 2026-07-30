@@ -1398,5 +1398,9 @@ namespace wi::renderer
 	extern void (*customDraw_ShadowMap)(const wi::primitive::Frustum*, int cascade, wi::graphics::CommandList);
 	extern void (*customDraw_EnvProbe)(const wi::primitive::Sphere*, const wi::primitive::Frustum*, uint32_t frustum_count, wi::graphics::CommandList);
 
+	// GGMAX 1.62c: raster tangents from bind-pose buffers instead of skinned streamout
+	// (diagnostic lever for the per-load tangent-w instability; harness SET_BINDPOSE_TAN)
+	extern bool gg_force_bindpose_tangents;
+
 };
 

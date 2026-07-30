@@ -535,8 +535,9 @@ struct Surface
 				bumpColor = half3(material.textures[NORMALMAP].SampleLevel(sam, uvsets, lod).rg, 1);
 #endif // SURFACE_LOAD_QUAD_DERIVATIVES
 				bumpColor = bumpColor * 2 - 1;
-				bumpColor.rg *= material.GetNormalMapStrength();
-				
+				// GGMAX 1.63: strength applied at the N blend (DX11 parity), not as an rg
+				// pre-scale — see the apply site below and objectHF.hlsli for the rationale.
+
 #ifdef WATER
 				} // water else
 #endif // WATER
@@ -882,7 +883,13 @@ struct Surface
 
 		if (any(bumpColor))
 		{
-			N = normalize(mul(bumpColor, TBN));
+#ifdef WATER
+			N = normalize(mul(bumpColor, TBN)); // water: pre-scaled/lerped in its own branch above — stock behavior
+#else
+			// GGMAX 1.63: DX11-parity normal strength (see objectHF.hlsli apply site)
+			N = normalize(lerp(N, mul(bumpColor, TBN), material.GetNormalMapStrength()));
+			bumpColor.rg *= material.GetNormalMapStrength();
+#endif // WATER
 		}
 
 		half4 specularMap = 1;

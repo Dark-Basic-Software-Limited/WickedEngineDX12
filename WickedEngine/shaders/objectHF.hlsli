@@ -595,6 +595,7 @@ float4 main(PixelInput input, in bool is_frontface : SV_IsFrontFace APPEND_COVER
 	case 1: return float4(surface.T.xyz * 0.5 + 0.5, 1);                       // world tangent
 	case 2: return float4(normalize(input.nor) * 0.5 + 0.5, 1);                // vertex normal
 	case 4: return surface.T.w < 0 ? float4(1, 0, 0, 1) : float4(0, 1, 0, 1);  // handedness
+	case 16: return float4(frac(surface.P * 0.05), 1);                         // world-position grid (skinned vertex stability)
 	default: break;
 	}
 #endif // PREPASS
@@ -626,6 +627,27 @@ float4 main(PixelInput input, in bool is_frontface : SV_IsFrontFace APPEND_COVER
 
 #ifdef OBJECTSHADER_USE_UVSETS
 
+#ifndef PREPASS
+	// GGMAX 1.62b tangent-vis: FINAL UV of the basecolor lookup (post-parallax), animation live.
+	// 6 = raw frac(uv) as RG. 7 = frac(uv*64) amplified grid — one 8-bit gray step = uv shift of
+	// ~6e-5 (~1/8 texel at 2048), so even sub-texel per-frame UV drift shows as pattern crawl.
+	[branch]
+	switch (GetFrame().gg_debugvis)
+	{
+	case 6:
+	{
+		float2 gg_uv = material.textures[BASECOLORMAP].GetUVSet() == 0 ? uvsets.xy : uvsets.zw;
+		return float4(frac(gg_uv), 0, 1);
+	}
+	case 7:
+	{
+		float2 gg_uv = material.textures[BASECOLORMAP].GetUVSet() == 0 ? uvsets.xy : uvsets.zw;
+		return float4(frac(gg_uv * 64.0), 0, 1);
+	}
+	default: break;
+	}
+#endif // PREPASS
+
 #ifndef INTERIORMAPPING
 	[branch]
 #ifdef PREPASS
@@ -653,6 +675,24 @@ float4 main(PixelInput input, in bool is_frontface : SV_IsFrontFace APPEND_COVER
 	surface.baseColor *= input.color;
 #endif // OBJECTSHADER_USE_COLOR
 
+#ifndef PREPASS
+	// GGMAX 1.62b tangent-vis: albedo-chain contributors
+	[branch]
+	switch (GetFrame().gg_debugvis)
+	{
+#ifdef OBJECTSHADER_USE_UVSETS
+	case 8:  // raw basecolor texture sample
+		if (material.textures[BASECOLORMAP].IsValid())
+			return float4(material.textures[BASECOLORMAP].Sample(sampler_objectshader, uvsets).rgb, 1);
+		return float4(1, 0, 1, 1); // magenta = no basecolor map
+#endif
+	case 9: return float4(surface.baseColor.rgb, 1);                            // final albedo input (x material & vertex color)
+#ifdef OBJECTSHADER_USE_COLOR
+	case 14: return float4(input.color.rgb, 1);                                 // vertex color
+#endif
+	default: break;
+	}
+#endif // PREPASS
 
 #ifndef WATER
 #ifdef OBJECTSHADER_USE_TANGENT
@@ -661,7 +701,10 @@ float4 main(PixelInput input, in bool is_frontface : SV_IsFrontFace APPEND_COVER
 	{
 		surface.bumpColor = half3(material.textures[NORMALMAP].Sample(sampler_objectshader, uvsets).rg, 1);
 		surface.bumpColor = surface.bumpColor * 2 - 1;
-		surface.bumpColor.rg *= material.GetNormalMapStrength();
+		// GGMAX 1.63: do NOT pre-scale rg by normal strength here — see the apply site below.
+		// Pre-scaling pushes the normal near-parallel to the surface at strength>1, where
+		// sub-texel sample drift under animation swings it wildly (the "boiling texture"
+		// character shimmer, churn-proven 3x calmer at DX11 semantics).
 	}
 #endif // OBJECTSHADER_USE_TANGENT
 #endif // WATER
@@ -693,6 +736,17 @@ float4 main(PixelInput input, in bool is_frontface : SV_IsFrontFace APPEND_COVER
 
 	surface.emissiveColor *= meshinstance.GetEmissive();
 #endif // OBJECTSHADER_USE_EMISSIVE
+
+#ifndef PREPASS
+	// GGMAX 1.62b tangent-vis: surface-map / emissive contributors
+	[branch]
+	switch (GetFrame().gg_debugvis)
+	{
+	case 10: return float4(surfaceMap.rgb, 1);                    // ORM texture sample (occ/rough/metal)
+	case 15: return float4(surface.emissiveColor, 1);             // emissive
+	default: break;
+	}
+#endif // PREPASS
 
 #ifdef OBJECTSHADER_USE_UVSETS
 #ifdef TERRAINBLENDED
@@ -781,7 +835,13 @@ float4 main(PixelInput input, in bool is_frontface : SV_IsFrontFace APPEND_COVER
 	[branch]
 	if (any(surface.bumpColor))
 	{
-		surface.N = normalize(mul(surface.bumpColor, TBN));
+		// GGMAX 1.63: DX11-parity normal strength. Old engine: N = normalize(lerp(N, bumped,
+		// strength)) on the UNSCALED sample, then bumpColor *= strength for downstream users
+		// (planar reflection UV shift, refraction) — the response saturates gracefully above 1.
+		// New-engine rg pre-scale made strength 4 boil under animation. Water path (below)
+		// already uses this exact lerp pattern.
+		surface.N = normalize(lerp(surface.N, mul(surface.bumpColor, TBN), material.GetNormalMapStrength()));
+		surface.bumpColor.rg *= material.GetNormalMapStrength();
 	}
 #ifndef PREPASS
 	// GGMAX 1.62 tangent-vis (continued): post-bump modes
@@ -790,6 +850,19 @@ float4 main(PixelInput input, in bool is_frontface : SV_IsFrontFace APPEND_COVER
 	{
 	case 3: return float4(surface.N * 0.5 + 0.5, 1);                                    // final bumped normal
 	case 5: return float4(surface.bumpColor.rg * 0.5 + 0.5, 0, 1);                      // strength-scaled map sample
+#ifdef OBJECTSHADER_USE_UVSETS
+	case 21: // RAW normal-map texel data, no scale/expand (content-churn detector)
+		if (material.textures[NORMALMAP].IsValid())
+			return float4(material.textures[NORMALMAP].Sample(sampler_objectshader, uvsets).rg, 0, 1);
+		return float4(1, 0, 1, 1);
+	case 22: // RAW normal-map, forced mip 0 point-of-truth (kills aniso/mip footprint variation)
+		if (material.textures[NORMALMAP].IsValid())
+		{
+			float2 gg_nuv = material.textures[NORMALMAP].GetUVSet() == 0 ? uvsets.xy : uvsets.zw;
+			return float4(bindless_textures_half4[descriptor_index(material.textures[NORMALMAP].texture_descriptor)].SampleLevel(sampler_linear_wrap, gg_nuv, 0).rg, 0, 1);
+		}
+		return float4(1, 0, 1, 1);
+#endif
 	default: break;
 	}
 #endif // PREPASS
@@ -845,6 +918,18 @@ float4 main(PixelInput input, in bool is_frontface : SV_IsFrontFace APPEND_COVER
 #endif // CARTOON
 #endif // TRANSPARENT
 #endif // ENVMAPRENDERING
+#endif // PREPASS
+
+#ifndef PREPASS
+	// GGMAX 1.62b tangent-vis: derived surface parameters (post surface.create)
+	[branch]
+	switch (GetFrame().gg_debugvis)
+	{
+	case 11: return float4(surface.roughness.xxx, 1);             // final roughness
+	case 12: return float4(surface.f0, 1);                        // specular F0
+	case 13: return float4(surface.occlusion.xxx, 1);             // occlusion (vertex AO x map x SSAO)
+	default: break;
+	}
 #endif // PREPASS
 
 
@@ -1100,6 +1185,19 @@ float4 main(PixelInput input, in bool is_frontface : SV_IsFrontFace APPEND_COVER
 		color.a = 1;
 	}
 #endif // WATER
+
+#ifndef PREPASS
+	// GGMAX 1.62b tangent-vis: lighting channels (Reinhard x/(1+x) so HDR stays readable)
+	[branch]
+	switch (GetFrame().gg_debugvis)
+	{
+	case 17: { float3 c = lighting.direct.diffuse;    return float4(c / (1 + c), 1); }  // sun/local diffuse incl shadows
+	case 18: { float3 c = lighting.direct.specular;   return float4(c / (1 + c), 1); }  // direct specular
+	case 19: { float3 c = lighting.indirect.diffuse;  return float4(c / (1 + c), 1); }  // ambient/GI diffuse
+	case 20: { float3 c = lighting.indirect.specular; return float4(c / (1 + c), 1); }  // reflections/probes
+	default: break;
+	}
+#endif // PREPASS
 
 	ApplyLighting(surface, lighting, color);
 

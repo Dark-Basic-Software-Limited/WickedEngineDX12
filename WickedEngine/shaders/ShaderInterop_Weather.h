@@ -374,7 +374,11 @@ struct alignas(16) ShaderWeather
 
 	float4 stars_rotation; // quaternion
 
-	float3 padding_stars;
+	float2 padding_stars;
+	// GGMAX 1.65: DX11-style Fog Opacity (FogA). In non-realistic-sky modes DX11 fog is a
+	// recolor of the surface toward the user fog RGB scaled by THIS value (0 = fog off);
+	// with realistic sky it blends the user fog RGB over the sampled sky color. See fogHF.hlsli.
+	float gg_fog_opacity;
 
 	float sky_rotation_sin;
 	float sky_rotation_cos;

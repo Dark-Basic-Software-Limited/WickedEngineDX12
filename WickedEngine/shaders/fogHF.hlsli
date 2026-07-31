@@ -55,44 +55,59 @@ inline half GetFogAmount(float distance, float3 O, float3 V)
 	}
 }
 
+// GGMAX 1.65: DX11-parity fog color model (replaces the stock flat-average + inscatter fog).
+//
+// DX11 reference (GGCommonFunctions.hlsli ApplyFogCustom / objectHF ApplyFog):
+//   realistic sky : fogColor = GetDynamicSkyColor(horizon-flattened view dir, sun off,
+//                   stationary) — the sky's ACTUAL color at the horizon behind this pixel,
+//                   then lerp(fogColor, userFogRGB, FogOpacity). Distant terrain hazes into
+//                   the sky it stands against; silhouettes stay readable. The stock code's
+//                   flat skyluminance-LUT average (one color for the whole screen) made
+//                   distant mountains melt into the sky uniformly.
+//   other skies   : fogColor = the surface's OWN color lerped toward userFogRGB by
+//                   FogOpacity — i.e. fog is a pure opt-in recolor, a NO-OP at FogOpacity 0.
+//                   lerp(C, lerp(C, F, o), a) == lerp(C, F, a*o), so this is encoded as
+//                   alpha *= FogOpacity and every ApplyFog call site inherits it. The stock
+//                   code fogged toward weather.horizon at FULL strength, which painted the
+//                   None-mode Horizon/Fog color over terrain in Sky Box mode.
+//   The stock sun HgPhase inscatter add is dropped in both branches: DX11 has no such term
+//   (the skyview LUT sample already carries the azimuthal mie glow toward the sun).
 inline half4 GetFog(float distance, float3 O, float3 V)
 {
 	half3 fogColor = 0;
-	
+	half fogOpacityScale = 1;
+
 	if ((GetFrame().options & OPTION_BIT_REALISTIC_SKY) && (GetFrame().options & OPTION_BIT_OVERRIDE_FOG_COLOR) == 0)
 	{
-		// Sample captured ambient color from realisitc sky:
-		fogColor = texture_skyluminancelut.SampleLevel(sampler_point_clamp, float2(0.5, 0.5), 0).rgb;
+		// Sample the realistic sky at the horizon in this pixel's view direction (matches
+		// the LUT path of AccurateAtmosphericScattering with stationary origin, sun off):
+		AtmosphereParameters atmosphere = GetWeather().atmosphere;
+		float2 xz = normalize(V.xz + 1e-5f) * 0.995f;
+		float3 dir = normalize(float3(xz.x, 0.1f, xz.y));
+		float3 worldPosition = GetCameraPlanetPos(atmosphere, float3(0.00001, 0.00001, 0.00001));
+		float viewHeight = length(worldPosition);
+		float3 upVector = normalize(worldPosition);
+		float viewZenithCosAngle = dot(dir, upVector);
+		float3 sunDirection = GetSunDirection();
+		float3 sideVector = normalize(cross(upVector, dir));
+		float3 forwardVector = normalize(cross(sideVector, upVector));
+		float2 lightOnPlane = normalize(float2(dot(sunDirection, forwardVector), dot(sunDirection, sideVector)));
+		bool intersectGround = RaySphereIntersectNearest(worldPosition, dir, float3(0, 0, 0), atmosphere.bottomRadius) >= 0.0;
+		float2 uv;
+		SkyViewLutParamsToUv(atmosphere, intersectGround, viewZenithCosAngle, lightOnPlane.x, viewHeight, uv);
+		fogColor = texture_skyviewlut.SampleLevel(sampler_linear_clamp, uv, 0).rgb;
+		fogColor *= GetWeather().sky_exposure;
+
+		// DX11: user fog color mixes over the sky sample proportionally to Fog Opacity
+		fogColor = lerp(fogColor, GetHorizonColor(), saturate(GetWeather().gg_fog_opacity));
 	}
 	else
 	{
 		fogColor = GetHorizonColor();
+		fogOpacityScale = saturate(GetWeather().gg_fog_opacity);
 	}
 
-	// Sample inscattering color:
-	{
-		const half3 L = GetSunDirection();
-		
-		half3 inscatteringColor = GetSunColor();
-
-		// Apply atmosphere transmittance:
-		if (GetFrame().options & OPTION_BIT_REALISTIC_SKY)
-		{
-			// 0 for position since fog is centered around world center
-			inscatteringColor *= GetAtmosphericLightTransmittance(GetWeather().atmosphere, 0, L, texture_transmittancelut);
-		}
-		
-		// Apply phase function solely for directionality:
-		const half cosTheta = dot(-V, L);
-		inscatteringColor *= HgPhase(FOG_INSCATTERING_PHASE_G, cosTheta);
-
-		// Apply uniform phase since this medium is constant:
-		inscatteringColor *= UniformPhase();
-		
-		fogColor += inscatteringColor;
-	}
-	
-	return half4(fogColor, GetFogAmount(distance, O, V));
+	return half4(fogColor, GetFogAmount(distance, O, V) * fogOpacityScale);
 }
 
 

@@ -18,6 +18,10 @@ float4 main(float4 pos : SV_POSITION, float2 clipspace : TEXCOORD) : SV_TARGET
 	// Calculate dynamic sky
 	float4 color = float4(GetDynamicSkyColor(pos.xy, V, true, false, false, highQuality, perPixelNoise, receiveShadow), 1);
 
+	// GGMAX 1.65: DX11 parity — sky tinted toward the user fog color by Fog Opacity
+	// (skyPS_dynamic DX11 line 21). No-op at Fog Opacity 0.
+	color.rgb = lerp(color.rgb, GetHorizonColor(), saturate(GetWeather().gg_fog_opacity));
+
 	color = saturateMediump(color);
 	return color;
 }

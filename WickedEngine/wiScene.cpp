@@ -915,6 +915,7 @@ namespace wi::scene
 		shaderscene.weather.fog.density = weather.fogDensity;
 		shaderscene.weather.fog.height_start = weather.fogHeightStart;
 		shaderscene.weather.fog.height_end = weather.fogHeightEnd;
+		shaderscene.weather.gg_fog_opacity = weather.gg_fog_opacity; // GGMAX 1.65
 		shaderscene.weather.horizon = wi::math::pack_half3(weather.horizon);
 		shaderscene.weather.zenith = wi::math::pack_half3(weather.zenith);
 		shaderscene.weather.sky_exposure = weather.skyExposure;

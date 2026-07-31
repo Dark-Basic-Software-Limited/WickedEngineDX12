@@ -1910,6 +1910,7 @@ namespace wi::scene
 		float fogDensity = 0;
 		float fogHeightStart = 1;
 		float fogHeightEnd = 3;
+		float gg_fog_opacity = 0; // GGMAX 1.65: DX11 FogA — scales/steers fog color, see fogHF.hlsli
 		XMFLOAT3 windDirection = XMFLOAT3(0, 0, 0);
 		float windRandomness = 5;
 		float windWaveSize = 1;

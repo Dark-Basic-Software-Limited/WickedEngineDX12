@@ -1195,6 +1195,9 @@ namespace wi::renderer
 	bool GetVXGIReflectionsEnabled();
 	void SetGameSpeed(float value);
 	float GetGameSpeed();
+	// GGMAX 1.67: triangles submitted to the main camera color pass (opaque+transparent,
+	// once per subset) during the last completed frame — for the game's Performance HUD.
+	uint64_t GG_GetMainCameraPolyCount();
 	void SetShadowsEnabled(bool value);
 	bool IsShadowsEnabled();
 	//GGMAX delayed shadow cascades: directional cascades refresh at staggered

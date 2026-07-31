@@ -20,6 +20,8 @@
 #include <mutex>
 #include <atomic>
 #include <sstream>
+#include <vector>
+#include <algorithm>
 
 using namespace wi::graphics;
 
@@ -62,11 +64,14 @@ namespace wi::profiler
 	};
 	wi::unordered_map<size_t, Range> ranges;
 
+	void gg_ClearTextDataCaches(); // GGMAX 1.67: defined next to GetTextData below
+
 	void BeginFrame()
 	{
 		if (ENABLED_REQUEST != ENABLED)
 		{
 			ranges.clear();
+			gg_ClearTextDataCaches(); // GGMAX 1.67: forget names from the previous profiling session
 			ENABLED = ENABLED_REQUEST;
 		}
 
@@ -674,15 +679,26 @@ namespace wi::profiler
 		text_color = color;
 	}
 
+	// GGMAX 1.67: persistent print caches for GetTextData — once a range name has been
+	// seen it stays in the printout (0.00 ms on frames it didn't run) and the output is
+	// sorted by name. Consumers that render this text as a list (the in-game Performance
+	// panel) get a fixed row count/order instead of rows appearing/disappearing as
+	// conditionally-executed ranges (TerrainW - *, RP3D-rec UpdateTex, Planar
+	// Reflections, ...) come and go between frames.
+	wi::unordered_map<std::string, Hits> text_cache_cpu_persist;
+	wi::unordered_map<std::string, Hits> text_cache_gpu_persist;
+	void gg_ClearTextDataCaches()
+	{
+		text_cache_cpu_persist.clear();
+		text_cache_gpu_persist.clear();
+	}
+
 	std::string GetTextData()
 	{
 		if (!ENABLED || !initialized)
 			return "";
 
-		// Same data collection logic as DrawData lines 338-389, but no GPU calls
-		wi::unordered_map<std::string, Hits> text_cache_cpu;
-		wi::unordered_map<std::string, Hits> text_cache_gpu;
-
+		// Same data collection logic as DrawData, but no GPU calls
 		for (auto& x : ranges)
 		{
 			if (!x.second.in_use)
@@ -691,39 +707,48 @@ namespace wi::profiler
 			{
 				if (x.first == cpu_frame)
 					continue;
-				text_cache_cpu[x.second.name].num_hits++;
-				text_cache_cpu[x.second.name].total_time += x.second.time;
+				text_cache_cpu_persist[x.second.name].num_hits++;
+				text_cache_cpu_persist[x.second.name].total_time += x.second.time;
 			}
 			else
 			{
 				if (x.first == gpu_frame)
 					continue;
-				text_cache_gpu[x.second.name].num_hits++;
-				text_cache_gpu[x.second.name].total_time += x.second.time;
+				text_cache_gpu_persist[x.second.name].num_hits++;
+				text_cache_gpu_persist[x.second.name].total_time += x.second.time;
 			}
 		}
 
 		std::stringstream ss("");
 		ss.precision(2);
 
-		ss << ranges[cpu_frame].name << ": " << std::fixed << ranges[cpu_frame].time << " ms" << std::endl;
-		for (auto& x : text_cache_cpu)
+		std::vector<std::pair<const std::string*, Hits*>> sorted;
+		auto print_sorted = [&](wi::unordered_map<std::string, Hits>& cache)
 		{
-			if (x.second.num_hits > 1)
-				ss << "\t" << x.first << " (" << x.second.num_hits << "x): " << std::fixed << x.second.total_time << " ms" << std::endl;
-			else if (x.second.num_hits == 1)
-				ss << "\t" << x.first << ": " << std::fixed << x.second.total_time << " ms" << std::endl;
-		}
+			sorted.clear();
+			sorted.reserve(cache.size());
+			for (auto& x : cache)
+				sorted.push_back(std::make_pair(&x.first, &x.second));
+			std::sort(sorted.begin(), sorted.end(),
+				[](const std::pair<const std::string*, Hits*>& a, const std::pair<const std::string*, Hits*>& b)
+				{ return *a.first < *b.first; });
+			for (auto& x : sorted)
+			{
+				if (x.second->num_hits > 1)
+					ss << "\t" << *x.first << " (" << x.second->num_hits << "x): " << std::fixed << x.second->total_time << " ms" << std::endl;
+				else
+					ss << "\t" << *x.first << ": " << std::fixed << x.second->total_time << " ms" << std::endl;
+				x.second->num_hits = 0;
+				x.second->total_time = 0;
+			}
+		};
+
+		ss << ranges[cpu_frame].name << ": " << std::fixed << ranges[cpu_frame].time << " ms" << std::endl;
+		print_sorted(text_cache_cpu_persist);
 		ss << std::endl;
 
 		ss << ranges[gpu_frame].name << ": " << std::fixed << ranges[gpu_frame].time << " ms" << std::endl;
-		for (auto& x : text_cache_gpu)
-		{
-			if (x.second.num_hits > 1)
-				ss << "\t" << x.first << " (" << x.second.num_hits << "x): " << std::fixed << x.second.total_time << " ms" << std::endl;
-			else if (x.second.num_hits == 1)
-				ss << "\t" << x.first << ": " << std::fixed << x.second.total_time << " ms" << std::endl;
-		}
+		print_sorted(text_cache_gpu_persist);
 
 		return ss.str();
 	}

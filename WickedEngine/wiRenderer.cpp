@@ -57,6 +57,16 @@ BlendState			blendStates[BSTYPE_COUNT];
 GPUBuffer			buffers[BUFFERTYPE_COUNT];
 Sampler				samplers[SAMPLER_COUNT];
 
+// GGMAX 1.67: triangles submitted to the main camera color pass (RENDERPASS_MAIN +
+// DRAWSCENE_MAINCAMERA), accumulated across render jobs during the frame and latched
+// once per frame in UpdatePerFrameData. Shadow/prepass/reflection passes excluded.
+static std::atomic<uint64_t> gg_polycount_accum{ 0 };
+static uint64_t gg_polycount_frame = 0;
+uint64_t GG_GetMainCameraPolyCount()
+{
+	return gg_polycount_frame;
+}
+
 #if __has_include("wiShaderDump.h")
 // In this case, wiShaderDump.h contains precompiled shader binary data
 #include "wiShaderDump.h"
@@ -3530,6 +3540,13 @@ void RenderMeshes(
 				indexOffset = uint32_t(ibv.offset / ib_stride) + subset.indexOffset;
 			}
 
+			// GGMAX 1.67: HUD poly counter — main camera color pass only, counted once per
+			// subset (a doublesided-transparent backside re-draw is not counted twice).
+			if (renderPass == RENDERPASS_MAIN && (flags & DRAWSCENE_MAINCAMERA))
+			{
+				gg_polycount_accum.fetch_add(uint64_t(subset.indexCount / 3u) * instancedBatch.instanceCount, std::memory_order_relaxed);
+			}
+
 			if (pso_backside != nullptr &&pso_backside->IsValid())
 			{
 				device->BindPipelineState(pso_backside, cmd);
@@ -4434,6 +4451,10 @@ void UpdatePerFrameData(
 	float dt
 )
 {
+	// GGMAX 1.67: latch last frame's main-camera poly count (all of last frame's render
+	// jobs completed before this frame's update began, so this is a clean frame boundary):
+	gg_polycount_frame = gg_polycount_accum.exchange(0, std::memory_order_relaxed);
+
 	// Calculate volumetric cloud shadow data:
 	if (vis.scene->weather.IsVolumetricClouds() && vis.scene->weather.IsVolumetricCloudsCastShadow())
 	{

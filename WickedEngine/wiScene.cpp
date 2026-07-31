@@ -15,6 +15,7 @@
 
 #include <mutex> // GGMAX DIAG: corrupt-geometry tripwire
 #include <cmath> // GGMAX DIAG: std::isfinite
+#include <algorithm> // GGMAX 1.68: std::sort for front-to-back ray candidates
 
 #include "shaders/ShaderInterop_SurfelGI.h"
 #include "shaders/ShaderInterop_DDGI.h"
@@ -6864,9 +6865,19 @@ namespace wi::scene
 		wi::jobsystem::Wait(ctx);
 	}
 
+	// GGMAX diag (temp, FPS-plummet hunt): where does Scene::Intersects spend its time —
+	// read via the game harness GET_PERF_DATA "RAYS2:" line, running totals.
+	std::atomic<unsigned long long> gg_dbg_isect_calls{ 0 };
+	std::atomic<unsigned long long> gg_dbg_isect_objects{ 0 };    // objects iterated (AABB loop)
+	std::atomic<unsigned long long> gg_dbg_isect_aabbpass{ 0 };   // objects passing AABB+filter -> per-triangle stage
+	std::atomic<unsigned long long> gg_dbg_isect_tris{ 0 };       // triangles actually tested
+	std::atomic<unsigned long long> gg_dbg_isect_skintris{ 0 };   // ...of which CPU-skinned
+
 	Scene::RayIntersectionResult Scene::Intersects(const Ray& ray, uint32_t filterMask, uint32_t layerMask, uint32_t lod) const
 	{
 		RayIntersectionResult result;
+
+		gg_dbg_isect_calls.fetch_add(1, std::memory_order_relaxed);
 
 		const XMVECTOR rayOrigin = XMLoadFloat3(&ray.origin);
 		const XMVECTOR rayDirection = XMVector3Normalize(XMLoadFloat3(&ray.direction));
@@ -6922,6 +6933,24 @@ namespace wi::scene
 		if (filterMask & FILTER_OBJECT_ALL)
 		{
 			const size_t objectCount = std::min(objects.GetCount(), aabb_objects.size());
+			gg_dbg_isect_objects.fetch_add((unsigned long long)objectCount, std::memory_order_relaxed);
+
+			// GGMAX 1.68: collect AABB-passing candidates with their ray-entry distance and
+			// process them FRONT TO BACK, breaking as soon as the best hit found so far is
+			// closer than the next candidate's AABB entry — a ray that hits nearby geometry
+			// no longer pays per-triangle (worst case CPU-skinned) tests for everything
+			// behind it. Hidden objects are skipped entirely (DX11 fork parity: "Do not
+			// Pick from hidden objects"), which also removes hidden HUD/pool meshes with
+			// degenerate world-sized AABBs that taxed EVERY ray from ANY direction.
+			// Entry distances are scaled to world units so the break test is valid even
+			// for callers that pass unnormalized ray directions.
+			struct GGRayCandidate { float t; uint32_t objectIndex; };
+			static thread_local wi::vector<GGRayCandidate> gg_candidates;
+			gg_candidates.clear();
+			const float gg_dirlen_world = XMVectorGetX(XMVector3Length(XMLoadFloat3(&ray.direction)));
+			const XMFLOAT3 gg_ro = ray.origin;
+			const XMFLOAT3 gg_ri = ray.direction_inverse;
+
 			for (size_t objectIndex = 0; objectIndex < objectCount; ++objectIndex)
 			{
 				const AABB& aabb = aabb_objects[objectIndex];
@@ -6933,12 +6962,50 @@ namespace wi::scene
 				const ObjectComponent& object = objects[objectIndex];
 				if (object.meshID == INVALID_ENTITY)
 					continue;
+				if (!object.IsRenderable() && (object.GetFilterMask() & FILTER_NAVIGATION_MESH) == 0)
+					continue; // GGMAX 1.68: DX11 parity — do not pick hidden objects
 				if ((filterMask & object.GetFilterMask()) == 0)
 					continue;
-
-				const MeshComponent* mesh = meshes.GetComponent(object.meshID);
-				if (mesh == nullptr)
+				if (meshes.GetComponent(object.meshID) == nullptr)
 					continue;
+
+				// conservative world-space AABB entry distance (0 when inside/degenerate —
+				// an UNDERestimate can only cost speed, never a missed hit)
+				const XMFLOAT3 MIN = aabb.getMin();
+				const XMFLOAT3 MAX = aabb.getMax();
+				float t1 = (MIN.x - gg_ro.x) * gg_ri.x;
+				float t2 = (MAX.x - gg_ro.x) * gg_ri.x;
+				float tmin = std::min(t1, t2);
+				t1 = (MIN.y - gg_ro.y) * gg_ri.y;
+				t2 = (MAX.y - gg_ro.y) * gg_ri.y;
+				tmin = std::max(tmin, std::min(t1, t2));
+				t1 = (MIN.z - gg_ro.z) * gg_ri.z;
+				t2 = (MAX.z - gg_ro.z) * gg_ri.z;
+				tmin = std::max(tmin, std::min(t1, t2));
+				tmin *= gg_dirlen_world;
+				if (!(tmin > 0.0f) || !(tmin < std::numeric_limits<float>::max()))
+					tmin = 0.0f; // NaN/inf/inside -> process first, never skip
+
+				GGRayCandidate cand;
+				cand.t = tmin;
+				cand.objectIndex = (uint32_t)objectIndex;
+				gg_candidates.push_back(cand);
+			}
+
+			std::sort(gg_candidates.begin(), gg_candidates.end(),
+				[](const GGRayCandidate& a, const GGRayCandidate& b) { return a.t < b.t; });
+
+			for (size_t gg_ci = 0; gg_ci < gg_candidates.size(); ++gg_ci)
+			{
+				// front-to-back early out: nothing further along the ray can beat this hit
+				if (result.distance < gg_candidates[gg_ci].t)
+					break;
+
+				const size_t objectIndex = (size_t)gg_candidates[gg_ci].objectIndex;
+				const ObjectComponent& object = objects[objectIndex];
+				const MeshComponent* mesh = meshes.GetComponent(object.meshID);
+
+				gg_dbg_isect_aabbpass.fetch_add(1, std::memory_order_relaxed);
 
 				const Entity entity = objects.GetEntity(objectIndex);
 				const SoftBodyPhysicsComponent* softbody = softbodies.GetComponent(object.meshID);
@@ -6951,6 +7018,7 @@ namespace wi::scene
 
 				auto intersect_triangle = [&](uint32_t subsetIndex, uint32_t indexOffset, uint32_t triangleIndex)
 				{
+					gg_dbg_isect_tris.fetch_add(1, std::memory_order_relaxed);
 					const uint32_t i0 = mesh->indices[indexOffset + triangleIndex * 3 + 0];
 					const uint32_t i1 = mesh->indices[indexOffset + triangleIndex * 3 + 1];
 					const uint32_t i2 = mesh->indices[indexOffset + triangleIndex * 3 + 2];
@@ -6966,6 +7034,7 @@ namespace wi::scene
 					}
 					else if (armature != nullptr && !armature->boneData.empty())
 					{
+						gg_dbg_isect_skintris.fetch_add(1, std::memory_order_relaxed);
 						p0 = SkinVertex(*mesh, *armature, i0);
 						p1 = SkinVertex(*mesh, *armature, i1);
 						p2 = SkinVertex(*mesh, *armature, i2);

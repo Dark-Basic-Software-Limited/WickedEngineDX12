@@ -36,6 +36,13 @@ DEFINE_GUID(D3D12_VIDEO_DECODE_PROFILE_H264, 0x1b81be68, 0xa0c7, 0x11d3, 0xb9, 0
 
 using namespace Microsoft::WRL;
 
+#include <atomic>
+// GGMAX wall-gap tracer counters (global namespace; read by wiProfiler.cpp gap_trace dump):
+// lazy at-draw-time PSO driver compiles + texture creations — the classic warm-up hitchers.
+std::atomic<unsigned long long> gg_dbg_pso_compiles{ 0 };
+std::atomic<unsigned long long> gg_dbg_pso_compile_us{ 0 };
+std::atomic<unsigned long long> gg_dbg_tex_creates{ 0 };
+
 namespace wi::graphics
 {
 	// GGMAX 1.48a: submit-tail attribution (print-only; read by the game's GET_PERF_DATA).
@@ -2129,6 +2136,12 @@ std::mutex queue_locker;
 
 			if (pipeline == nullptr)
 			{
+				// GGMAX wall-gap tracer: this is the lazy at-draw-time driver PSO compile —
+				// the classic first-use warm-up hitch source. Counted + timed for gap_trace.txt.
+				LARGE_INTEGER gg_f, gg_c0, gg_c1;
+				QueryPerformanceFrequency(&gg_f);
+				QueryPerformanceCounter(&gg_c0);
+
 				// make copy, mustn't overwrite internal_state from here!
 				PipelineState_DX12::PSO_STREAM stream = internal_state->stream;
 
@@ -2157,6 +2170,10 @@ std::mutex queue_locker;
 
 				ComPtr<ID3D12PipelineState> newpso;
 				dx12_check(device->CreatePipelineState(&streamDesc, PPV_ARGS(newpso)));
+
+				QueryPerformanceCounter(&gg_c1);
+				gg_dbg_pso_compiles.fetch_add(1, std::memory_order_relaxed);
+				gg_dbg_pso_compile_us.fetch_add((unsigned long long)(((gg_c1.QuadPart - gg_c0.QuadPart) * 1000000.0) / (double)gg_f.QuadPart), std::memory_order_relaxed);
 
 				commandlist.pipelines_worker.push_back(std::make_pair(pipeline_hash, newpso));
 				pipeline = newpso.Get();
@@ -3550,6 +3567,7 @@ std::mutex queue_locker;
 	}
 	bool GraphicsDevice_DX12::CreateTexture(const TextureDesc* desc, const SubresourceData* initial_data, Texture* texture, const GPUResource* alias, uint64_t alias_offset) const
 	{
+		gg_dbg_tex_creates.fetch_add(1, std::memory_order_relaxed); // GGMAX wall-gap tracer
 		auto internal_state = wi::allocator::make_shared<Texture_DX12>();
 		internal_state->allocationhandler = allocationhandler;
 		texture->internal_state = internal_state;

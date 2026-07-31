@@ -71,6 +71,16 @@ namespace wi::profiler
 	void SetBackgroundColor(wi::Color color);
 	void SetTextColor(wi::Color color);
 
+	// GGMAX wall-gap tracer (Horseshoe Bend warm-up stall hunt): runs INDEPENDENTLY of the
+	// profiler enable state so it never distorts the timing it measures. Main-loop phases
+	// drop cheap timestamped marks; when the frame-to-frame wall gap at BeginFrame exceeds
+	// the threshold, the previous frame's full segment ledger + PSO/texture creation deltas
+	// are appended to gap_trace.txt next to the exe. Averages smear one-frame hitches —
+	// this catches individual offenders.
+	void gg_trace_mark(const char* name); // main thread only
+	void gg_trace_mark_id(const char* prefix, unsigned int id); // formatted "<prefix>_<hex id>" mark
+	unsigned long long gg_trace_now_us(void); // tracer clock, for caller-side gating
+
 	// Safe data access (no GPU calls, no rendering - just reads internal timing data)
 	// Returns formatted text of all CPU and GPU profiling ranges with timing in ms.
 	// Profiler must be enabled via SetEnabled(true) for data to be collected.

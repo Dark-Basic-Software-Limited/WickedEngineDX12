@@ -25,6 +25,12 @@
 
 using namespace wi::graphics;
 
+// GGMAX wall-gap tracer: creation counters defined in wiGraphicsDevice_DX12.cpp (global namespace)
+extern std::atomic<unsigned long long> gg_dbg_pso_compiles, gg_dbg_pso_compile_us, gg_dbg_tex_creates;
+// GGMAX wall-gap tracer: pump aggregates (incremented by the game's main.cpp message loop)
+std::atomic<unsigned long long> gg_dbg_pump_dispatches{ 0 };
+std::atomic<unsigned long long> gg_dbg_pump_us{ 0 };
+
 namespace wi::profiler
 {
 	bool ENABLED = false;
@@ -66,8 +72,98 @@ namespace wi::profiler
 
 	void gg_ClearTextDataCaches(); // GGMAX 1.67: defined next to GetTextData below
 
+	// GGMAX wall-gap tracer (see wiProfiler.h). Main thread only; independent of ENABLED.
+	struct GGTraceMark { const char* name; unsigned long long us; char buf[24]; };
+	static GGTraceMark gg_trace_marks[128];
+	static int gg_trace_mark_count = 0;
+	static unsigned long long gg_trace_prev_begin_us = 0;
+	static unsigned long long gg_trace_pso_snap = 0, gg_trace_pso_us_snap = 0, gg_trace_tex_snap = 0;
+	static unsigned long long gg_trace_pump_snap = 0, gg_trace_pump_us_snap = 0;
+	static int gg_trace_gaps_written = 0;
+	std::atomic<unsigned long long> gg_trace_gap_count{ 0 };   // read by harness GAPS: line
+	std::atomic<unsigned long long> gg_trace_gap_last_ms{ 0 };
+	unsigned long long gg_trace_threshold_us = 100000;         // 100ms
+	static unsigned long long gg_trace_qpc_us(void)
+	{
+		LARGE_INTEGER f, c;
+		QueryPerformanceFrequency(&f);
+		QueryPerformanceCounter(&c);
+		return (unsigned long long)((c.QuadPart * 1000000.0) / (double)f.QuadPart);
+	}
+	void gg_trace_mark(const char* name)
+	{
+		if (gg_trace_mark_count < (int)arraysize(gg_trace_marks))
+		{
+			gg_trace_marks[gg_trace_mark_count].name = name;
+			gg_trace_marks[gg_trace_mark_count].us = gg_trace_qpc_us();
+			gg_trace_mark_count++;
+		}
+	}
+	void gg_trace_mark_id(const char* prefix, unsigned int id)
+	{
+		if (gg_trace_mark_count < (int)arraysize(gg_trace_marks))
+		{
+			GGTraceMark& m = gg_trace_marks[gg_trace_mark_count];
+			sprintf_s(m.buf, sizeof(m.buf), "%s_%04X", prefix, id);
+			m.name = m.buf;
+			m.us = gg_trace_qpc_us();
+			gg_trace_mark_count++;
+		}
+	}
+	unsigned long long gg_trace_now_us(void)
+	{
+		return gg_trace_qpc_us();
+	}
+	static void gg_trace_frame_boundary(void)
+	{
+		const unsigned long long now = gg_trace_qpc_us();
+		if (gg_trace_prev_begin_us != 0)
+		{
+			const unsigned long long dt = now - gg_trace_prev_begin_us;
+			if (dt > gg_trace_threshold_us)
+			{
+				gg_trace_gap_count.fetch_add(1, std::memory_order_relaxed);
+				gg_trace_gap_last_ms = dt / 1000;
+				if (gg_trace_gaps_written < 300) // file-size backstop
+				{
+					gg_trace_gaps_written++;
+					FILE* f = nullptr;
+					fopen_s(&f, "gap_trace.txt", "a");
+					if (f)
+					{
+						fprintf(f, "GAP #%llu  %.1f ms  (boundary t=%llu us)\n",
+							gg_trace_gap_count.load(), dt / 1000.0, now);
+						unsigned long long prev = gg_trace_prev_begin_us;
+						for (int i = 0; i < gg_trace_mark_count; ++i)
+						{
+							fprintf(f, "  %-26s +%9.2f ms\n", gg_trace_marks[i].name, (gg_trace_marks[i].us - prev) / 1000.0);
+							prev = gg_trace_marks[i].us;
+						}
+						fprintf(f, "  %-26s +%9.2f ms\n", "[outside-Run: pump/etc]", (now - prev) / 1000.0);
+						fprintf(f, "  psoCompiles=+%llu psoCompileMs=+%.1f texCreates=+%llu pumpDispatches=+%llu pumpMs=+%.1f\n\n",
+							gg_dbg_pso_compiles.load() - gg_trace_pso_snap,
+							(gg_dbg_pso_compile_us.load() - gg_trace_pso_us_snap) / 1000.0,
+							gg_dbg_tex_creates.load() - gg_trace_tex_snap,
+							gg_dbg_pump_dispatches.load() - gg_trace_pump_snap,
+							(gg_dbg_pump_us.load() - gg_trace_pump_us_snap) / 1000.0);
+						fclose(f);
+					}
+				}
+			}
+		}
+		gg_trace_prev_begin_us = now;
+		gg_trace_mark_count = 0;
+		gg_trace_pso_snap = gg_dbg_pso_compiles.load();
+		gg_trace_pso_us_snap = gg_dbg_pso_compile_us.load();
+		gg_trace_tex_snap = gg_dbg_tex_creates.load();
+		gg_trace_pump_snap = gg_dbg_pump_dispatches.load();
+		gg_trace_pump_us_snap = gg_dbg_pump_us.load();
+	}
+
 	void BeginFrame()
 	{
+		gg_trace_frame_boundary(); // GGMAX wall-gap tracer — must run even when profiler disabled
+
 		if (ENABLED_REQUEST != ENABLED)
 		{
 			ranges.clear();

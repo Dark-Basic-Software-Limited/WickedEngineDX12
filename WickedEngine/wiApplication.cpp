@@ -288,6 +288,7 @@ namespace wi
 			wi::input::Update(window, canvas);
 			wi::profiler::EndRange(gg_r);
 		}
+		wi::profiler::gg_trace_mark("input");
 
 		// Wake up the events that need to be executed on the main thread, in thread safe manner:
 		{
@@ -295,6 +296,7 @@ namespace wi
 			wi::eventhandler::FireEvent(wi::eventhandler::EVENT_THREAD_SAFE_POINT, 0);
 			wi::profiler::EndRange(gg_r);
 		}
+		wi::profiler::gg_trace_mark("threadsafe-events");
 
 		fadeManager.Update(deltaTime);
 
@@ -303,10 +305,12 @@ namespace wi
 			ColorSpace colorspace = graphicsDevice->GetSwapChainColorSpace(&swapChain);
 			activePath->colorspace = colorspace;
 			activePath->init(canvas);
+			wi::profiler::gg_trace_mark("path-init");
 			auto gg_r = wi::profiler::BeginRangeCPU("App-PreUpdate");
 			activePath->PreUpdate();
 			wi::profiler::EndRange(gg_r);
 		}
+		wi::profiler::gg_trace_mark("preupdate");
 
 		// Fixed time update:
 		auto range = wi::profiler::BeginRangeCPU("Fixed Update");
@@ -333,11 +337,14 @@ namespace wi
 			}
 		}
 		wi::profiler::EndRange(range); // Fixed Update
+		wi::profiler::gg_trace_mark("fixedupdate");
 
 		// Variable-timed update:
 		Update(deltaTime);
+		wi::profiler::gg_trace_mark("update");
 
 		Render();
+		wi::profiler::gg_trace_mark("render");
 
 		// Begin final compositing:
 		// GGMAX diag: BeginCommandList can block on a fence/allocator when the GPU queue
@@ -345,6 +352,7 @@ namespace wi
 		auto gg_r_bc = wi::profiler::BeginRangeCPU("App-BeginCmdCompose");
 		CommandList cmd = graphicsDevice->BeginCommandList();
 		wi::profiler::EndRange(gg_r_bc);
+		wi::profiler::gg_trace_mark("begincmd-compose");
 
 		// CrossFade texture save:
 		if (fadeManager.crossFadeTextureSaveRequired)
@@ -403,6 +411,7 @@ namespace wi
 
 		wi::input::ClearForNextFrame();
 		wi::profiler::EndFrame(cmd);
+		wi::profiler::gg_trace_mark("compose+endframe");
 		{
 			// GGMAX 1.32c: attribute the frame tail OUTSIDE the profiler's CPU-frame span.
 			// SubmitCommandLists includes the queue submits + Present + swapchain pacing wait —
@@ -412,7 +421,9 @@ namespace wi
 			graphicsDevice->SubmitCommandLists();
 			gg_app_submit_present_ms = (float)gg_submit_timer.elapsed_milliseconds();
 		}
+		wi::profiler::gg_trace_mark("submit-present");
 		wi::renderer::UpdateGPUSuballocator();
+		wi::profiler::gg_trace_mark("suballocator(run-end)");
 	}
 
 	void Application::Update(float dt)

@@ -324,6 +324,23 @@ namespace wi::terrain
 
 	// GGMAX 1.33: master switch for incremental VT bookkeeping (see wiTerrain.h)
 	bool gg_vt_incremental = true;
+
+	// GGMAX diag (Horseshoe Bend 42ms FreeSort hunt): free-list rebuild forensics,
+	// running totals read via the game harness GET_PERF_DATA "VT:" line.
+	std::atomic<unsigned long long> gg_dbg_vt_rebuilds{ 0 };   // rebuild executions
+	std::atomic<unsigned long long> gg_dbg_vt_scan_us{ 0 };    // clear+scan phase time
+	std::atomic<unsigned long long> gg_dbg_vt_sort_us{ 0 };    // std::sort phase time
+	std::atomic<unsigned long long> gg_dbg_vt_free{ 0 };       // last free-list size after rebuild
+	std::atomic<unsigned long long> gg_dbg_vt_requests{ 0 };   // cumulative allocation requests
+	std::atomic<unsigned long long> gg_dbg_vt_reason{ 0 };     // cumulative trigger bits: 1=knob 2=requests 4=dirty 8=lowwater 16=center (per-frame OR summed)
+	std::atomic<unsigned long long> gg_dbg_vt_tiles{ 0 };      // physical tile count (last)
+	static unsigned long long gg_dbg_vt_qpc_us(void)
+	{
+		LARGE_INTEGER f, c;
+		QueryPerformanceFrequency(&f);
+		QueryPerformanceCounter(&c);
+		return (unsigned long long)((c.QuadPart * 1000000.0) / (double)f.QuadPart);
+	}
 	// GGMAX 1.53b: terrain VT tiling repeat CAP — every bake rung finer than this many repeats
 	// per chunk region bakes the SAME cap-scale layout (pure downsample chain = invisible
 	// trilinear transitions from the camera through the mid field); rungs at/below the cap keep
@@ -2071,11 +2088,21 @@ namespace wi::terrain
 			// assumptions — force a rebuild so chunk-init can't steal recently-live tiles.
 			const bool gg_center_moved = !(gg_freesort_last_center == center_chunk);
 			const bool gg_rebuild_free = !gg_vt_incremental || gg_total_requests > 0 || atlas.gg_free_dirty || gg_low_water || gg_center_moved;
+			// GGMAX diag: record what pulled the trigger
+			gg_dbg_vt_requests += (unsigned long long)gg_total_requests;
+			if (gg_rebuild_free)
+			{
+				gg_dbg_vt_rebuilds++;
+				gg_dbg_vt_reason |= (!gg_vt_incremental ? 1ull : 0) | (gg_total_requests > 0 ? 2ull : 0) |
+					(atlas.gg_free_dirty ? 4ull : 0) | (gg_low_water ? 8ull : 0) | (gg_center_moved ? 16ull : 0);
+				gg_dbg_vt_tiles = (unsigned long long)atlas.physical_tiles.size();
+			}
 			if (gg_rebuild_free)
 			{
 			if (gg_low_water) gg_freesort_cooldown = 8;
 			gg_freesort_last_center = center_chunk; // review F2
 			auto gg_range_free = wi::profiler::BeginRangeCPU("VT-job FreeSort"); // GGMAX 1.32 instrumentation
+			unsigned long long gg_t0 = gg_dbg_vt_qpc_us();
 			atlas.free_tiles.clear();
 			for (uint8_t y = 0; y < atlas.physical_tile_count_y; ++y)
 			{
@@ -2089,10 +2116,15 @@ namespace wi::terrain
 					}
 				}
 			}
+			unsigned long long gg_t1 = gg_dbg_vt_qpc_us();
 			// Sort them by unused frame counts, this will make them be given out in least recently used (LRU) order:
 			std::sort(atlas.free_tiles.begin(), atlas.free_tiles.end(), [&](const VirtualTextureAtlas::Tile& a, const VirtualTextureAtlas::Tile& b) {
 				return atlas.get_tile_frames(a) < atlas.get_tile_frames(b);
 			});
+			unsigned long long gg_t2 = gg_dbg_vt_qpc_us();
+			gg_dbg_vt_scan_us += gg_t1 - gg_t0;
+			gg_dbg_vt_sort_us += gg_t2 - gg_t1;
+			gg_dbg_vt_free = (unsigned long long)atlas.free_tiles.size();
 			wi::profiler::EndRange(gg_range_free); // GGMAX 1.32
 			atlas.gg_free_dirty = false; // GGMAX 1.33
 			}

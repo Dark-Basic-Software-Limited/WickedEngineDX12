@@ -281,10 +281,20 @@ namespace wi
 		// avoid instability caused by large delta time
 		deltaTime = clamp(deltaTime, 0.0f, 0.5f);
 
-		wi::input::Update(window, canvas);
+		// GGMAX diag (Horseshoe warm-up stall hunt): bracket the untracked main-thread
+		// stops between profiler BeginFrame and the Update/Render ranges.
+		{
+			auto gg_r = wi::profiler::BeginRangeCPU("App-Input");
+			wi::input::Update(window, canvas);
+			wi::profiler::EndRange(gg_r);
+		}
 
 		// Wake up the events that need to be executed on the main thread, in thread safe manner:
-		wi::eventhandler::FireEvent(wi::eventhandler::EVENT_THREAD_SAFE_POINT, 0);
+		{
+			auto gg_r = wi::profiler::BeginRangeCPU("App-ThreadSafeEvents");
+			wi::eventhandler::FireEvent(wi::eventhandler::EVENT_THREAD_SAFE_POINT, 0);
+			wi::profiler::EndRange(gg_r);
+		}
 
 		fadeManager.Update(deltaTime);
 
@@ -293,7 +303,9 @@ namespace wi
 			ColorSpace colorspace = graphicsDevice->GetSwapChainColorSpace(&swapChain);
 			activePath->colorspace = colorspace;
 			activePath->init(canvas);
+			auto gg_r = wi::profiler::BeginRangeCPU("App-PreUpdate");
 			activePath->PreUpdate();
+			wi::profiler::EndRange(gg_r);
 		}
 
 		// Fixed time update:
@@ -328,7 +340,11 @@ namespace wi
 		Render();
 
 		// Begin final compositing:
+		// GGMAX diag: BeginCommandList can block on a fence/allocator when the GPU queue
+		// is backed up — bracket it so a stall here is attributable.
+		auto gg_r_bc = wi::profiler::BeginRangeCPU("App-BeginCmdCompose");
 		CommandList cmd = graphicsDevice->BeginCommandList();
+		wi::profiler::EndRange(gg_r_bc);
 
 		// CrossFade texture save:
 		if (fadeManager.crossFadeTextureSaveRequired)

@@ -9,11 +9,18 @@ Texture2D<float2> cloud_depth_current : register(t1);
 static const int UPSAMPLE_SAMPLE_RADIUS = 1;
 
 #define GAUSSIAN_SIGMA_SPATIAL 0.5
-#define GAUSSIAN_SIGMA_RANGE 100.0
+// GGMAX 1.66: the range kernel is a DISTANCE tolerance. Stock 100.0 assumed meter world
+// units; GG world units are inches, so 100 units = 2.5 real meters — the bilateral blend
+// rejected valid same-surface taps at every terrain/sky discontinuity and painted the
+// bright "mountain silhouette line". 3937 units = the stock 100 m intent.
+#define GAUSSIAN_SIGMA_RANGE 3937.0
 
 #define UPSAMPLE_TOLERANCE 0.15
 
-half Gaussian(half x, half sigma)
+// GGMAX 1.66: full float — the half version overflowed on both fronts in an inch-unit
+// world: 2*sigma*sigma > 65504 (half inf -> x*x/inf = NaN for far taps) and x itself
+// (depth differences reach millions of units).
+float Gaussian(float x, float sigma)
 {
 	return exp(-x * x / (2.0 * sigma * sigma));
 }
@@ -77,7 +84,10 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
 				float2 neighborReprojectionUV = (neighborReprojectionCoord + 0.5) / reprojectionResolution;
 			
 				half4 cloudResult = cloud_current.SampleLevel(sampler_linear_clamp, neighborReprojectionUV, 0);
-				half cloudDepth = cloud_depth_current[neighborReprojectionCoord].g;
+				// GGMAX 1.66: read the cloud depth at FULL precision — the half read overflowed
+				// to +inf beyond 65504 units (1.66 real km here), zeroing every tap weight at
+				// distance and leaving un-clouded holes along depth edges.
+				float cloudDepth = cloud_depth_current[neighborReprojectionCoord].g;
 				
 				float spatialWeight = Gaussian(length(float2(offset)), GAUSSIAN_SIGMA_SPATIAL);
 				float rangeWeight = Gaussian(abs(tToDepthBuffer - cloudDepth), GAUSSIAN_SIGMA_RANGE);
@@ -91,6 +101,12 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
 		if (weightSum > 0)
 		{
 			result = color / weightSum;
+		}
+		else
+		{
+			// GGMAX 1.66: never emit a hard zero (an un-clouded hole) when every tap was
+			// rejected — fall back to the bilinear sample like the small-error path.
+			result = cloud_current.SampleLevel(sampler_linear_clamp, uv, 0);
 		}
 	}
 

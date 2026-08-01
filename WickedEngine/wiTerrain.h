@@ -48,6 +48,10 @@ namespace std
 
 namespace wi::terrain
 {
+	// GGMAX 1.71: SVT physical atlas height — the fixed backing cost of the terrain virtual
+	// texture (16384 = stock, 768 MB tile pool; halving halves it). Applied at atlas creation.
+	extern uint32_t gg_svt_atlas_height;
+
 	static constexpr int chunk_width = 64 + 3; // + 3: filler vertices for lod apron and grid perimeter
 	static constexpr float chunk_half_width = (chunk_width - 1) * 0.5f;
 	static constexpr float chunk_width_rcp = 1.0f / (chunk_width - 1);

@@ -327,6 +327,10 @@ namespace wi::terrain
 
 	// GGMAX diag (Horseshoe Bend 42ms FreeSort hunt): free-list rebuild forensics,
 	// running totals read via the game harness GET_PERF_DATA "VT:" line.
+	// GGMAX 1.71: SVT physical atlas height (see the atlas creation site). 16384 = stock
+	// (768 MB tile pool); 8192 halves it. Applied when the atlas is next created.
+	uint32_t gg_svt_atlas_height = 16384u; // stock; setup.ini svtatlasheight can halve it (see VRAM_CENSUS.md)
+
 	std::atomic<unsigned long long> gg_dbg_vt_rebuilds{ 0 };   // rebuild executions
 	std::atomic<unsigned long long> gg_dbg_vt_scan_us{ 0 };    // clear+scan phase time
 	std::atomic<unsigned long long> gg_dbg_vt_sort_us{ 0 };    // std::sort phase time
@@ -1731,8 +1735,15 @@ namespace wi::terrain
 
 			if (!atlas.IsValid())
 			{
+				// GGMAX 1.71 (VRAM census): the SVT physical atlas is a FIXED cost — 4 sparse
+				// maps at 16384x16384 back a 768 MB tile pool no matter how much of it a level
+				// uses. Measured residency across Island Showdown / Horseshoe Bend / Zombie
+				// Cellar / Switch Escape: only ~890-1090 of 3844 tiles ever resident (~26%).
+				// gg_svt_atlas_height trims the atlas (and the pool) proportionally; 8192
+				// halves it to 384 MB and still leaves ~1.8x headroom over the measured peak.
+				// Takes effect on the next atlas creation, i.e. reload the level.
 				const uint32_t physical_width = 16384u;
-				const uint32_t physical_height = 16384u;
+				const uint32_t physical_height = gg_svt_atlas_height;
 				GPUBufferDesc tile_pool_desc;
 
 				for (uint32_t map_type = 0; map_type < arraysize(atlas.maps); ++map_type)

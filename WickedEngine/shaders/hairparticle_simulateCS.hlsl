@@ -193,24 +193,6 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 Gid : SV_GroupID, uint groupIn
 	const float distsq = dot(diff, diff);
 	const bool distance_culled = distsq > sqr(xHairViewDistance);
 
-	// GGMAX 1.72: graceful draw-distance fade. The cull above is binary — at the Grass Draw
-	// Distance radius a blade simply ceases to exist, so walking forward pops full-height grass
-	// into being. Taper strand length smoothly to zero across the outer 12% of the radius
-	// instead: blades sink into the ground as they approach the limit. Done here rather than in
-	// the pixel shader because strand_length feeds every consumer (colour pass, prepass alpha,
-	// shadow pass) automatically, so the fade is consistent everywhere and costs no alpha
-	// blending. It overlaps the existing 20% dither ramp in hairparticleVS, which finishes the
-	// job for whatever height remains.
-	{
-		const float gg_fade_begin = xHairViewDistance * 0.88;
-		const float gg_dist = sqrt(distsq);
-		if (gg_dist > gg_fade_begin)
-		{
-			const float gg_denom = max(xHairViewDistance - gg_fade_begin, 1.0);
-			strand_length *= (half)saturate((xHairViewDistance - gg_dist) / gg_denom);
-		}
-	}
-
 	// GGMAX 1.49b grass strand LOD (motion-clean rework of 1.49). Two mechanisms, both pure
 	// functions of (strand id hash, camera distance) so a parked camera is bit-stable:
 	//  - DROPS: half the strands (hash bit 0) drop around Step2Dist, half the remainder

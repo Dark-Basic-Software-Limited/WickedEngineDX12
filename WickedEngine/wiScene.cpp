@@ -4655,6 +4655,9 @@ namespace wi::scene
 
 		});
 	}
+	// GGMAX 1.69: feedback-chain probe — materials whose GPU streaming feedback word was nonzero
+	std::atomic<unsigned long long> gg_dbg_stream_fb_hits{ 0 };
+
 	void Scene::RunMaterialUpdateSystem(wi::jobsystem::context& ctx)
 	{
 		wi::jobsystem::Dispatch(ctx, (uint32_t)materials.GetCount(), small_subtask_groupsize, [&](wi::jobsystem::JobArgs args) {
@@ -4757,6 +4760,7 @@ namespace wi::scene
 				const uint32_t request_packed = textureStreamingFeedbackMapped[args.jobIndex];
 				if (request_packed != 0)
 				{
+					gg_dbg_stream_fb_hits.fetch_add(1, std::memory_order_relaxed); // GGMAX 1.69
 					const uint32_t request_uvset0 = request_packed & 0xFFFF;
 					const uint32_t request_uvset1 = (request_packed >> 16u) & 0xFFFF;
 					for (auto& slot : material.textures)

@@ -6132,6 +6132,8 @@ void UpdateRenderDataAsync(
 	device->EventEnd(cmd);
 }
 
+// GGMAX 1.69: feedback-chain probe — readback copies actually issued per session
+std::atomic<unsigned long long> gg_dbg_stream_copies{ 0 };
 void TextureStreamingReadbackCopy(
 	const wi::scene::Scene& scene,
 	wi::graphics::CommandList cmd
@@ -6139,6 +6141,7 @@ void TextureStreamingReadbackCopy(
 {
 	if (scene.textureStreamingFeedbackBuffer.IsValid())
 	{
+		gg_dbg_stream_copies.fetch_add(1, std::memory_order_relaxed); // GGMAX 1.69
 		device->Barrier(GPUBarrier::Buffer(&scene.textureStreamingFeedbackBuffer, ResourceState::UNORDERED_ACCESS, ResourceState::COPY_SRC), cmd);
 		device->CopyResource(
 			&scene.textureStreamingFeedbackBuffer_readback[scene.cpu_gpu_mapped_resource_index],

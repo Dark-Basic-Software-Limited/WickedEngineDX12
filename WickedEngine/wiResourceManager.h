@@ -125,6 +125,9 @@ namespace wi
 		void GGReloadGuardBegin();
 		void GGReloadGuardEnd();
 
+		// GGMAX 1.69: dump every live resource's streaming state to a text file (harness DUMP_STREAM2)
+		void GG_DumpStreamingResources(const char* path);
+
 		// Returns true if any of the loaded resources are outdated compared to their files
 		bool CheckResourcesOutdated();
 

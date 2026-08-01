@@ -194,6 +194,9 @@ namespace wi
 		resourceinternal->timestamp = 0;
 	}
 
+	// GGMAX 1.69: feedback-chain probe — nonzero resolution requests reaching resources
+	std::atomic<unsigned long long> gg_dbg_stream_req_calls{ 0 };
+
 	void Resource::StreamingRequestResolution(uint32_t resolution)
 	{
 		if (internal_state == nullptr)
@@ -201,6 +204,10 @@ namespace wi
 			internal_state = wi::allocator::make_shared<ResourceInternal>();
 		}
 		ResourceInternal* resourceinternal = (ResourceInternal*)internal_state.get();
+		if (resolution != 0)
+		{
+			gg_dbg_stream_req_calls.fetch_add(1, std::memory_order_relaxed); // GGMAX 1.69
+		}
 		resourceinternal->streaming_resolution.fetch_or(resolution);
 	}
 
@@ -1090,6 +1097,28 @@ namespace wi
 		// CONFIRMED 2026-07-26: streaming paused = zero corruption across reloads.
 		bool gg_streaming_paused = false;
 
+		// GGMAX 1.69: texture-streaming observability (harness GET_PERF_DATA STREAM line).
+		// enrolled = resources gathered into the last streaming job pass; replaced = texture
+		// replacements applied on the main thread since launch; resident/full = VRAM bytes of
+		// enrolled textures now vs their complete mip chains; mem_permille = GPU usage/budget.
+		std::atomic<uint32_t> gg_dbg_stream_enrolled{ 0 };
+		std::atomic<uint32_t> gg_dbg_stream_replaced{ 0 };
+		std::atomic<unsigned long long> gg_dbg_stream_resident_bytes{ 0 };
+		std::atomic<unsigned long long> gg_dbg_stream_full_bytes{ 0 };
+		std::atomic<uint32_t> gg_dbg_stream_mem_permille{ 0 };
+		// GGMAX 1.69: streaming-job liveness probes (job launched / job completed / skipped-because-busy)
+		std::atomic<unsigned long long> gg_dbg_stream_job_starts{ 0 };
+		std::atomic<unsigned long long> gg_dbg_stream_job_ends{ 0 };
+		std::atomic<unsigned long long> gg_dbg_stream_busy_skips{ 0 };
+		// GGMAX 1.69: per-pass decision census (stored at job end) + max requested resolution seen
+		std::atomic<uint32_t> gg_dbg_stream_dec_req0{ 0 };      // requested == 0 (no feedback for this resource)
+		std::atomic<uint32_t> gg_dbg_stream_dec_reqlow{ 0 };    // requested below current size (wants smaller/equal)
+		std::atomic<uint32_t> gg_dbg_stream_dec_nomips{ 0 };    // wants IN but no more mips in container
+		std::atomic<uint32_t> gg_dbg_stream_dec_cancel{ 0 };    // wants IN but +1 mip would overshoot
+		std::atomic<uint32_t> gg_dbg_stream_dec_in{ 0 };        // streamed IN
+		std::atomic<uint32_t> gg_dbg_stream_dec_out{ 0 };       // streamed OUT
+		std::atomic<uint32_t> gg_dbg_stream_max_req{ 0 };       // largest requested resolution seen (all-time)
+
 		// GGMAX 1.44: see wiResourceManager.h. Implemented below UpdateStreamingResources
 		// (needs streaming_ctx / replacement queue visibility).
 
@@ -1102,6 +1131,7 @@ namespace wi
 			if (!streaming_texture_replacements.empty())
 			{
 				gg_streaming_descriptor_epoch.fetch_add(1, std::memory_order_relaxed); // GGMAX 1.41: descriptors changed
+				gg_dbg_stream_replaced.fetch_add((uint32_t)streaming_texture_replacements.size(), std::memory_order_relaxed); // GGMAX 1.69
 			}
 			for (auto& replace : streaming_texture_replacements)
 			{
@@ -1172,6 +1202,7 @@ namespace wi
 			// If previous streaming jobs were not finished, we cancel this until next frame:
 			if (wi::jobsystem::IsBusy(streaming_ctx))
 			{
+				gg_dbg_stream_busy_skips.fetch_add(1, std::memory_order_relaxed); // GGMAX 1.69
 				locker.unlock();
 				return;
 			}
@@ -1205,23 +1236,40 @@ namespace wi
 			removals.clear();
 			locker.unlock();
 
+			gg_dbg_stream_enrolled.store((uint32_t)streaming_texture_jobs.size(), std::memory_order_relaxed); // GGMAX 1.69
+
 			if (streaming_texture_jobs.empty())
 				return;
 
 			// One low priority thread will be responsible for streaming, to not cause any hitching while rendering:
 			streaming_ctx.priority = wi::jobsystem::Priority::Streaming;
 			wi::jobsystem::Execute(streaming_ctx, [](wi::jobsystem::JobArgs args) {
+				gg_dbg_stream_job_starts.fetch_add(1, std::memory_order_relaxed); // GGMAX 1.69
+				unsigned long long gg_resident = 0, gg_full = 0; // GGMAX 1.69
+				uint32_t dc_req0 = 0, dc_reqlow = 0, dc_nomips = 0, dc_cancel = 0, dc_in = 0, dc_out = 0; // GGMAX 1.69 decision census
 				for(auto& resource : streaming_texture_jobs)
 				{
 					TextureDesc desc = resource->texture.desc;
+					{
+						// GGMAX 1.69: byte accounting BEFORE desc is mutated by stream in/out below
+						gg_resident += ComputeTextureMemorySizeInBytes(desc);
+						TextureDesc full = desc;
+						const uint32_t dropped = resource->streaming_texture.mip_count - desc.mip_levels;
+						full.width <<= dropped;
+						full.height <<= dropped;
+						full.mip_levels = resource->streaming_texture.mip_count;
+						gg_full += ComputeTextureMemorySizeInBytes(full);
+					}
 					uint32_t requested_resolution = resource->streaming_resolution.fetch_and(0); // set to zero while returning prev value
 					if (requested_resolution > 0)
 					{
 						requested_resolution = 1u << (31u - firstbithigh(requested_resolution)); // largest power of two
+						gg_dbg_stream_max_req.fetch_or(requested_resolution, std::memory_order_relaxed); // GGMAX 1.69: pow2 -> bitmask census of request magnitudes
 					}
 					GraphicsDevice* device = GetDevice();
 					const GraphicsDevice::MemoryUsage memory_usage = device->GetMemoryUsage();
 					const float memory_percent = float(double(memory_usage.usage) / double(memory_usage.budget));
+					gg_dbg_stream_mem_permille.store((uint32_t)(memory_percent * 1000.0f), std::memory_order_relaxed); // GGMAX 1.69
 					const bool memory_shortage = memory_percent > streaming_threshold;
 					const bool stream_in = requested_resolution >= std::min(desc.width, desc.height);
 					const uint32_t target_unload_delay = memory_shortage ? 4 : 255;
@@ -1231,17 +1279,25 @@ namespace wi
 					{
 						resource->streaming_unload_delay = 0; // unloading will be immediately halted
 						if (mip_offset == 0)
+						{
+							dc_nomips++; // GGMAX 1.69
 							continue; // There aren't any more mip levels, cancel
+						}
 						// Mip level streaming IN:
 						desc.width <<= 1;
 						desc.height <<= 1;
 						if (requested_resolution < std::min(desc.width, desc.height))
+						{
+							dc_cancel++; // GGMAX 1.69
 							continue; // Increased resolution would be too much, cancel
+						}
 						desc.mip_levels++;
 						mip_offset--;
+						dc_in++; // GGMAX 1.69
 					}
 					else
 					{
+						if (requested_resolution == 0) dc_req0++; else dc_reqlow++; // GGMAX 1.69
 						resource->streaming_unload_delay++; // one more frame that this wants to unload
 						if (resource->streaming_unload_delay < target_unload_delay)
 							continue; // only unload mips if it's been wanting to unload for a couple frames, or there is memory shortage
@@ -1255,6 +1311,7 @@ namespace wi
 							desc.mip_levels--;
 							mip_offset++;
 						}
+						dc_out++; // GGMAX 1.69
 					}
 					if (desc.mip_levels <= resource->streaming_texture.mip_count)
 					{
@@ -1320,7 +1377,53 @@ namespace wi
 						streaming_replacement_mutex.unlock();
 					}
 				}
+				gg_dbg_stream_resident_bytes.store(gg_resident, std::memory_order_relaxed); // GGMAX 1.69
+				gg_dbg_stream_full_bytes.store(gg_full, std::memory_order_relaxed);
+				gg_dbg_stream_dec_req0.store(dc_req0, std::memory_order_relaxed); // GGMAX 1.69 decision census (per pass)
+				gg_dbg_stream_dec_reqlow.store(dc_reqlow, std::memory_order_relaxed);
+				gg_dbg_stream_dec_nomips.store(dc_nomips, std::memory_order_relaxed);
+				gg_dbg_stream_dec_cancel.store(dc_cancel, std::memory_order_relaxed);
+				gg_dbg_stream_dec_in.store(dc_in, std::memory_order_relaxed);
+				gg_dbg_stream_dec_out.store(dc_out, std::memory_order_relaxed);
+				gg_dbg_stream_job_ends.fetch_add(1, std::memory_order_relaxed); // GGMAX 1.69
 			});
+		}
+
+		// GGMAX 1.69: dump every live resource's streaming state (name, current vs full mip
+		// chain, STREAMING flag, live request value) — the authoritative enrolled-set list.
+		// Driven by harness DUMP_STREAM2.
+		void GG_DumpStreamingResources(const char* path)
+		{
+			FILE* f = fopen(path, "w");
+			if (f == nullptr)
+				return;
+			locker.lock();
+			int total = 0, enrolled = 0, flagged = 0;
+			for (auto& x : resources)
+			{
+				wi::allocator::shared_ptr<ResourceInternal> res = x.second.lock();
+				if (res == nullptr)
+					continue;
+				total++;
+				if (!res->texture.IsValid())
+					continue;
+				const TextureDesc& d = res->texture.desc;
+				const bool en = res->streaming_texture.mip_count > 1;
+				const bool fl = has_flag(res->flags, Flags::STREAMING);
+				if (en) enrolled++;
+				if (fl) flagged++;
+				fprintf(f, "%s cur=%ux%u/%u fullmips=%u flagSTREAM=%d minlod=%.1f reqNow=%u \"%s\"\n",
+					en ? "ENROLLED" : "static  ",
+					d.width, d.height, d.mip_levels,
+					res->streaming_texture.mip_count,
+					fl ? 1 : 0,
+					res->streaming_texture.min_lod_clamp_absolute,
+					res->streaming_resolution.load(std::memory_order_relaxed),
+					x.first.c_str());
+			}
+			fprintf(f, "total=%d enrolled=%d flagged=%d\n", total, enrolled, flagged);
+			locker.unlock();
+			fclose(f);
 		}
 
 		// GGMAX 1.44: quiesce streaming across an in-place level reload (see header).

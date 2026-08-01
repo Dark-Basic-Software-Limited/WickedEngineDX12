@@ -13,6 +13,7 @@
 #include <mutex>
 #include <unordered_map>
 #include <fstream> // GGMAX 1.52b: resource_hijack.txt tripwire
+#include <set>     // GGMAX 1.73: streaming guard de-duplicates its report by resource+reason
 
 using namespace wi::graphics;
 
@@ -221,6 +222,10 @@ namespace wi
 		// subresources — any cached GPU descriptor index derived from a streamed resource is
 		// invalid across a bump. Consumed by the ShaderMaterial recompose cache in wiScene.
 		std::atomic<uint32_t> gg_streaming_descriptor_epoch{ 0 };
+
+		// GGMAX 1.73 DIAG: see the definition comment further down — declared here because
+		// LoadResourceDirectly (above the streaming machinery) is the site that writes the trace.
+		extern bool gg_stream_load_trace;
 
 		void SetMode(Mode param)
 		{
@@ -520,14 +525,67 @@ namespace wi
 								}
 							}
 							// Reduce mip map count that will be uploaded to GPU:
+							//
+							// GGMAX 1.73: the halving must respect block-compression alignment.
+							// A BC resource's TOP mip must be a multiple of the 4x4 block size
+							// (sub-mips are exempt, which is why the full-size load is fine). Halving
+							// a legal size can produce an illegal one -- 500 is a multiple of 4, 250
+							// is not -- and the reduced desc is then an invalid BC resource.
+							// D3D12's GetCopyableFootprints REJECTS it and writes 0xFFFF.. sentinels
+							// into every output, after which the upload loop memcpy'd 4-billion rows
+							// off the end of the file buffer. That was the load crash on "Trapped"
+							// (DOOR1_surface.dds, 500x500 DXT1) and "RPG Template".
+							// Stopping early only means such a texture keeps a larger base mip.
+							const uint32_t format_block_size = GetFormatBlockSize(desc.format);
 							while (desc.mip_levels > 1 && desc.depth == 1 && desc.array_size == 1 && ComputeTextureMemorySizeInBytes(desc) > streaming_texture_min_size)
 							{
-								desc.width >>= 1;
-								desc.height >>= 1;
+								const uint32_t next_width = desc.width >> 1;
+								const uint32_t next_height = desc.height >> 1;
+								if (format_block_size > 1
+									&& ((next_width % format_block_size) != 0 || (next_height % format_block_size) != 0))
+								{
+									break; // next step would be an illegal top-level size for this format
+								}
+								desc.width = next_width;
+								desc.height = next_height;
 								desc.mip_levels -= 1;
 								mip_offset++;
 							}
 							resource->streaming_texture.min_lod_clamp_absolute = (float)mip_offset;
+						}
+
+						// GGMAX 1.73 DIAG: breadcrumb EVERY DDS upload (streaming or not), flushed
+						// per line, so a fault inside CreateTexture's memcpy names the exact texture.
+						// The last line in stream_load.txt when the process dies IS the offender.
+						// It must cover non-streaming loads too, otherwise "the last streaming
+						// texture" gets blamed for a fault that happened on the next plain one.
+						if (gg_stream_load_trace)
+						{
+							size_t last_byte_needed = 0;
+							for (uint32_t m = 0; m < desc.mip_levels; ++m)
+							{
+								const size_t off = (size_t)header.mip_offset(mip_offset + m, 0);
+								last_byte_needed = std::max(last_byte_needed, off + header.slice_pitch(mip_offset + m));
+							}
+							const std::string trace_path = wi::helper::GetDirectoryFromPath(wi::helper::GetExecutablePath()) + "stream_load.txt";
+							std::ofstream trace(trace_path, std::ios::app);
+							if (trace)
+							{
+								trace << (has_flag(flags, Flags::STREAMING) ? "STREAM " : "plain  ")
+									<< name
+									<< " | file " << header.width() << "x" << header.height()
+									<< " mips " << header.mip_levels()
+									<< " arr " << header.array_size()
+									<< " cube " << (header.is_cubemap() ? 1 : 0)
+									<< " fmt " << (uint32_t)desc.format
+									<< " | upload " << desc.width << "x" << desc.height
+									<< " mips " << desc.mip_levels
+									<< " mip_offset " << mip_offset
+									<< " | filesize " << filesize
+									<< " needs " << last_byte_needed
+									<< (last_byte_needed > filesize ? "   *** OVERRUN ***" : "")
+									<< std::endl; // endl flushes: we may die on the next statement
+							}
 						}
 
 						success = device->CreateTexture(&desc, initdata + mip_offset, &resource->texture);
@@ -1119,6 +1177,72 @@ namespace wi
 		std::atomic<uint32_t> gg_dbg_stream_dec_out{ 0 };       // streamed OUT
 		std::atomic<uint32_t> gg_dbg_stream_max_req{ 0 };       // largest requested resolution seen (all-time)
 
+		// GGMAX 1.73 DIAG: per-load breadcrumb trace of streaming DDS uploads (stream_load.txt).
+		// Off by default — it writes a flushed line per enrolled texture, which is far too much
+		// I/O for normal running. Harness SET_TEXSTREAMTRACE 1 arms it before a suspect load.
+		bool gg_stream_load_trace = false;
+
+		// GGMAX 1.73: streaming bounds-guard reporting. Every rejection the streaming job makes
+		// is logged once per (resource, reason) to stream_guard.txt next to the EXE, with the
+		// numbers needed to tell WHICH invariant broke. On a healthy build this file never
+		// appears — same tripwire discipline as alloc_tripwire.txt / resource_hijack.txt.
+		std::atomic<uint32_t> gg_dbg_stream_guard_rejects{ 0 };
+		static std::mutex gg_stream_guard_mutex;
+		static std::set<std::string> gg_stream_guard_seen;
+		void gg_stream_guard_report(
+			const std::string& name,
+			const std::string& container,
+			const char* reason,
+			int mip_offset,
+			uint32_t mip_levels,
+			uint32_t mip_count,
+			size_t container_filesize,
+			size_t mip_data_offset,
+			size_t reserved,
+			size_t required_bytes = 0,
+			size_t available_bytes = 0
+		)
+		{
+			gg_dbg_stream_guard_rejects.fetch_add(1, std::memory_order_relaxed);
+
+			std::scoped_lock lock(gg_stream_guard_mutex);
+			const std::string key = name + "|" + reason;
+			if (!gg_stream_guard_seen.insert(key).second)
+				return; // already reported this resource for this reason
+
+			// The on-disk size is the whole point of the SHORT READ case: it is what the loader's
+			// recorded container_filesize is being compared against.
+			size_t ondisk_size = 0;
+			{
+				std::ifstream probe(container, std::ios::binary | std::ios::ate);
+				if (probe.is_open())
+					ondisk_size = (size_t)probe.tellg();
+			}
+
+			const std::string report_path = wi::helper::GetDirectoryFromPath(wi::helper::GetExecutablePath()) + "stream_guard.txt";
+			std::ofstream report(report_path, std::ios::app);
+			if (!report)
+				return;
+			report << "REJECT [" << reason << "]\n";
+			report << "  resource        : " << name << "\n";
+			report << "  container       : " << container << "\n";
+			report << "  mip_offset      : " << mip_offset << "  mip_levels " << mip_levels << "  mip_count " << mip_count << "\n";
+			report << "  container_size  : " << container_filesize << "   on-disk now " << ondisk_size;
+			if (ondisk_size != 0 && container_filesize != 0 && ondisk_size != container_filesize)
+				report << "   *** DISK SIZE DIFFERS BY " << (long long)ondisk_size - (long long)container_filesize << " ***";
+			report << "\n";
+			report << "  mip_data_offset : " << mip_data_offset << "\n";
+			if (required_bytes != 0 || available_bytes != 0)
+			{
+				report << "  required bytes  : " << required_bytes << "\n";
+				report << "  available bytes : " << available_bytes;
+				if (required_bytes > available_bytes)
+					report << "   *** SHORT BY " << (required_bytes - available_bytes) << " ***";
+				report << "\n";
+			}
+			report << "\n";
+		}
+
 		// GGMAX 1.44: see wiResourceManager.h. Implemented below UpdateStreamingResources
 		// (needs streaming_ctx / replacement queue visibility).
 
@@ -1304,25 +1428,75 @@ namespace wi
 						if (ComputeTextureMemorySizeInBytes(desc) <= streaming_texture_min_size)
 							continue; // Don't reduce the texture below, because of min resource alignment, this would not reduce memory usage further
 						// Mip level streaming OUT, fast decay:
+						// GGMAX 1.73: same block-alignment rule as the initial load reduction —
+						// halving a BC texture's top mip below block alignment (500 -> 250) makes
+						// the desc illegal and GetCopyableFootprints returns -1 sentinels. See the
+						// load-time reduction in LoadResourceDirectly for the full explanation.
+						const uint32_t format_block_size = GetFormatBlockSize(desc.format);
+						const int mip_offset_before = mip_offset;
 						while (ComputeTextureMemorySizeInBytes(desc) > streaming_texture_min_size && desc.width > requested_resolution && desc.height > requested_resolution)
 						{
-							desc.width >>= 1;
-							desc.height >>= 1;
+							const uint32_t next_width = desc.width >> 1;
+							const uint32_t next_height = desc.height >> 1;
+							if (format_block_size > 1
+								&& ((next_width % format_block_size) != 0 || (next_height % format_block_size) != 0))
+							{
+								break;
+							}
+							desc.width = next_width;
+							desc.height = next_height;
 							desc.mip_levels--;
 							mip_offset++;
+						}
+						if (mip_offset == mip_offset_before)
+						{
+							// GGMAX 1.73: nothing could be shed — e.g. a 500x500 BC texture, whose
+							// every smaller mip is block-misaligned. Without this the desc is
+							// unchanged and we fall through to build a byte-identical replacement
+							// texture on every streaming pass: a full file re-read plus re-upload,
+							// forever, for no memory saved.
+							continue;
 						}
 						dc_out++; // GGMAX 1.69
 					}
 					if (desc.mip_levels <= resource->streaming_texture.mip_count)
 					{
+						// GGMAX 1.73: mip_offset indexes a fixed 16-entry array. Every value here is
+						// derived from a file header and a desc that other code can mutate, so range
+						// check it rather than trusting it — reading streaming_data[] out of bounds
+						// yields a garbage data_offset and turns the upload below into a wild pointer.
+						if (mip_offset < 0
+						 || mip_offset >= (int)arraysize(resource->streaming_texture.streaming_data)
+						 || (size_t)mip_offset + desc.mip_levels > arraysize(resource->streaming_texture.streaming_data)
+						 || (uint32_t)mip_offset + desc.mip_levels > resource->streaming_texture.mip_count)
+						{
+							gg_stream_guard_report(resource->filename, resource->container_filename,
+								"mip_offset out of range", mip_offset, desc.mip_levels,
+								resource->streaming_texture.mip_count, 0, 0, 0);
+							continue;
+						}
+
 						// memory offset of the first mip level in current streaming range:
 						const size_t mip_data_offset = resource->streaming_texture.streaming_data[mip_offset].data_offset;
 						const uint8_t* firstmipdata = resource->filedata.data();
+
+						// GGMAX 1.73: how many bytes are actually readable from firstmipdata. The
+						// stock code never tracked this, so a container file that no longer matches
+						// the size recorded at load time (short read, replaced/truncated file) fed
+						// out-of-range pointers straight into CreateTexture's memcpy.
+						size_t available_bytes = 0;
 
 						static wi::vector<uint8_t> streaming_file; // make this static to not reallocate for each file loading
 						if (firstmipdata == nullptr)
 						{
 							// If file data is not available, then open the file partially with the streaming file parameters:
+							if (resource->container_filesize < mip_data_offset)
+							{
+								gg_stream_guard_report(resource->filename, resource->container_filename,
+									"container_filesize < mip_data_offset", mip_offset, desc.mip_levels,
+									resource->streaming_texture.mip_count, resource->container_filesize, mip_data_offset, 0);
+								continue;
+							}
 							size_t filesize = resource->container_filesize - mip_data_offset;
 							size_t fileoffset = resource->container_fileoffset + mip_data_offset;
 							if (!wi::helper::FileRead(
@@ -1332,24 +1506,61 @@ namespace wi
 								fileoffset
 							))
 							{
+								gg_stream_guard_report(resource->filename, resource->container_filename,
+									"FileRead failed", mip_offset, desc.mip_levels,
+									resource->streaming_texture.mip_count, resource->container_filesize, mip_data_offset, 0);
 								continue;
 							}
 							firstmipdata = streaming_file.data();
+							available_bytes = streaming_file.size();
 						}
 						else
 						{
 							// If file data is available, we can use that for streaming:
+							if (resource->filedata.size() <= mip_data_offset)
+							{
+								gg_stream_guard_report(resource->filename, resource->container_filename,
+									"retained filedata shorter than mip offset", mip_offset, desc.mip_levels,
+									resource->streaming_texture.mip_count, resource->filedata.size(), mip_data_offset, 0);
+								continue;
+							}
 							firstmipdata += mip_data_offset;
+							available_bytes = resource->filedata.size() - mip_data_offset;
 						}
 
 						// Convert relative to absolute GPU initialization data
 						SubresourceData initdata[16] = {};
+						size_t required_bytes = 0;
+						bool offsets_sane = true;
 						for (uint32_t mip = 0; mip < desc.mip_levels; ++mip)
 						{
 							auto& streaming_data = resource->streaming_texture.streaming_data[mip_offset + mip];
-							initdata[mip].data_ptr = firstmipdata + streaming_data.data_offset - mip_data_offset;
+							// Offsets are absolute within the container; anything before the first mip
+							// of this range would index behind the buffer we just read.
+							if (streaming_data.data_offset < mip_data_offset)
+							{
+								offsets_sane = false;
+								break;
+							}
+							const size_t relative_offset = streaming_data.data_offset - mip_data_offset;
+							required_bytes = std::max(required_bytes, relative_offset + streaming_data.slice_pitch);
+							initdata[mip].data_ptr = firstmipdata + relative_offset;
 							initdata[mip].row_pitch = streaming_data.row_pitch;
 							initdata[mip].slice_pitch = streaming_data.slice_pitch;
+						}
+
+						// GGMAX 1.73: THE guard. CreateTexture memcpys slice_pitch bytes per mip out
+						// of this buffer; if the file gave us fewer bytes than the header promised,
+						// that read runs off the end of the heap block and faults inside memcpy.
+						// Skipping the resource costs one texture staying at its current mip level.
+						if (!offsets_sane || required_bytes > available_bytes)
+						{
+							gg_stream_guard_report(resource->filename, resource->container_filename,
+								offsets_sane ? "SHORT READ - required > available" : "mip data_offset before range start",
+								mip_offset, desc.mip_levels, resource->streaming_texture.mip_count,
+								resource->container_filesize, mip_data_offset, 0,
+								required_bytes, available_bytes);
+							continue;
 						}
 
 						// The replacement struct will store the newly created texture until replacement can be made later:

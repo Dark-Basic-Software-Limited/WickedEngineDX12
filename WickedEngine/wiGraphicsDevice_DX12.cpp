@@ -73,6 +73,11 @@ static std::map<const void*, GGVramRec>* gg_vram_live = nullptr;
 static D3D12MA::Allocator* gg_vram_allocator = nullptr;
 std::atomic<unsigned long long> gg_vram_swapchain_bytes{ 0 };
 
+// GGMAX 1.73 DIAG: when armed, every texture upload dumps its footprint table to
+// last_upload.txt (see CreateTexture). Harness SET_TEXSTREAMTRACE arms it alongside the
+// resource-manager per-load trace. Off by default — it rewrites a file per texture.
+bool gg_upload_trace = false;
+
 void gg_vram_register(const void* key, const GGVramRec& rec)
 {
 	std::scoped_lock lck(gg_vram_mutex);
@@ -4093,12 +4098,64 @@ std::mutex queue_locker;
 					mapped_data = texture->mapped_data;
 				}
 
+				// GGMAX 1.73 DIAG: dump the destination footprint table against the source pitches
+				// for the texture about to be uploaded. Overwritten per texture (cheap, always
+				// holds the LAST one), so if the memcpy below faults, last_upload.txt is the
+				// autopsy: which subresource, what the device expected, what the file supplied.
+				if (gg_upload_trace)
+				{
+					const std::string dump_path = wi::helper::GetDirectoryFromPath(wi::helper::GetExecutablePath()) + "last_upload.txt";
+					std::ofstream dump(dump_path, std::ios::trunc);
+					if (dump)
+					{
+						dump << "texture " << desc->width << "x" << desc->height
+							<< " mips " << desc->mip_levels
+							<< " arr " << desc->array_size
+							<< " fmt " << (uint32_t)desc->format
+							<< " subresources " << internal_state->footprints.size()
+							<< " total_size " << internal_state->total_size << "\n";
+						for (size_t i = 0; i < internal_state->footprints.size(); ++i)
+						{
+							const auto& fp = internal_state->footprints[i];
+							// Bytes MemcpySubresource will touch in the SOURCE for this subresource.
+							const unsigned long long src_span =
+								(unsigned long long)initial_data[i].row_pitch * (internal_state->numRows[i] > 0 ? internal_state->numRows[i] - 1 : 0)
+								+ internal_state->rowSizesInBytes[i]
+								+ (unsigned long long)initial_data[i].slice_pitch * (fp.Footprint.Depth > 0 ? fp.Footprint.Depth - 1 : 0);
+							dump << "  [" << i << "] dest " << fp.Footprint.Width << "x" << fp.Footprint.Height
+								<< "x" << fp.Footprint.Depth
+								<< " destRowPitch " << fp.Footprint.RowPitch
+								<< " numRows " << internal_state->numRows[i]
+								<< " rowSizeBytes " << internal_state->rowSizesInBytes[i]
+								<< " | src row_pitch " << initial_data[i].row_pitch
+								<< " slice_pitch " << initial_data[i].slice_pitch
+								<< " | SRC SPAN " << src_span;
+							if (initial_data[i].slice_pitch != 0 && src_span > initial_data[i].slice_pitch)
+								dump << "   *** READS " << (src_span - initial_data[i].slice_pitch) << " BEYOND ITS OWN SLICE ***";
+							dump << "\n";
+						}
+						dump.flush();
+					}
+				}
+
 				for (size_t i = 0; i < internal_state->footprints.size(); ++i)
 				{
 					D3D12_SUBRESOURCE_DATA data = _ConvertSubresourceData(initial_data[i]);
 
-					if (internal_state->rowSizesInBytes[i] > (SIZE_T)-1)
+					// GGMAX 1.73: GetCopyableFootprints signals "this desc is not copyable" by
+					// writing UINT64_MAX / UINT_MAX sentinels rather than returning a failure.
+					// Upstream's check is `> (SIZE_T)-1`, which on a 64-bit build compares
+					// UINT64 against UINT64_MAX and can NEVER be true — so the sentinel sailed
+					// through and MemcpySubresource looped 4,294,967,295 rows off the end of the
+					// source buffer. Compare against the sentinel itself instead. (Root cause of
+					// the "Trapped" load crash was an illegal BC mip size upstream of here; this
+					// is the backstop that keeps any future bad desc from being a memory fault.)
+					if (internal_state->rowSizesInBytes[i] >= ~0ull
+						|| internal_state->numRows[i] == ~0u
+						|| internal_state->total_size >= ~0ull)
+					{
 						continue;
+					}
 					D3D12_MEMCPY_DEST DestData = {};
 					DestData.pData = (void*)((UINT64)mapped_data + internal_state->footprints[i].Offset);
 					DestData.RowPitch = (SIZE_T)internal_state->footprints[i].Footprint.RowPitch;

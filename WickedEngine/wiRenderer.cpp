@@ -2941,6 +2941,26 @@ BufferSuballocation SuballocateGPUBuffer(uint64_t size)
 	}
 	return allocation;
 }
+// GGMAX 1.70 (VRAM census): report how much of the suballocator's 256MB blocks is actually
+// in use. Blocks are only released when COMPLETELY empty, so a few pinned allocations can
+// hold a whole block — this is the measurement that tells free-space from fragmentation.
+void GG_GetSuballocatorStats(unsigned int* out_blocks, unsigned long long* out_total_bytes, unsigned long long* out_free_bytes)
+{
+	std::scoped_lock lock(suballocator.locker);
+	unsigned long long total = 0, freebytes = 0;
+	for (auto& block : suballocator.blocks)
+	{
+		total += block.allocator.total_size_in_bytes();
+		if (block.allocator.allocator != nullptr)
+		{
+			freebytes += (unsigned long long)block.allocator.allocator->allocator.storageReport().totalFreeSpace * (unsigned long long)block.allocator.page_size;
+		}
+	}
+	if (out_blocks) *out_blocks = (unsigned int)suballocator.blocks.size();
+	if (out_total_bytes) *out_total_bytes = total;
+	if (out_free_bytes) *out_free_bytes = freebytes;
+}
+
 void UpdateGPUSuballocator()
 {
 	std::scoped_lock lock(suballocator.locker);

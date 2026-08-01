@@ -42,6 +42,148 @@ using namespace Microsoft::WRL;
 std::atomic<unsigned long long> gg_dbg_pso_compiles{ 0 };
 std::atomic<unsigned long long> gg_dbg_pso_compile_us{ 0 };
 std::atomic<unsigned long long> gg_dbg_tex_creates{ 0 };
+std::atomic<unsigned long long> gg_dbg_pso_creates{ 0 }; // GGMAX 1.70: pipeline states created (each costs driver-side video memory the resource census cannot see)
+
+// ============================================================================
+// GGMAX 1.70: VRAM CENSUS (global namespace; driven by harness DUMP_VRAM)
+// Every D3D12MA-backed allocation (texture / buffer / raytracing structure) is
+// recorded at create time with its ALLOCATED byte size + full desc, and its debug
+// name is filled in when SetName arrives (Wicked names most internal resources;
+// wi::resourcemanager names content textures with their source file path). The
+// record is erased in ~Resource_DX12. Cost is one map insert/erase per resource
+// LIFETIME — nothing per frame. Aliased resources record 0 bytes (they share
+// another resource's memory) but are flagged so the dump can show them.
+// Heap type matters for the report: usage=DEFAULT is true VRAM, UPLOAD/READBACK
+// live in system memory, so the analysis can split them.
+// ============================================================================
+#include <vector>
+#include <cstdio>
+struct GGVramRec
+{
+	unsigned long long bytes = 0;      // allocated bytes (0 when aliased onto another resource)
+	unsigned long long desc_size = 0;  // buffers: requested size
+	unsigned int kind = 0;             // 0=texture 1=buffer 2=raytracing
+	unsigned int width = 0, height = 0, depth = 0, mips = 0, arraysize = 0, samples = 0;
+	unsigned int format = 0, bind_flags = 0, misc_flags = 0, usage = 0, aliased = 0;
+	char name[192] = {};
+};
+static std::mutex gg_vram_mutex;
+// Heap-allocated and never freed: resources can outlive static destruction order.
+static std::map<const void*, GGVramRec>* gg_vram_live = nullptr;
+static D3D12MA::Allocator* gg_vram_allocator = nullptr;
+std::atomic<unsigned long long> gg_vram_swapchain_bytes{ 0 };
+
+void gg_vram_register(const void* key, const GGVramRec& rec)
+{
+	std::scoped_lock lck(gg_vram_mutex);
+	if (gg_vram_live == nullptr) gg_vram_live = new std::map<const void*, GGVramRec>();
+	(*gg_vram_live)[key] = rec;
+}
+void gg_vram_setname(const void* key, const char* name)
+{
+	if (name == nullptr) return;
+	std::scoped_lock lck(gg_vram_mutex);
+	if (gg_vram_live == nullptr) return;
+	auto it = gg_vram_live->find(key);
+	if (it == gg_vram_live->end()) return;
+	strncpy_s(it->second.name, sizeof(it->second.name), name, _TRUNCATE);
+}
+void gg_vram_unregister(const void* key)
+{
+	std::scoped_lock lck(gg_vram_mutex);
+	if (gg_vram_live == nullptr) return;
+	gg_vram_live->erase(key);
+}
+
+// Aggregate totals for the harness GET_PERF_DATA VRAM line (no file IO).
+void GG_GetVRAMTotals(unsigned long long* out_census, unsigned long long* out_default_heap,
+	unsigned long long* out_driver_usage, unsigned long long* out_driver_budget, unsigned int* out_count)
+{
+	unsigned long long total = 0, def = 0; unsigned int count = 0;
+	{
+		std::scoped_lock lck(gg_vram_mutex);
+		if (gg_vram_live != nullptr)
+		{
+			for (auto& x : *gg_vram_live)
+			{
+				total += x.second.bytes;
+				if (x.second.usage == 0) def += x.second.bytes;
+				count++;
+			}
+		}
+	}
+	unsigned long long usage = 0, budget = 0;
+	if (gg_vram_allocator != nullptr)
+	{
+		D3D12MA::Budget local = {};
+		gg_vram_allocator->GetBudget(&local, nullptr);
+		usage = local.UsageBytes;
+		budget = local.BudgetBytes;
+	}
+	if (out_census) *out_census = total;
+	if (out_default_heap) *out_default_heap = def;
+	if (out_driver_usage) *out_driver_usage = usage;
+	if (out_driver_budget) *out_driver_budget = budget;
+	if (out_count) *out_count = count;
+}
+
+// Dump every live allocation, largest first. Columns are fixed and space separated
+// so the analysis can awk them; the name is last, quoted (it can contain spaces).
+//   kind bytes w h d mips arr samples fmt bind misc usage alias "name"
+void GG_DumpVRAMCensus(const char* path)
+{
+	std::vector<GGVramRec> snapshot;
+	unsigned long long census_total = 0, census_default = 0, census_other = 0;
+	{
+		std::scoped_lock lck(gg_vram_mutex);
+		if (gg_vram_live != nullptr)
+		{
+			snapshot.reserve(gg_vram_live->size());
+			for (auto& x : *gg_vram_live)
+			{
+				snapshot.push_back(x.second);
+				census_total += x.second.bytes;
+				// Usage enum: 0=DEFAULT (device-local VRAM), 1=UPLOAD, 2=READBACK
+				if (x.second.usage == 0) census_default += x.second.bytes; else census_other += x.second.bytes;
+			}
+		}
+	}
+	std::sort(snapshot.begin(), snapshot.end(), [](const GGVramRec& a, const GGVramRec& b) { return a.bytes > b.bytes; });
+
+	FILE* f = fopen(path, "w");
+	if (f == nullptr) return;
+
+	unsigned long long ma_alloc = 0, ma_block = 0, budget = 0, usage = 0;
+	if (gg_vram_allocator != nullptr)
+	{
+		D3D12MA::TotalStatistics stats = {};
+		gg_vram_allocator->CalculateStatistics(&stats);
+		ma_alloc = stats.Total.Stats.AllocationBytes;
+		ma_block = stats.Total.Stats.BlockBytes;
+		D3D12MA::Budget local = {};
+		gg_vram_allocator->GetBudget(&local, nullptr);
+		budget = local.BudgetBytes;
+		usage = local.UsageBytes;
+	}
+	fprintf(f, "CENSUS v1 records=%llu census_bytes=%llu census_default_heap=%llu census_upload_readback=%llu"
+		" d3d12ma_allocated=%llu d3d12ma_blocks=%llu driver_usage=%llu driver_budget=%llu swapchain=%llu\n",
+		(unsigned long long)snapshot.size(), census_total, census_default, census_other,
+		ma_alloc, ma_block, usage, budget, gg_vram_swapchain_bytes.load());
+	fprintf(f, "# kind bytes w h d mips arr samples fmt bind misc usage alias \"name\"\n");
+	for (const GGVramRec& r : snapshot)
+	{
+		const char* kindstr = (r.kind == 0) ? "T" : ((r.kind == 1) ? "B" : "A");
+		fprintf(f, "%s %llu %u %u %u %u %u %u %s 0x%X 0x%X %u %u \"%s\"\n",
+			kindstr,
+			r.bytes,
+			r.kind == 1 ? (unsigned int)(r.desc_size & 0xFFFFFFFF) : r.width,
+			r.height, r.depth, r.mips, r.arraysize, r.samples,
+			r.kind == 0 ? wi::graphics::GetFormatString((wi::graphics::Format)r.format) : "-",
+			r.bind_flags, r.misc_flags, r.usage, r.aliased,
+			r.name);
+	}
+	fclose(f);
+}
 
 namespace wi::graphics
 {
@@ -1415,6 +1557,7 @@ namespace dx12_internal
 
 		virtual ~Resource_DX12()
 		{
+			::gg_vram_unregister((const void*)this); // GGMAX 1.70: VRAM census
 			std::scoped_lock lck(allocationhandler->destroylocker);
 			uint64_t framecount = allocationhandler->framecount;
 			if (allocation) allocationhandler->destroyer_allocations.push_back(std::make_pair(allocation, framecount));
@@ -3329,6 +3472,11 @@ std::mutex queue_locker;
 		}
 #endif // PLATFORM_XBOX
 
+		// GGMAX 1.70: swapchain backbuffers are driver-owned (not D3D12MA allocations), so the
+		// census tracks them as a synthetic line item. GetFormatStride gives bytes per pixel.
+		gg_vram_swapchain_bytes.store((unsigned long long)desc->width * desc->height *
+			GetFormatStride(desc->format) * desc->buffer_count);
+
 		internal_state->dummyTexture.desc.format = desc->format;
 		internal_state->dummyTexture.desc.width = desc->width;
 		internal_state->dummyTexture.desc.height = desc->height;
@@ -3561,6 +3709,22 @@ std::mutex queue_locker;
 			uav_desc.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
 			uav_desc.Buffer.NumElements = uint32_t(desc->size / sizeof(uint32_t));
 			internal_state->uav_raw.init(this, uav_desc, internal_state->resource.Get());
+		}
+
+		// GGMAX 1.70: VRAM census registration
+		{
+			GGVramRec rec;
+			rec.kind = 1;
+			rec.bytes = internal_state->allocation ? internal_state->allocation->GetSize() : 0;
+			rec.aliased = (alias != nullptr) ? 1u : 0u;
+			rec.desc_size = buffer->desc.size;
+			rec.width = buffer->desc.stride;
+			rec.format = (unsigned int)buffer->desc.format;
+			rec.bind_flags = (unsigned int)buffer->desc.bind_flags;
+			rec.misc_flags = (unsigned int)buffer->desc.misc_flags;
+			rec.usage = (unsigned int)buffer->desc.usage;
+			::gg_vram_register((const void*)static_cast<const Resource_DX12*>(internal_state.get()), rec);
+			if (gg_vram_allocator == nullptr) gg_vram_allocator = allocationhandler->allocator.Get();
 		}
 
 		return SUCCEEDED(hr);
@@ -3983,6 +4147,26 @@ std::mutex queue_locker;
 			}
 		}
 
+		// GGMAX 1.70: VRAM census registration (records the FINAL desc, which CreateTexture may have adjusted)
+		{
+			GGVramRec rec;
+			rec.kind = 0;
+			rec.bytes = internal_state->allocation ? internal_state->allocation->GetSize() : 0;
+			rec.aliased = (alias != nullptr) ? 1u : 0u;
+			rec.width = texture->desc.width;
+			rec.height = texture->desc.height;
+			rec.depth = texture->desc.depth;
+			rec.mips = texture->desc.mip_levels;
+			rec.arraysize = texture->desc.array_size;
+			rec.samples = texture->desc.sample_count;
+			rec.format = (unsigned int)texture->desc.format;
+			rec.bind_flags = (unsigned int)texture->desc.bind_flags;
+			rec.misc_flags = (unsigned int)texture->desc.misc_flags;
+			rec.usage = (unsigned int)texture->desc.usage;
+			::gg_vram_register((const void*)static_cast<const Resource_DX12*>(internal_state.get()), rec);
+			if (gg_vram_allocator == nullptr) gg_vram_allocator = allocationhandler->allocator.Get();
+		}
+
 		return SUCCEEDED(hr);
 	}
 	bool GraphicsDevice_DX12::CreateShader(ShaderStage stage, const void* shadercode, size_t shadercode_size, Shader* shader) const
@@ -4124,6 +4308,7 @@ std::mutex queue_locker;
 	}
 	bool GraphicsDevice_DX12::CreatePipelineState(const PipelineStateDesc* desc, PipelineState* pso, const RenderPassInfo* renderpass_info) const
 	{
+		::gg_dbg_pso_creates.fetch_add(1, std::memory_order_relaxed); // GGMAX 1.70: PSO count (driver-side VRAM the census can't see)
 		auto internal_state = wi::allocator::make_shared<PipelineState_DX12>();
 		internal_state->allocationhandler = allocationhandler;
 		pso->internal_state = internal_state;
@@ -4504,6 +4689,15 @@ std::mutex queue_locker;
 		scratch_desc.size = (uint32_t)std::max(internal_state->info.ScratchDataSizeInBytes, internal_state->info.UpdateScratchDataSizeInBytes);
 
 		bvh->size = alignedSize + scratch_desc.size;
+
+		// GGMAX 1.70: VRAM census registration (the scratch buffer registers itself via CreateBuffer)
+		{
+			GGVramRec rec;
+			rec.kind = 2;
+			rec.bytes = internal_state->allocation ? internal_state->allocation->GetSize() : 0;
+			rec.desc_size = alignedSize;
+			::gg_vram_register((const void*)static_cast<const Resource_DX12*>(internal_state.get()), rec);
+		}
 
 		return CreateBuffer(&scratch_desc, nullptr, &internal_state->scratch);
 	}
@@ -5295,6 +5489,7 @@ std::mutex queue_locker;
 
 	void GraphicsDevice_DX12::SetName(GPUResource* pResource, const char* name) const
 	{
+		::gg_vram_setname((const void*)static_cast<const Resource_DX12*>(to_internal(pResource)), name); // GGMAX 1.70: VRAM census
 		wchar_t text[256];
 		if (wi::helper::StringConvert(name, text, arraysize(text)) > 0)
 		{

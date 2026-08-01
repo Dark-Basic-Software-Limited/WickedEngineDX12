@@ -44,6 +44,12 @@ namespace wi
 	                                        // coverage-neutral per halving; <2.0 = deliberate far
 	                                        // thinning (extra perf, visibly sparser far grass)
 
+	// GGMAX 1.70: allocate the per-system raytracing position copy (see CreateRenderData).
+	// FALSE for GameGuru MAX — no raytraced feature is enabled, so the hair BLAS is never
+	// built and that buffer was pure write-only overhead (~20% of every grass allocation).
+	// Set to true BEFORE level load if an RT path is ever turned on.
+	bool gg_hair_raytracing = false;
+
 	static DepthStencilState dss_default, dss_equal, dss_shadow;
 	static RasterizerState rs, ncrs, wirers, rs_shadow;
 	static BlendState bs;
@@ -211,7 +217,21 @@ namespace wi
 			ib_culled.size = ib_stride * gfx_indexcount;
 			prim_view.size = ib_stride * gfx_indexcount;
 			indirect_view.size = sizeof(IndirectDrawArgsIndexedInstanced);
-			vb_pos_raytracing.size = position_stride * gfx_vertexcount;
+			// GGMAX 1.70 (VRAM census): the raytracing position copy is a FULL second
+			// position buffer (12.2 MB per 100K-strand grass patch — 20% of this
+			// allocation) that is only ever consumed by the hair BLAS, which is only
+			// built when the scene has a TLAS (SurfelGI / DDGI / RT shadows / RTAO /
+			// RT reflections / lightmap bake). GameGuru MAX enables none of those, so
+			// on a grassy level this was ~0.5 GB of write-only memory.
+			// When gg_hair_raytracing is false we keep only a small scratch region:
+			// the simulate CS writes vertexBuffer_POS_RT unconditionally, but it is a
+			// TYPED buffer UAV (RWBuffer<float4>), and out-of-bounds typed-UAV writes
+			// are discarded by the hardware — so the shader needs no change and the
+			// few in-range writes land in scratch nobody reads.
+			// If an RT feature is ever switched on, flip gg_hair_raytracing before
+			// level load (CreateRenderData bakes the layout) — CreateRaytracingRenderData
+			// refuses to build a BLAS from a scratch-sized region.
+			vb_pos_raytracing.size = gg_hair_raytracing ? (position_stride * gfx_vertexcount) : position_stride * 4;
 
 			bd.size =
 				AlignTo(indirect_view.size, alignment) +
@@ -370,6 +390,11 @@ namespace wi
 	void HairParticleSystem::CreateRaytracingRenderData()
 	{
 		GraphicsDevice* device = wi::graphics::GetDevice();
+
+		// GGMAX 1.70: refuse to build a BLAS from the scratch-sized RT position region —
+		// with gg_hair_raytracing off there are no real positions to trace against.
+		if (!gg_hair_raytracing)
+			return;
 
 		if (device->CheckCapability(GraphicsDeviceCapability::RAYTRACING) && prim_view.IsValid())
 		{

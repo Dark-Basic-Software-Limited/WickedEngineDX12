@@ -86,6 +86,8 @@ namespace wi::renderer
 	//	while the small buffers can be allocated/deallocated from it with memory aliasing and also used regularly by themselves
 	BufferSuballocation SuballocateGPUBuffer(uint64_t size);
 	void UpdateGPUSuballocator(); // called every frame for deferred release of GPU suballocations
+	// GGMAX 1.70 (VRAM census): mesh-data suballocator occupancy — blocks (256MB each), total and free bytes
+	void GG_GetSuballocatorStats(unsigned int* out_blocks, unsigned long long* out_total_bytes, unsigned long long* out_free_bytes);
 
 	void ModifyObjectSampler(const wi::graphics::SamplerDesc& desc);
 

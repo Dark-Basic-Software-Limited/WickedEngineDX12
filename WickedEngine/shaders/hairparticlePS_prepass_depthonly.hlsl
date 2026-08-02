@@ -9,6 +9,14 @@ void main(VertexToPixel input, out uint coverage : SV_Coverage)
 
 	float alpha = 1;
 
+	// GGMAX 1.74 merged grass: per-strand texture, same reason as the prepass.
+	Texture2D<half4> ggtex;
+	[branch]
+	if (input.GGGetGrassTexture(ggtex))
+	{
+		alpha = ggtex.Sample(sampler_linear_clamp, input.tex.xy).a;
+	}
+	else
 	[branch]
 	if (material.textures[BASECOLORMAP].IsValid())
 	{

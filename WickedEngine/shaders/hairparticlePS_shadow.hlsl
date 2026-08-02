@@ -10,15 +10,25 @@ void main(VertexToPixel input)
 	
 	ShaderMaterial material = HairGetMaterial();
 
+	float bias = 0;
+	if (GetCamera().options & SHADERCAMERA_OPTION_DEDICATED_SHADOW_LODBIAS)
+	{
+		// Note: this hack is to improve the look of dedicated character shadow cascade which otherwise has too sharp grass shadows and cascade transition becomes too obvious
+		bias = 3.2;
+	}
+
+	// GGMAX 1.74 merged grass: the shadow cutout must use the strand's own sprite too, or blades
+	// cast the silhouette of whichever type happened to own the material.
+	Texture2D<half4> ggtex;
+	[branch]
+	if (input.GGGetGrassTexture(ggtex))
+	{
+		clip(ggtex.SampleBias(sampler_linear_clamp, input.tex.xy, bias).a - material.GetAlphaTest());
+	}
+	else
 	[branch]
 	if (material.textures[BASECOLORMAP].IsValid())
 	{
-		float bias = 0;
-		if (GetCamera().options & SHADERCAMERA_OPTION_DEDICATED_SHADOW_LODBIAS)
-		{
-			// Note: this hack is to improve the look of dedicated character shadow cascade which otherwise has too sharp grass shadows and cascade transition becomes too obvious
-			bias = 3.2;
-		}
 		clip(material.textures[BASECOLORMAP].SampleBias(sampler_linear_clamp, input.tex.xyxy, bias).a - material.GetAlphaTest());
 	}
 }

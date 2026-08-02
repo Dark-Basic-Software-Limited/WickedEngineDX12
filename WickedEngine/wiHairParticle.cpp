@@ -603,6 +603,31 @@ namespace wi
 			hcb.xHairGrassMapOriginX = hair.grass_map_origin_x;
 			hcb.xHairGrassMapOriginZ = hair.grass_map_origin_z;
 
+			// GGMAX 1.74: per-type table for merged grass. Only meaningful when grass_type is the
+			// merged sentinel; harmless otherwise (the shader never reads it in per-type mode).
+			// Entries beyond what the caller supplied keep their zero-initialised textureIndex,
+			// which the shader treats as "fall back to the material texture".
+			{
+				const size_t typecount = std::min(hair.grass_types.size(), (size_t)GG_HAIR_MAX_GRASS_TYPES);
+				for (size_t t = 0; t < typecount; ++t)
+				{
+					const HairParticleSystem::GrassTypeParams& src = hair.grass_types[t];
+					GGHairGrassType& dst = hcb.xHairGrassTypes[t];
+					dst.length = src.length;
+					dst.width = src.width;
+					dst.stiffness = src.stiffness;
+					dst.drag = src.drag;
+					dst.viewDistance = src.viewDistance;
+					dst.textureIndex = src.textureIndex;
+					dst.billboardCount = src.billboardCount;
+					dst.present = src.present ? 1.0f : 0.0f;
+				}
+				for (size_t t = typecount; t < (size_t)GG_HAIR_MAX_GRASS_TYPES; ++t)
+				{
+					hcb.xHairGrassTypes[t] = {};
+				}
+			}
+
 			// GG-MAX Stage B.10: altitude filter (only used when xHairGrassType != 0).
 			hcb.xHairGrassWaterHeight = hair.grass_water_height;
 			hcb.xHairGrassMinHeight = hair.grass_min_height;

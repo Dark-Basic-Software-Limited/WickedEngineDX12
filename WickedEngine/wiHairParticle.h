@@ -128,6 +128,26 @@ namespace wi
 		float grass_map_origin_z = 0.0f;
 		const wi::graphics::Texture* grass_visibility_texture = nullptr;
 
+		// GGMAX 1.74 MERGED GRASS (non-serialized). Set grass_type = GG_HAIR_GRASS_MERGED and fill
+		// grass_types[] to have ONE system represent every painted type in a terrain chunk: the
+		// simulate CS resolves each strand's type from the paint mask and indexes this table
+		// instead of discarding the strand. Measured on the benchmark scene the chunks carry 7-8
+		// types each, so the per-type split was allocating and simulating ~10x what it drew.
+		// Leave grass_type as a 1..N type index for the classic one-system-per-type behaviour.
+		struct GrassTypeParams
+		{
+			float length = 40.0f;
+			float width = 1.0f;          // already folded with the sprite aspect ratio by the caller
+			float stiffness = 9.0f;
+			float drag = 0.5f;
+			float viewDistance = 5000.0f;
+			uint32_t textureIndex = 0;   // bindless SRV descriptor index of the blade DDS; 0 = fall back to the material
+			uint32_t billboardCount = 2;
+			bool present = false;        // is this type actually painted in this chunk? absent types must not render
+
+		};
+		wi::vector<GrassTypeParams> grass_types;
+
 		// GG-MAX Stage B.10 (non-serialized): altitude filter — only active when grass_type != 0.
 		// Above water strands must sit in [grass_min_height, grass_max_height] (inclusive).
 		// Below water strands must sit in [grass_min_height_underwater, grass_max_height_underwater].

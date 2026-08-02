@@ -13,6 +13,15 @@ uint main(VertexToPixel input, out uint coverage : SV_Coverage) : SV_Target
 
 	half alpha = 1;
 
+	// GGMAX 1.74 merged grass: alpha must come from the SAME texture the lit pass will use, or
+	// the depth silhouette is cut from the wrong sprite.
+	Texture2D<half4> ggtex;
+	[branch]
+	if (input.GGGetGrassTexture(ggtex))
+	{
+		alpha = ggtex.Sample(sampler_linear_clamp, input.tex.xy).a;
+	}
+	else
 	[branch]
 	if (material.textures[BASECOLORMAP].IsValid())
 	{

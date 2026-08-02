@@ -30,6 +30,38 @@ struct HairParticleAtlasRect
 	float padding2;
 };
 
+// GGMAX 1.74 merged grass: one hair system per terrain CHUNK instead of one per
+// (chunk x painted type). Measured on the TESTPRO1 benchmark the chunks carry 7-8 painted
+// types each, so the per-type split was allocating ~10x the strand buffers actually needed
+// and running ~10x the strand physics, with all but one type per cell emitting degenerate
+// zero-area quads. In merged mode the simulate CS resolves each strand's type from the paint
+// map and indexes this table instead of killing the strand, so one system draws what N did.
+//
+// Placement is bit-identical, not merely equivalent: every per-type system in a chunk already
+// shared the same randomSeed, emitter mesh and index list, and strandCount is per CHUNK. So
+// strand i sits on the same triangle with the same barycentrics in every type's system, a
+// paint cell holds exactly one type, and the surviving sets are disjoint with union exactly
+// "strands on painted cells".
+#define GG_HAIR_MAX_GRASS_TYPES 88
+#define GG_HAIR_GRASS_MERGED 0xFFFFFFFFu   // xHairGrassType sentinel meaning "this system owns every type"
+
+struct GGHairGrassType
+{
+	float length;
+	float width;
+	float stiffness;
+	float drag;
+
+	float viewDistance;
+	uint textureIndex;      // bindless SRV descriptor index of this type's blade DDS
+	uint billboardCount;    // 1 for weed/kelp/seaweed, 2 for the rest
+	// 1 = this type is painted in this chunk, 0 = absent. Absent types must NOT render: the
+	// per-type build only ever created a system for types the chunk scan reported, so a cell
+	// naming an unscanned type drew nothing. Merged mode would happily draw it and read denser
+	// than the reference — measured +1.45 pp coverage on the flower benchmark before this gate.
+	float present;
+};
+
 CBUFFER(HairParticleCB, CBSLOT_OTHER_HAIRPARTICLE)
 {
 	ShaderTransform xHairTransform;
@@ -93,6 +125,10 @@ CBUFFER(HairParticleCB, CBSLOT_OTHER_HAIRPARTICLE)
 	float xHair_padding_alt2;
 
 	HairParticleAtlasRect xHairAtlasRects[64];
+
+	// GGMAX 1.74: per-type parameters, indexed by the strand's resolved grass type. Only read
+	// when xHairGrassType == GG_HAIR_GRASS_MERGED; costs 2816 B of a 64 KB budget.
+	GGHairGrassType xHairGrassTypes[GG_HAIR_MAX_GRASS_TYPES];
 };
 
 #endif // WI_SHADERINTEROP_HAIRPARTICLE_H

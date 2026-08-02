@@ -15,6 +15,15 @@ float4 main(VertexToPixel input) : SV_Target
 
 	half4 color = 1;
 
+	// GGMAX 1.74 merged grass: a merged chunk holds every painted type in one system, so the
+	// blade texture is chosen per strand rather than per material.
+	Texture2D<half4> ggtex;
+	[branch]
+	if (input.GGGetGrassTexture(ggtex) && (GetFrame().options & OPTION_BIT_DISABLE_ALBEDO_MAPS) == 0)
+	{
+		color = ggtex.Sample(sampler_linear_wrap, input.tex.xy);
+	}
+	else
 	[branch]
 	if (material.textures[BASECOLORMAP].IsValid() && (GetFrame().options & OPTION_BIT_DISABLE_ALBEDO_MAPS) == 0)
 	{

@@ -117,6 +117,11 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 Gid : SV_GroupID, uint groupIn
 	// the R8_UNORM byte at this strand's world XZ and zero strand_length when the cell
 	// is flattened, unpainted, or paints a different grass type than this entity owns.
 	// xHairGrassType == 0 disables the check entirely — preserves upstream Wicked hair.
+	// GGMAX 1.74: resolved grass type for this strand. In merged mode it is read from the paint
+	// map and drives every per-type parameter below; in per-type mode it stays at the entity's
+	// own type so the existing code path is untouched.
+	uint gg_resolved_type = (xHairGrassType == GG_HAIR_GRASS_MERGED) ? 0u : (xHairGrassType - 1u);
+
 	if (xHairGrassType != 0u)
 	{
 		float2 uv =
@@ -141,7 +146,26 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 Gid : SV_GroupID, uint groupIn
 			{
 				uint encoded = byteVal & 0x7Fu;
 				uint cellType = (encoded >= 2u) ? (encoded - 2u) : 0u;
-				if (encoded == 0u || (cellType + 1u) != xHairGrassType)
+				if (encoded == 0u)
+				{
+					strand_length = 0; // unpainted cell — no grass of any type here
+				}
+				else if (xHairGrassType == GG_HAIR_GRASS_MERGED)
+				{
+					// Merged: this system owns every type, so adopt the cell's type instead of
+					// killing the strand. This is the whole saving — the strands that used to be
+					// discarded here (one system per type meant ~7/8 of them on this content)
+					// were still allocated, still simulated, and still emitted degenerate quads.
+					gg_resolved_type = min(cellType, (uint)(GG_HAIR_MAX_GRASS_TYPES - 1));
+					// ...but only for types this chunk actually built. The per-type build made a
+					// system solely for scanned types, so a cell naming any other type rendered
+					// nothing; matching that keeps density identical instead of adding grass.
+					if (xHairGrassTypes[gg_resolved_type].present < 0.5)
+					{
+						strand_length = 0;
+					}
+				}
+				else if ((cellType + 1u) != xHairGrassType)
 				{
 					strand_length = 0;
 				}
@@ -189,9 +213,23 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 Gid : SV_GroupID, uint groupIn
 		}
 	}
 
+	// GGMAX 1.74: per-type parameters. In per-type mode these collapse to the entity's own
+	// uniforms, so the generated code is identical to before for every non-merged hair system.
+	const bool gg_merged = (xHairGrassType == GG_HAIR_GRASS_MERGED);
+	const float gg_length      = gg_merged ? xHairGrassTypes[gg_resolved_type].length       : xHairLength;
+	const float gg_width       = gg_merged ? xHairGrassTypes[gg_resolved_type].width        : (atlas_rect.aspect * xHairAspect);
+	const float gg_stiffness   = gg_merged ? xHairGrassTypes[gg_resolved_type].stiffness    : xHairStiffness;
+	const float gg_drag        = gg_merged ? xHairGrassTypes[gg_resolved_type].drag         : xHairDrag;
+	const float gg_viewdist    = gg_merged ? xHairGrassTypes[gg_resolved_type].viewDistance : xHairViewDistance;
+	// Billboard count is STRUCTURAL: the vertex/index stride per strand is fixed at
+	// xHairBillboardCount (the max across the chunk's types), so a strand whose type wants
+	// fewer must still occupy its slots — the extras collapse to zero area below rather than
+	// shortening the stride, which would corrupt every later strand's vertex range.
+	const uint gg_billboards   = gg_merged ? min(xHairGrassTypes[gg_resolved_type].billboardCount, xHairBillboardCount) : xHairBillboardCount;
+
 	float3 diff = GetCamera().position - base;
 	const float distsq = dot(diff, diff);
-	const bool distance_culled = distsq > sqr(xHairViewDistance);
+	const bool distance_culled = distsq > sqr(gg_viewdist);
 
 	// GGMAX 1.49b grass strand LOD (motion-clean rework of 1.49). Two mechanisms, both pure
 	// functions of (strand id hash, camera distance) so a parked camera is bit-stable:
@@ -206,7 +244,15 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 Gid : SV_GroupID, uint groupIn
 	//    velocity spike for TAA).
 	bool gg_lod_dropped = false;
 	half gg_lod_boost = 1;
-	if (xHairGGLodStep2Dist > 0)
+	// GGMAX 1.74: the host computes the LOD step distances from the SYSTEM's viewDistance, which
+	// in merged mode is the max across the chunk's types. Rescale per strand to its own type's
+	// view distance, or a type with a deliberately shorter range (GG halves it for FLOWER) would
+	// keep its strands far past where the per-type build dropped them — measured as +1.8 pp
+	// coverage on the pink-flower benchmark, i.e. visibly denser rather than identical.
+	const float gg_lod_scale = gg_merged ? (gg_viewdist / max(xHairViewDistance, 1.0f)) : 1.0f;
+	const float gg_lod_step2 = xHairGGLodStep2Dist * gg_lod_scale;
+	const float gg_lod_step4 = xHairGGLodStep4Dist * gg_lod_scale;
+	if (gg_lod_step2 > 0)
 	{
 		uint gg_lod_hash = DTid.x * 2654435761u;
 		gg_lod_hash ^= gg_lod_hash >> 16;
@@ -214,19 +260,19 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 Gid : SV_GroupID, uint groupIn
 		// per-strand jitter in [0.85, 1.15] — each strand drops at its own radius inside the band
 		const float gg_j2 = 0.85 + 0.3 * (float)((gg_lod_hash >> 2) & 1023u) / 1023.0;
 		const float gg_j4 = 0.85 + 0.3 * (float)((gg_lod_hash >> 12) & 1023u) / 1023.0;
-		const bool gg_has4 = xHairGGLodStep4Dist > 0; // hardening: step4<=0 must mean "no 4x stage", not "drop everywhere"
+		const bool gg_has4 = gg_lod_step4 > 0; // hardening: step4<=0 must mean "no 4x stage", not "drop everywhere"
 		if (gg_lod_hash & 1u)
-			gg_lod_dropped = gg_dist > xHairGGLodStep2Dist * gg_j2;
+			gg_lod_dropped = gg_dist > gg_lod_step2 * gg_j2;
 		else if ((gg_lod_hash & 2u) && gg_has4)
-			gg_lod_dropped = gg_dist > xHairGGLodStep4Dist * gg_j4;
+			gg_lod_dropped = gg_dist > gg_lod_step4 * gg_j4;
 		// EXACT coverage compensation (adversarial-review fix): survivors widen by
 		// 1/survivorFraction, ramped over the SAME [0.85,1.15]*R window the drops occupy.
 		// t = fraction of the band's droppers already gone at this distance (uniform jitter
 		// makes that linear in d); each band loses half its remaining population, so the
 		// exact per-band factor is hyperbolic 1/(1-0.5t), hitting exactly 2.0 per halving
 		// (the earlier linear ramp over a wider window left a +16%/-26% coverage wiggle).
-		const float gg_t2 = saturate((gg_dist / xHairGGLodStep2Dist - 0.85) / 0.3);
-		const float gg_t4 = gg_has4 ? saturate((gg_dist / xHairGGLodStep4Dist - 0.85) / 0.3) : 0.0;
+		const float gg_t2 = saturate((gg_dist / gg_lod_step2 - 0.85) / 0.3);
+		const float gg_t4 = gg_has4 ? saturate((gg_dist / gg_lod_step4 - 0.85) / 0.3) : 0.0;
 		const float gg_exact = (1.0 / (1.0 - 0.5 * gg_t2)) * (1.0 / (1.0 - 0.5 * gg_t4)); // 1 -> 4
 		// the knob scales the widening: 2.0 = exactly coverage-neutral (the default),
 		// below 2.0 = deliberate far-field thinning for extra perf
@@ -237,7 +283,7 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 Gid : SV_GroupID, uint groupIn
 	//	intentionally overestimated, to not disappear as soon in different views (shadow map, etc)
 	ShaderSphere sphere;
 	sphere.center = base;
-	sphere.radius = xHairLength;
+	sphere.radius = gg_length; // GGMAX 1.74: cull radius must follow the strand's own type length
 	//draw_sphere(sphere.center, sphere.radius);
 	const bool visible = !distance_culled && !gg_lod_dropped && GetCamera().frustum.intersects(sphere);
 		
@@ -281,10 +327,10 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 Gid : SV_GroupID, uint groupIn
 		return;
 
 	half len = lerp(1, rng.next_float(), saturate(xHairRandomness)) * strand_length;
-	len *= xHairLength;
+	len *= gg_length;
 	len *= atlas_rect.size;
 	len /= (half)xHairSegmentCount;
-	float2 frame = float2(atlas_rect.aspect * xHairAspect * xHairSegmentCount, 1) * len * 0.5;
+	float2 frame = float2(gg_width * xHairSegmentCount, 1) * len * 0.5;
 	frame.x *= gg_lod_boost; // GGMAX 1.49: surviving far strands widen to preserve coverage
 	const float segment_radius = max(frame.x, frame.y);
 
@@ -306,6 +352,14 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 Gid : SV_GroupID, uint groupIn
 	{
 		half siz = billboardID == 0 ? 1 : lerp(0.2, 1, rng.next_float());
 		half rot = billboardID == 0 ? 0 : (rng.next_float() * PI);
+		// GGMAX 1.74: a merged chunk's stride is the MAX billboard count across its types, so a
+		// type that wants fewer collapses its surplus billboards to zero area. The rng calls above
+		// still run unconditionally, which keeps the random sequence — and therefore every other
+		// billboard's variation — identical to the per-type build.
+		if (billboardID >= gg_billboards)
+		{
+			siz = 0;
+		}
 		half2 rot_sincos;
 		sincos(rot, rot_sincos.x, rot_sincos.y);
 		half3x3 variationMatrix = half3x3(
@@ -340,7 +394,11 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 Gid : SV_GroupID, uint groupIn
 			}
 			
 			vertexBuffer_POS[v0] = float4(position, 0);
-			vertexBuffer_NOR[v0] = half4(target, 0);
+			// GGMAX 1.74: .w carries the strand's grass type to the pixel shaders so each blade
+			// samples its own texture. The buffer is R8G8B8A8_SNORM and the VS reads only .xyz,
+			// so this channel was genuinely unused. Encode as (type+1)/127 — an exact SNORM
+			// integer step — and 0 keeps "no per-strand type" for stock hair.
+			vertexBuffer_NOR[v0] = half4(target, gg_merged ? ((gg_resolved_type + 1u) / 127.0) : 0);
 			vertexBuffer_UVS[v0] = uv.xyxy; // a second uv set could be used here
 			
 			if (distance_culled)
@@ -356,8 +414,8 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 Gid : SV_GroupID, uint groupIn
 	const half dt = clamp(GetFrame().delta_time, 0, 1.0 / 30.0); // clamp delta time to avoid simulation blowing up
 
 	const half gravityPower = xHairGravityPower;
-	const half stiffnessForce = xHairStiffness;
-	const half dragForce = xHairDrag;
+	const half stiffnessForce = gg_stiffness;
+	const half dragForce = gg_drag;
 	const half3 boneAxis = target;
 	const half boneLength = len;
 	
@@ -547,7 +605,7 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 Gid : SV_GroupID, uint groupIn
 				}
 			
 				vertexBuffer_POS[v0] = float4(position, 0);
-				vertexBuffer_NOR[v0] = half4(normal, 0);
+				vertexBuffer_NOR[v0] = half4(normal, gg_merged ? ((gg_resolved_type + 1u) / 127.0) : 0); // GGMAX 1.74: see above
 				vertexBuffer_UVS[v0] = uv.xyxy; // a second uv set could be used here
 			
 				if (distance_culled)

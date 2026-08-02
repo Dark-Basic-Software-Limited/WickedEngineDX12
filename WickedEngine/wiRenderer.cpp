@@ -200,6 +200,9 @@ float DDGI_BLEND_SPEED = 0.1f;
 float GI_BOOST = 1.0f;
 bool MESH_SHADER_ALLOWED = false;
 bool MESHLET_OCCLUSION_CULLING = false;
+// GGMAX 1.77: drop object-PSO permutations that GetObjectPSO can never select (see LoadShaders).
+// Revert switch only — there is no reason to turn this off outside of a bisect.
+bool gg_pso_trim = true;
 std::atomic<size_t> SHADER_ERRORS{ 0 };
 std::atomic<size_t> SHADER_MISSING{ 0 };
 bool VXGI_ENABLED = false;
@@ -2035,12 +2038,27 @@ void LoadShaders()
 	{
 		for (uint32_t shaderType = 0; shaderType < MaterialComponent::SHADERTYPE_COUNT; ++shaderType)
 		{
-			for (uint32_t mesh_shader = 0; mesh_shader <= (device->CheckCapability(GraphicsDeviceCapability::MESH_SHADER) ? 1u : 0u); ++mesh_shader)
+			// GGMAX 1.77: every object PSO here is created WITH a renderpass_info, which means the
+			// DX12 backend builds a real ID3D12PipelineState immediately — driver-side video memory
+			// the resource census cannot see, and measured at ~1.4 GB across ~14k pipelines. Two of
+			// the permutation axes produce pipelines that GetObjectPSO can never select:
+			//
+			//  * mesh_shader was gated on the GPU CAPABILITY, but selection uses IsMeshShaderAllowed()
+			//    (MESH_SHADER_ALLOWED, which MAX never turns on). On any mesh-shader-capable card that
+			//    built a complete second set of object pipelines that nothing could ever bind.
+			//  * cullMode ran 0..3, but ObjectRenderingVariant::cullmode is filled only from
+			//    CullMode NONE/FRONT/BACK (0..2) — the fourth value is unreachable by lookup, and its
+			//    rasterizer state is a duplicate of BACK anyway.
+			//
+			// Gate both on what can actually be selected. gg_pso_trim exists purely as a revert switch.
+			const uint32_t mesh_shader_max =
+				((!gg_pso_trim || MESH_SHADER_ALLOWED) && device->CheckCapability(GraphicsDeviceCapability::MESH_SHADER)) ? 1u : 0u;
+			for (uint32_t mesh_shader = 0; mesh_shader <= mesh_shader_max; ++mesh_shader)
 			{
 				wi::jobsystem::Execute(object_pso_job_ctx, [=](wi::jobsystem::JobArgs args) {
 					for (uint32_t blendMode = 0; blendMode < BLENDMODE_COUNT; ++blendMode)
 					{
-						for (uint32_t cullMode = 0; cullMode <= 3; ++cullMode)
+						for (uint32_t cullMode = 0; cullMode <= (gg_pso_trim ? 2u : 3u); ++cullMode)
 						{
 							for (uint32_t tessellation = 0; tessellation <= 1; ++tessellation)
 							{

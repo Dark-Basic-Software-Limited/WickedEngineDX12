@@ -44,6 +44,12 @@ std::atomic<unsigned long long> gg_dbg_pso_compile_us{ 0 };
 std::atomic<unsigned long long> gg_dbg_tex_creates{ 0 };
 std::atomic<unsigned long long> gg_dbg_pso_creates{ 0 }; // GGMAX 1.70: pipeline states created (each costs driver-side video memory the resource census cannot see)
 
+// GGMAX 1.77: the other two things that consume video memory without ever appearing in the
+// resource census — descriptor heaps (allocated bytes, not descriptor count) and command
+// allocators (which retain their recorded command memory for the life of the process).
+std::atomic<unsigned long long> gg_dbg_descriptor_heap_bytes{ 0 };
+std::atomic<unsigned long long> gg_dbg_cmdallocator_count{ 0 };
+
 // ============================================================================
 // GGMAX 1.70: VRAM CENSUS (global namespace; driven by harness DUMP_VRAM)
 // Every D3D12MA-backed allocation (texture / buffer / raytracing structure) is
@@ -72,6 +78,22 @@ static std::mutex gg_vram_mutex;
 static std::map<const void*, GGVramRec>* gg_vram_live = nullptr;
 static D3D12MA::Allocator* gg_vram_allocator = nullptr;
 std::atomic<unsigned long long> gg_vram_swapchain_bytes{ 0 };
+
+// GGMAX 1.77: driver-usage marks. QueryVideoMemoryInfo (via D3D12MA's Budget) reports what the
+// PROCESS holds in local video memory, which includes everything the resource census cannot see.
+// Sampling it at named milestones turns "there is 1.4 GB unaccounted for" into an attribution:
+// whatever is already present at `device_created` is driver + heap overhead we never chose, and
+// whatever appears between two marks belongs to the work done between them.
+struct GGVramStage
+{
+	char label[24] = {};
+	unsigned long long usage = 0;
+	unsigned long long census = 0;
+	unsigned long long psos = 0;
+};
+static std::mutex gg_vram_stage_mutex;
+static GGVramStage gg_vram_stages[24];
+static int gg_vram_stage_count = 0;
 
 // GGMAX 1.73 DIAG: when armed, every texture upload dumps its footprint table to
 // last_upload.txt (see CreateTexture). Harness SET_TEXSTREAMTRACE arms it alongside the
@@ -132,6 +154,35 @@ void GG_GetVRAMTotals(unsigned long long* out_census, unsigned long long* out_de
 	if (out_count) *out_count = count;
 }
 
+// GGMAX 1.77: record the driver-reported usage at a named milestone. Cheap (one Budget query),
+// called a handful of times per session; duplicate labels are kept so a repeated mark shows drift.
+void GG_VRAMStage(const char* label)
+{
+	if (label == nullptr) return;
+	unsigned long long usage = 0;
+	if (gg_vram_allocator != nullptr)
+	{
+		D3D12MA::Budget local = {};
+		gg_vram_allocator->GetBudget(&local, nullptr);
+		usage = local.UsageBytes;
+	}
+	unsigned long long census = 0;
+	{
+		std::scoped_lock lck(gg_vram_mutex);
+		if (gg_vram_live != nullptr)
+		{
+			for (auto& x : *gg_vram_live) census += x.second.bytes;
+		}
+	}
+	std::scoped_lock lck(gg_vram_stage_mutex);
+	if (gg_vram_stage_count >= (int)(sizeof(gg_vram_stages) / sizeof(gg_vram_stages[0]))) return;
+	GGVramStage& s = gg_vram_stages[gg_vram_stage_count++];
+	strncpy_s(s.label, sizeof(s.label), label, _TRUNCATE);
+	s.usage = usage;
+	s.census = census;
+	s.psos = ::gg_dbg_pso_creates.load();
+}
+
 // Dump every live allocation, largest first. Columns are fixed and space separated
 // so the analysis can awk them; the name is last, quoted (it can contain spaces).
 //   kind bytes w h d mips arr samples fmt bind misc usage alias "name"
@@ -171,9 +222,25 @@ void GG_DumpVRAMCensus(const char* path)
 		usage = local.UsageBytes;
 	}
 	fprintf(f, "CENSUS v1 records=%llu census_bytes=%llu census_default_heap=%llu census_upload_readback=%llu"
-		" d3d12ma_allocated=%llu d3d12ma_blocks=%llu driver_usage=%llu driver_budget=%llu swapchain=%llu\n",
+		" d3d12ma_allocated=%llu d3d12ma_blocks=%llu driver_usage=%llu driver_budget=%llu swapchain=%llu"
+		" pso_creates=%llu pso_compiles=%llu descheap_bytes=%llu cmdalloc=%llu\n",
 		(unsigned long long)snapshot.size(), census_total, census_default, census_other,
-		ma_alloc, ma_block, usage, budget, gg_vram_swapchain_bytes.load());
+		ma_alloc, ma_block, usage, budget, gg_vram_swapchain_bytes.load(),
+		::gg_dbg_pso_creates.load(), ::gg_dbg_pso_compiles.load(),
+		::gg_dbg_descriptor_heap_bytes.load(), ::gg_dbg_cmdallocator_count.load());
+	// GGMAX 1.77: the driver's reported usage runs ~1.2-1.5 GB above d3d12ma_blocks on EVERY level,
+	// content-independent. Nothing in the resource census can explain it, so record the driver number
+	// at named milestones: the shape of the curve (already-high at startup vs climbing with PSO
+	// creation vs climbing with the level load) is what identifies the owner.
+	{
+		std::scoped_lock lck(gg_vram_stage_mutex);
+		fprintf(f, "# STAGES label driver_usage_bytes census_bytes pso_creates\n");
+		for (int i = 0; i < gg_vram_stage_count; ++i)
+		{
+			fprintf(f, "# STAGE %-20s %llu %llu %llu\n", gg_vram_stages[i].label,
+				gg_vram_stages[i].usage, gg_vram_stages[i].census, gg_vram_stages[i].psos);
+		}
+	}
 	fprintf(f, "# kind bytes w h d mips arr samples fmt bind misc usage alias \"name\"\n");
 	for (const GGVramRec& r : snapshot)
 	{
@@ -1863,6 +1930,7 @@ std::mutex queue_locker;
 		if (!cmd.IsValid())
 		{
 			dx12_check(device->device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COPY, PPV_ARGS(cmd.commandAllocator)));
+			::gg_dbg_cmdallocator_count.fetch_add(1, std::memory_order_relaxed); // GGMAX 1.77 floor analysis
 			dx12_check(device->device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COPY, cmd.commandAllocator.Get(), nullptr, PPV_ARGS(cmd.commandList)));
 			cmd.commandList->SetName(L"CopyAllocator::commandList");
 
@@ -3257,6 +3325,16 @@ std::mutex queue_locker;
 		}
 
 		wilog("Created GraphicsDevice_DX12 (%d ms)\nAdapter: %s", (int)std::round(timer.elapsed()), adapterName.c_str());
+
+		// GGMAX 1.77: the shader-visible descriptor heaps are sized once, here, and never grow.
+		// 1,000,000 CBV_SRV_UAV descriptors is the tier-1 cap, not a measured requirement — record
+		// the byte cost so the floor analysis can price it instead of assuming it is negligible.
+		::gg_dbg_descriptor_heap_bytes.store(
+			(unsigned long long)descriptorheap_res.heapDesc.NumDescriptors * resource_descriptor_size +
+			(unsigned long long)descriptorheap_sam.heapDesc.NumDescriptors * sampler_descriptor_size);
+		// First mark: device + queues + descriptor heaps exist, no engine resource has been created
+		// yet. Everything reported here is cost we inherit before drawing anything.
+		GG_VRAMStage("device_created");
 	}
 	GraphicsDevice_DX12::~GraphicsDevice_DX12()
 	{
@@ -5590,6 +5668,7 @@ std::mutex queue_locker;
 			for (uint32_t buffer = 0; buffer < BUFFERCOUNT; ++buffer)
 			{
 				dx12_check(device->CreateCommandAllocator(queues[queue].desc.Type, PPV_ARGS(commandlist.commandAllocators[buffer][queue])));
+				::gg_dbg_cmdallocator_count.fetch_add(1, std::memory_order_relaxed); // GGMAX 1.77 floor analysis
 			}
 
 			if (queue == QUEUE_VIDEO_DECODE)

@@ -2064,6 +2064,13 @@ void LoadShaders()
 	object_pso_job_ctx.priority = wi::jobsystem::Priority::Low;
 	for (uint32_t renderPass = 0; renderPass < RENDERPASS_COUNT; ++renderPass)
 	{
+		// GGMAX 1.80 (Tier A5): skip whole renderpasses whose feature is off. VXGI is the case
+		// that matters — RENDERPASS_VOXELIZE is one of seven passes, so its object pipelines are
+		// ~1/7 of the set, and MAX never turns VXGI on. Gated on the live flag rather than a
+		// hardcoded assumption, and LoadShaders re-runs on shader reload, so enabling VXGI and
+		// reloading shaders brings the pipelines back.
+		if (gg_pso_trim && renderPass == RENDERPASS_VOXELIZE && !VXGI_ENABLED)
+			continue;
 		for (uint32_t shaderType = 0; shaderType < MaterialComponent::SHADERTYPE_COUNT; ++shaderType)
 		{
 			// GGMAX 1.77: every object PSO here is created WITH a renderpass_info, which means the
@@ -2088,7 +2095,14 @@ void LoadShaders()
 					{
 						for (uint32_t cullMode = 0; cullMode <= (gg_pso_trim ? 2u : 3u); ++cullMode)
 						{
-							for (uint32_t tessellation = 0; tessellation <= 1; ++tessellation)
+							// GGMAX 1.80 (Tier A5): tessellation variants only exist for MAIN /
+							// PREPASS / PREPASS_DEPTHONLY, but MAX disables tessellation outright
+							// (master_part1.cpp: "Tessellation dont work like this it has to be
+							// set per mesh, so have never worked") — so RenderMeshes can never set
+							// variant.bits.tessellation and half of those pipelines are unreachable.
+							// Gated on the live flag; the game now sets it before LoadShaders runs.
+							const uint32_t tessellation_max = (gg_pso_trim && !tessellationEnabled) ? 0u : 1u;
+							for (uint32_t tessellation = 0; tessellation <= tessellation_max; ++tessellation)
 							{
 								if (tessellation && renderPass > RENDERPASS_PREPASS_DEPTHONLY)
 									continue;
@@ -2951,7 +2965,13 @@ const GPUBuffer& GetIndexBufferForQuads(uint32_t max_quad_count)
 // This is responsible to manage big chunks of GPUBuffer, each of which will be used for suballocations:
 struct GPUSubAllocator
 {
-	static constexpr uint64_t blocksize = 256ull * 1024ull * 1024ull; // 256 MB
+	// GGMAX Tier A3 (2026-08-02): 256 -> 128 MB. The pool only ever grows, in whole blocks, so
+	// the granularity is pure rounding loss on the last block: the 19-demo audit found small
+	// levels holding 512 MB with ~310 used. Halving the block halves that worst case (-128 MB on
+	// a small level) and costs nothing on large ones, which simply take twice as many blocks.
+	// NOTE the >blocksize/2 guard below: allocations over 64 MB now bypass suballocation and
+	// become standalone buffers. That is the same total memory, just unpooled.
+	static constexpr uint64_t blocksize = 128ull * 1024ull * 1024ull; // 128 MB
 	struct Block
 	{
 		wi::allocator::PageAllocator allocator;

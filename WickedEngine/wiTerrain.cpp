@@ -327,9 +327,21 @@ namespace wi::terrain
 
 	// GGMAX diag (Horseshoe Bend 42ms FreeSort hunt): free-list rebuild forensics,
 	// running totals read via the game harness GET_PERF_DATA "VT:" line.
-	// GGMAX 1.71: SVT physical atlas height (see the atlas creation site). 16384 = stock
-	// (768 MB tile pool); 8192 halves it. Applied when the atlas is next created.
-	uint32_t gg_svt_atlas_height = 16384u; // stock; setup.ini svtatlasheight can halve it (see VRAM_CENSUS.md)
+	// GGMAX 1.71 / 1.76: SVT physical atlas height (see the atlas creation site). Upstream stock
+	// is 16384 = 3844 tiles = a 768 MB pool paid by EVERY level, indoor cellars included.
+	//
+	// DEFAULT IS NOW 12288 (2852 tiles, ~576 MB) — soaked, not guessed. tools/svt_soak.sh flies
+	// Z Island over 8 waypoints for 3 laps with short dwells so the atlas must evict and
+	// re-stream. Peak tile demand under that travel is 1971:
+	//     16384  3844 tiles, min free 1873  (49% headroom)
+	//     12288  2852 tiles, min free  881  (31% headroom) — peak used 1971, IDENTICAL to stock,
+	//                                        i.e. every request served, no mip fallback
+	//      8192  1922 tiles, min free    0  STARVED — 1922 < 1971, terrain visibly blurs
+	// So 8192 is NOT viable; do not "just halve it". 12288 saves ~192-256 MB on every level.
+	//
+	// setup.ini `svtatlasheight` still overrides (2048..16384) — set 16384 to A/B against stock.
+	// Applied when the atlas is next created, so it needs a level (re)load.
+	uint32_t gg_svt_atlas_height = 12288u;
 
 	std::atomic<unsigned long long> gg_dbg_vt_rebuilds{ 0 };   // rebuild executions
 	std::atomic<unsigned long long> gg_dbg_vt_scan_us{ 0 };    // clear+scan phase time

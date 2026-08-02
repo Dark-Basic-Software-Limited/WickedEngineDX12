@@ -38,6 +38,10 @@ namespace wi::renderer
 	constexpr wi::graphics::Format format_rendertarget_envprobe = wi::graphics::Format::R11G11B10_FLOAT;
 	constexpr wi::graphics::Format format_depthbuffer_envprobe = wi::graphics::Format::D16_UNORM;
 
+	// GGMAX 1.79: build object PSOs lazily (low-VRAM preset). Must be set BEFORE LoadShaders.
+	// See the definition in wiRenderer.cpp for what it trades away.
+	extern bool gg_pso_lazy_object;
+
 	constexpr uint8_t raytracing_inclusion_mask_shadow = 1 << 0;
 	constexpr uint8_t raytracing_inclusion_mask_reflection = 1 << 1;
 

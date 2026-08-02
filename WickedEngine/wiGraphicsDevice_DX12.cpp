@@ -50,6 +50,15 @@ std::atomic<unsigned long long> gg_dbg_pso_creates{ 0 }; // GGMAX 1.70: pipeline
 std::atomic<unsigned long long> gg_dbg_descriptor_heap_bytes{ 0 };
 std::atomic<unsigned long long> gg_dbg_cmdallocator_count{ 0 };
 
+// GGMAX 1.79: the count that actually matters for driver video memory — real ID3D12PipelineState
+// objects. `gg_dbg_pso_creates` counts CreatePipelineState CALLS, which is NOT the same thing:
+// on the deferred path (renderpass_info == nullptr) the call only stores a stream and no driver
+// object exists until first bind. Measuring the lazy-PSO change against pso_creates therefore
+// reads "no change" even when it is working perfectly. This counter is incremented wherever a
+// driver pipeline is genuinely created: eagerly here, or lazily in pso_validate (which also
+// bumps gg_dbg_pso_compiles). eager + lazy = what the driver is actually holding.
+std::atomic<unsigned long long> gg_dbg_pso_driver_eager{ 0 };
+
 // ============================================================================
 // GGMAX 1.70: VRAM CENSUS (global namespace; driven by harness DUMP_VRAM)
 // Every D3D12MA-backed allocation (texture / buffer / raytracing structure) is
@@ -223,10 +232,10 @@ void GG_DumpVRAMCensus(const char* path)
 	}
 	fprintf(f, "CENSUS v1 records=%llu census_bytes=%llu census_default_heap=%llu census_upload_readback=%llu"
 		" d3d12ma_allocated=%llu d3d12ma_blocks=%llu driver_usage=%llu driver_budget=%llu swapchain=%llu"
-		" pso_creates=%llu pso_compiles=%llu descheap_bytes=%llu cmdalloc=%llu\n",
+		" pso_creates=%llu pso_compiles=%llu pso_driver_eager=%llu descheap_bytes=%llu cmdalloc=%llu\n",
 		(unsigned long long)snapshot.size(), census_total, census_default, census_other,
 		ma_alloc, ma_block, usage, budget, gg_vram_swapchain_bytes.load(),
-		::gg_dbg_pso_creates.load(), ::gg_dbg_pso_compiles.load(),
+		::gg_dbg_pso_creates.load(), ::gg_dbg_pso_compiles.load(), ::gg_dbg_pso_driver_eager.load(),
 		::gg_dbg_descriptor_heap_bytes.load(), ::gg_dbg_cmdallocator_count.load());
 	// GGMAX 1.77: the driver's reported usage runs ~1.2-1.5 GB above d3d12ma_blocks on EVERY level,
 	// content-independent. Nothing in the resource census can explain it, so record the driver number
@@ -4686,6 +4695,7 @@ std::mutex queue_locker;
 			}
 
 			dx12_check(device->CreatePipelineState(&streamDesc, PPV_ARGS(internal_state->resource)));
+			::gg_dbg_pso_driver_eager.fetch_add(1, std::memory_order_relaxed); // GGMAX 1.79
 		}
 
 		return true;

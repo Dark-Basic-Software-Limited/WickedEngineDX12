@@ -203,6 +203,21 @@ bool MESHLET_OCCLUSION_CULLING = false;
 // GGMAX 1.77: drop object-PSO permutations that GetObjectPSO can never select (see LoadShaders).
 // Revert switch only — there is no reason to turn this off outside of a bisect.
 bool gg_pso_trim = true;
+
+// GGMAX 1.79 (low-VRAM preset, batch 3): build object PSOs LAZILY.
+//
+// After the 1.77 trim there are still ~7,500 object pipelines at ~96 KB of driver video memory
+// each — roughly 720 MB — and a given level binds only a small fraction of them. Passing nullptr
+// for renderpass_info puts them on the backend's deferred path: CreatePipelineState stores the
+// stream, and pso_validate builds the real ID3D12PipelineState at first BIND, filling in the
+// live pass's formats and sample count and caching it in pipelines_global keyed by
+// {pso, renderpass_hash}. So only pipelines actually used ever reach the driver.
+//
+// This is a supported mode, not a trick — PSO_object_wire, hair, emitters and impostors already
+// use the two-argument form. The cost is a first-use compile hitch per pipeline, which is why
+// this is OFF by default and belongs to the low-VRAM preset rather than the shipping path.
+// gg_dbg_pso_compiles / gg_dbg_pso_compile_us (gap_trace.txt) measure exactly that cost.
+bool gg_pso_lazy_object = false;
 std::atomic<size_t> SHADER_ERRORS{ 0 };
 std::atomic<size_t> SHADER_MISSING{ 0 };
 bool VXGI_ENABLED = false;
@@ -2265,7 +2280,7 @@ void LoadShaders()
 											variant.bits.sample_count = msaa;
 											renderpass_info.sample_count = msaa;
 											PipelineState pso;
-											device->CreatePipelineState(&desc, &pso, &renderpass_info);
+											device->CreatePipelineState(&desc, &pso, gg_pso_lazy_object ? nullptr : &renderpass_info);
 											wi::eventhandler::Subscribe_Once(wi::eventhandler::EVENT_THREAD_SAFE_POINT, [=](uint64_t userdata) {
 												*GetObjectPSO(variant) = pso;
 												});
@@ -2285,7 +2300,7 @@ void LoadShaders()
 											variant.bits.sample_count = msaa;
 											renderpass_info.sample_count = msaa;
 											PipelineState pso;
-											device->CreatePipelineState(&desc, &pso, &renderpass_info);
+											device->CreatePipelineState(&desc, &pso, gg_pso_lazy_object ? nullptr : &renderpass_info);
 											wi::eventhandler::Subscribe_Once(wi::eventhandler::EVENT_THREAD_SAFE_POINT, [=](uint64_t userdata) {
 												*GetObjectPSO(variant) = pso;
 												});
@@ -2307,7 +2322,7 @@ void LoadShaders()
 										renderpass_info.rt_formats[0] = gg_transparent_shadows ? format_rendertarget_shadowmap : Format::UNKNOWN;
 										renderpass_info.ds_format = format_depthbuffer_shadowmap;
 										PipelineState pso;
-										device->CreatePipelineState(&desc, &pso, &renderpass_info);
+										device->CreatePipelineState(&desc, &pso, gg_pso_lazy_object ? nullptr : &renderpass_info);
 										wi::eventhandler::Subscribe_Once(wi::eventhandler::EVENT_THREAD_SAFE_POINT, [=](uint64_t userdata) {
 											*GetObjectPSO(variant) = pso;
 											});
@@ -2320,7 +2335,7 @@ void LoadShaders()
 										renderpass_info.rt_count = 0;
 										renderpass_info.ds_format = format_depthbuffer_shadowmap;
 										PipelineState pso;
-										device->CreatePipelineState(&desc, &pso, &renderpass_info);
+										device->CreatePipelineState(&desc, &pso, gg_pso_lazy_object ? nullptr : &renderpass_info);
 										wi::eventhandler::Subscribe_Once(wi::eventhandler::EVENT_THREAD_SAFE_POINT, [=](uint64_t userdata) {
 											*GetObjectPSO(variant) = pso;
 											});

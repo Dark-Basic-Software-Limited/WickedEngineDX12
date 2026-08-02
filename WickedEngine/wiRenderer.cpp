@@ -233,8 +233,21 @@ std::atomic<unsigned long long> gg_dbg_transparent_shadow_frames{ 0 };
 // "feature off" with no other change. This exists to answer whether the 512 MB atlas buys
 // anything VISIBLE, since the measured batch counts prove it is written on every hub level and
 // therefore cannot simply be narrowed to RGBA8 (8-bit alpha would quantise that depth compare).
-// Default true = stock behaviour.
-bool gg_transparent_shadows = true;
+// GGMAX 1.78 — DROPPED BY PRODUCT DECISION (2026-08-02). The measured answer to the question
+// above is that the atlas buys nothing visible in MAX, and it is pure floor cost: 160 MB on
+// every level and 512 MB on Amazon / Foggy Forest / Disruption / Bounty. Default is now false,
+// the atlas is NOT ALLOCATED at all, and it is dropped from the shadow render pass.
+//
+// Turning it off is safe by construction rather than by luck: when the atlas is invalid,
+// UpdateRenderData binds `texturehelper::getWhite()` (1,1,1,1) in its place, and every shader
+// site does `pcf *= transparent_shadow.rgb` — a multiply by white, i.e. a no-op — whether or not
+// TRANSPARENT_SHADOWMAP_SECONDARY_DEPTH_CHECK takes the branch. The 1x1 sample that remains is
+// negligible; removing it entirely would mean defining DISABLE_TRANSPARENT_SHADOWMAP and
+// recompiling the shader set, which is not worth the churn.
+//
+// Kept as a lever (harness SET_TRANSPARENTSHADOWS 1) so the decision can be re-examined, but note
+// re-enabling only restores the DRAWS — the atlas is allocated on the next shadow-packer resize.
+bool gg_transparent_shadows = false;
 
 int max_shadow_resolution_2D = 1024;
 int max_shadow_resolution_cube = 256;
@@ -2283,8 +2296,15 @@ void LoadShaders()
 									case RENDERPASS_SHADOW:
 									{
 										RenderPassInfo renderpass_info;
-										renderpass_info.rt_count = 1;
-										renderpass_info.rt_formats[0] = format_rendertarget_shadowmap;
+										// GGMAX 1.78: with the transparent shadow atlas dropped the shadow pass is
+										// depth-only, and a PSO baked for 1 render target would not match it. This is
+										// the ONLY shadow-pass PSO that bakes a renderpass_info — hair, emitters,
+										// impostors and PSO_shadowClear_GG all use the deferred two-argument
+										// CreatePipelineState, which resolves against the live pass at bind time.
+										// Because this is latched at LoadShaders, flipping gg_transparent_shadows at
+										// runtime only changes the DRAWS; the pass structure needs a restart.
+										renderpass_info.rt_count = gg_transparent_shadows ? 1 : 0;
+										renderpass_info.rt_formats[0] = gg_transparent_shadows ? format_rendertarget_shadowmap : Format::UNKNOWN;
 										renderpass_info.ds_format = format_depthbuffer_shadowmap;
 										PipelineState pso;
 										device->CreatePipelineState(&desc, &pso, &renderpass_info);
@@ -4412,15 +4432,22 @@ void UpdateVisibility(Visibility& vis)
 						device->CreateTexture(&desc, nullptr, &shadowMapAtlas);
 						device->SetName(&shadowMapAtlas, "shadowMapAtlas");
 
-						desc.format = format_rendertarget_shadowmap;
-						desc.bind_flags = BindFlag::RENDER_TARGET | BindFlag::SHADER_RESOURCE;
-						desc.layout = ResourceState::SHADER_RESOURCE;
-						desc.clear.color[0] = 1;
-						desc.clear.color[1] = 1;
-						desc.clear.color[2] = 1;
-						desc.clear.color[3] = 0;
-						device->CreateTexture(&desc, nullptr, &shadowMapAtlas_Transparent);
-						device->SetName(&shadowMapAtlas_Transparent, "shadowMapAtlas_Transparent");
+						// GGMAX 1.78: only pay for the transparent atlas if the feature is on.
+						// It is the same dimensions as the depth atlas but RGBA16F, so it costs
+						// twice the depth atlas — 160 MB on a typical level, 512 MB on the four
+						// demos with large shadow packers.
+						if (gg_transparent_shadows)
+						{
+							desc.format = format_rendertarget_shadowmap;
+							desc.bind_flags = BindFlag::RENDER_TARGET | BindFlag::SHADER_RESOURCE;
+							desc.layout = ResourceState::SHADER_RESOURCE;
+							desc.clear.color[0] = 1;
+							desc.clear.color[1] = 1;
+							desc.clear.color[2] = 1;
+							desc.clear.color[3] = 0;
+							device->CreateTexture(&desc, nullptr, &shadowMapAtlas_Transparent);
+							device->SetName(&shadowMapAtlas_Transparent, "shadowMapAtlas_Transparent");
+						}
 
 					}
 
@@ -7323,7 +7350,10 @@ void DrawShadowmaps(
 			ResourceState::SHADER_RESOURCE
 		),
 	};
-	device->RenderPassBegin(rp, arraysize(rp), cmd);
+	// GGMAX 1.78: with the transparent atlas dropped there is no colour target — the shadow pass
+	// becomes depth-only. The transparent entry is last, so the count alone selects it out.
+	const uint32_t rp_count = shadowMapAtlas_Transparent.IsValid() ? (uint32_t)arraysize(rp) : 1u;
+	device->RenderPassBegin(rp, rp_count, cmd);
 
 	//GGMAX delayed shadow cascades: per-rect clears for everything that renders
 	//this frame (all spot/point/rect lights + the directional cascades being

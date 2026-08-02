@@ -1,4 +1,4 @@
-#include "wiRenderer.h"
+﻿#include "wiRenderer.h"
 #include "wiHairParticle.h"
 #include "wiEmittedParticle.h"
 #include "wiSprite.h"
@@ -213,6 +213,26 @@ bool SHADOW_LOD_OVERRIDE = true;
 
 Texture shadowMapAtlas;
 Texture shadowMapAtlas_Transparent;
+
+// GGMAX: does ANYTHING actually render into the transparent shadow atlas? The atlas is an
+// RGBA16F render target sized with the shadow packer — measured at 512 MB on four hub demos,
+// 772 MB including its depth partner on Bounty, a level with no grass at all. Halving it to
+// RGBA8 is only safe if the alpha channel's depth value is unused, because
+// TRANSPARENT_SHADOWMAP_SECONDARY_DEPTH_CHECK compares `transparent_shadow.a > cmp`.
+// So count the batches that reach the transparent shadow queue rather than assume. Reported on
+// the harness SHADOWT line; a level that never populates it can drop the format for free.
+std::atomic<unsigned long long> gg_dbg_transparent_shadow_batches{ 0 };
+std::atomic<unsigned long long> gg_dbg_transparent_shadow_frames{ 0 };
+
+// GGMAX: skip the transparent shadow DRAWS (harness SET_TRANSPARENTSHADOWS 0). The atlas is
+// cleared to (1,1,1,0) — rgb white so the tint multiply is a no-op, alpha 0 so the secondary
+// depth check `transparent_shadow.a > cmp` always fails — so skipping the draws is exactly
+// "feature off" with no other change. This exists to answer whether the 512 MB atlas buys
+// anything VISIBLE, since the measured batch counts prove it is written on every hub level and
+// therefore cannot simply be narrowed to RGBA8 (8-bit alpha would quantise that depth compare).
+// Default true = stock behaviour.
+bool gg_transparent_shadows = true;
+
 int max_shadow_resolution_2D = 1024;
 int max_shadow_resolution_cube = 256;
 
@@ -7448,7 +7468,11 @@ void DrawShadowmaps(
 						}
 						if ((filterMask & FILTER_TRANSPARENT) || (filterMask & FILTER_WATER))
 						{
-							renderQueue_transparent.add(batch);
+							if (gg_transparent_shadows)
+							{
+								renderQueue_transparent.add(batch);
+								gg_dbg_transparent_shadow_batches.fetch_add(1, std::memory_order_relaxed); // GGMAX: is the transparent shadow atlas ever written?
+							}
 						}
 					}
 				}
@@ -7604,7 +7628,11 @@ void DrawShadowmaps(
 						}
 						if ((filterMask & FILTER_TRANSPARENT) || (filterMask & FILTER_WATER))
 						{
-							renderQueue_transparent.add(batch);
+							if (gg_transparent_shadows)
+							{
+								renderQueue_transparent.add(batch);
+								gg_dbg_transparent_shadow_batches.fetch_add(1, std::memory_order_relaxed); // GGMAX: is the transparent shadow atlas ever written?
+							}
 						}
 					}
 				}
@@ -7769,7 +7797,11 @@ void DrawShadowmaps(
 						}
 						if ((filterMask & FILTER_TRANSPARENT) || (filterMask & FILTER_WATER))
 						{
-							renderQueue_transparent.add(batch);
+							if (gg_transparent_shadows)
+							{
+								renderQueue_transparent.add(batch);
+								gg_dbg_transparent_shadow_batches.fetch_add(1, std::memory_order_relaxed); // GGMAX: is the transparent shadow atlas ever written?
+							}
 						}
 					}
 				}

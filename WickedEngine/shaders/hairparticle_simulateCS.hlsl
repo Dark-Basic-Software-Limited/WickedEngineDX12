@@ -570,6 +570,16 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 Gid : SV_GroupID, uint groupIn
 		{
 			half siz = billboardID == 0 ? 1 : lerp(0.2, 1, rng.next_float());
 			half rot = billboardID == 0 ? 0 : (rng.next_float() * PI);
+			// GGMAX 1.86: THE MERGED-GRASS OVER-DENSITY BUG. This is the CAP half of the segment
+			// (vertexID 2..3); the ROOT half above (the loop at the top of this file) already
+			// collapses a surplus billboard to zero size, and this one did not. The result was a
+			// quad with a zero-width root and a FULL-WIDTH cap — a wedge with real screen area
+			// instead of the intended nothing — drawn for every billboard a merged strand's own
+			// type does not want. The two loops must agree or the collapse is only half applied.
+			if (billboardID >= gg_billboards)
+			{
+				siz = 0;
+			}
 			half2 rot_sincos;
 			sincos(rot, rot_sincos.x, rot_sincos.y);
 			half3x3 variationMatrix = half3x3(

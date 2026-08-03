@@ -32,6 +32,10 @@ enum HAIR_FLAGS
 	HAIR_FLAG_GG_FREEZE_PRESENT = 1 << 4,   // ignore per-type `present` (never kill a strand by it)
 	HAIR_FLAG_GG_FREEZE_TEXTURE = 1 << 5,   // every strand uses type 0's blade texture
 	HAIR_FLAG_GG_FREEZE_LENGTH  = 1 << 6,   // every strand uses type 0's length
+	// GGMAX 1.90: debug visualisation - hair PS returns the raw per-strand grasstype as a flat
+	// colour. Never touches a descriptor, so it separates "type value is wrong" from "texture
+	// fetch is wrong". SET_GRASSTYPEFREEZE 5.
+	HAIR_FLAG_GG_DEBUG_TYPEVIS = 1 << 7,
 };
 
 struct HairParticleAtlasRect

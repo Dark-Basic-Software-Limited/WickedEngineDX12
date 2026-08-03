@@ -8,6 +8,24 @@
 [earlydepthstencil]
 float4 main(VertexToPixel input) : SV_Target
 {
+	// GGMAX 1.90 flicker instrument (SET_GRASSTYPEFREEZE 5): paint the raw per-strand grasstype
+	// as a flat colour and return immediately. This value NEVER touches a descriptor, so the
+	// consecutive-frame diff splits the remaining search space in half:
+	//   STABLE image  -> the type value is steady, so the corruption happens at texture FETCH
+	//   CHURNING image-> the type value itself varies per frame, so the bug is UPSTREAM of the fetch
+	// Deliberately before every other read so nothing else can contaminate the reading.
+	if (xHairFlags & HAIR_FLAG_GG_DEBUG_TYPEVIS)
+	{
+		const uint t = input.grasstype;
+		// Distinct, high-contrast colour per type so a single flipped strand is unmissable, and
+		// so the pixel-diff metric responds strongly to any change.
+		return float4(
+			((t * 37u) & 255u) / 255.0,
+			((t * 91u) & 255u) / 255.0,
+			((t * 173u) & 255u) / 255.0,
+			1);
+	}
+
 	ShaderMaterial material = HairGetMaterial();
 	ShaderMeshInstance meshinstance = HairGetInstance();
 	

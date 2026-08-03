@@ -576,6 +576,8 @@ namespace wi
 			if (gg_grass_freeze_mode == 2) hcb.xHairFlags |= HAIR_FLAG_GG_FREEZE_PRESENT;
 			if (gg_grass_freeze_mode == 3) hcb.xHairFlags |= HAIR_FLAG_GG_FREEZE_TEXTURE;
 			if (gg_grass_freeze_mode == 4) hcb.xHairFlags |= HAIR_FLAG_GG_FREEZE_LENGTH;
+			// GGMAX 1.90: type visualisation - PS returns grasstype as a flat colour.
+			if (gg_grass_freeze_mode == 5) hcb.xHairFlags |= HAIR_FLAG_GG_DEBUG_TYPEVIS;
 			hcb.xHairAspect = hair.width * (float)std::max(1u, desc.width) / (float)std::max(1u, desc.height);
 			hcb.xHairLength = hair.length;
 			hcb.xHairStiffness = hair.stiffness;

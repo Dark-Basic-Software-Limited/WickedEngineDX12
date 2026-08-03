@@ -573,11 +573,16 @@ namespace wi
 				hcb.xHairFlags |= HAIR_FLAG_GG_FREEZE_TYPE;
 			}
 			// GGMAX 1.88: one suspect at a time.
-			if (gg_grass_freeze_mode == 2) hcb.xHairFlags |= HAIR_FLAG_GG_FREEZE_PRESENT;
-			if (gg_grass_freeze_mode == 3) hcb.xHairFlags |= HAIR_FLAG_GG_FREEZE_TEXTURE;
-			if (gg_grass_freeze_mode == 4) hcb.xHairFlags |= HAIR_FLAG_GG_FREEZE_LENGTH;
-			// GGMAX 1.90: type visualisation - PS returns grasstype as a flat colour.
-			if (gg_grass_freeze_mode == 5) hcb.xHairFlags |= HAIR_FLAG_GG_DEBUG_TYPEVIS;
+			// GGMAX 1.91: BITMASK, so probes can be COMBINED. The whole point is the control
+			// run: type-visualisation alone cannot be interpreted without the same
+			// visualisation with the type FROZEN, which gives its pure animation floor.
+			//   1 = freeze the whole type-dependent path   2 = present   4 = textureIndex
+			//   8 = length                                16 = grasstype visualisation
+			if (gg_grass_freeze_mode & 1)  hcb.xHairFlags |= HAIR_FLAG_GG_FREEZE_TYPE;
+			if (gg_grass_freeze_mode & 2)  hcb.xHairFlags |= HAIR_FLAG_GG_FREEZE_PRESENT;
+			if (gg_grass_freeze_mode & 4)  hcb.xHairFlags |= HAIR_FLAG_GG_FREEZE_TEXTURE;
+			if (gg_grass_freeze_mode & 8)  hcb.xHairFlags |= HAIR_FLAG_GG_FREEZE_LENGTH;
+			if (gg_grass_freeze_mode & 16) hcb.xHairFlags |= HAIR_FLAG_GG_DEBUG_TYPEVIS;
 			hcb.xHairAspect = hair.width * (float)std::max(1u, desc.width) / (float)std::max(1u, desc.height);
 			hcb.xHairLength = hair.length;
 			hcb.xHairStiffness = hair.stiffness;

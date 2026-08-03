@@ -21,6 +21,11 @@
 
 namespace wi::scene
 {
+	// GGMAX 1.81: Scene::Update caller tracer readout (recorded in wiScene.cpp). Returns how
+	// many records were written, oldest first. Symbolized game-side by harness DUMP_SCENEUPDATE.
+	unsigned int GG_GetSceneUpdateCalls(const void** out_ret, const void** out_scene,
+		unsigned long long* out_frame, float* out_dt, unsigned int max_out);
+
 	struct Scene
 	{
 		virtual ~Scene() = default;

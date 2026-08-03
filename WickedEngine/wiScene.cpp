@@ -1,4 +1,5 @@
 #include "wiScene.h"
+#include <intrin.h> // GGMAX 1.81: _ReturnAddress() for the Scene::Update caller tracer
 #include "wiTextureHelper.h"
 #include "wiResourceManager.h"
 #include "wiPhysics.h"
@@ -39,9 +40,58 @@ namespace wi::scene
 	// "Global Probe Brightness" slider; consumed in lightingHF EnvironmentReflection_Global.
 	float gg_envprobe_brightness = 1.0f;
 
+	// GGMAX 1.81: Scene::Update caller tracer.
+	//
+	// The performance panel shows every Scene::Update-internal range ("Scene-S1 Anim+Transform",
+	// "Animations", …) with a hit count of 3 per frame, and reading the code cannot settle WHICH
+	// three callers those are — two of the three game-side scene.Update(0) sites turned out to be
+	// one-off setup. So record it instead of arguing about it.
+	//
+	// Each entry captures the RETURN ADDRESS (symbolized game-side, where dbghelp already lives
+	// for the crash logger), the Scene INSTANCE (which distinguishes "one scene updated three
+	// times" from "three different scenes updated once each" — a completely different problem),
+	// the frame number and dt. Cost is a handful of stores per call, three times a frame.
+	struct GGSceneUpdateCall
+	{
+		const void* ret = nullptr;
+		const void* scene = nullptr;
+		unsigned long long frame = 0;
+		float dt = 0;
+	};
+	static GGSceneUpdateCall gg_scene_update_calls[128];
+	static std::atomic<unsigned int> gg_scene_update_cursor{ 0 };
+
+	// Copies out the most recent records, oldest first. Returns how many were written.
+	unsigned int GG_GetSceneUpdateCalls(const void** out_ret, const void** out_scene,
+		unsigned long long* out_frame, float* out_dt, unsigned int max_out)
+	{
+		const unsigned int total = gg_scene_update_cursor.load();
+		const unsigned int cap = (unsigned int)(sizeof(gg_scene_update_calls) / sizeof(gg_scene_update_calls[0]));
+		const unsigned int have = total < cap ? total : cap;
+		const unsigned int want = have < max_out ? have : max_out;
+		for (unsigned int i = 0; i < want; ++i)
+		{
+			// walk back `want` entries from the write cursor, then forward
+			const unsigned int idx = (total - want + i) % cap;
+			out_ret[i] = gg_scene_update_calls[idx].ret;
+			out_scene[i] = gg_scene_update_calls[idx].scene;
+			out_frame[i] = gg_scene_update_calls[idx].frame;
+			out_dt[i] = gg_scene_update_calls[idx].dt;
+		}
+		return want;
+	}
+
 	void Scene::Update(float dt)
 	{
 		GraphicsDevice* device = wi::graphics::GetDevice();
+		{
+			const unsigned int slot = gg_scene_update_cursor.fetch_add(1, std::memory_order_relaxed)
+				% (unsigned int)(sizeof(gg_scene_update_calls) / sizeof(gg_scene_update_calls[0]));
+			gg_scene_update_calls[slot].ret = _ReturnAddress();
+			gg_scene_update_calls[slot].scene = this;
+			gg_scene_update_calls[slot].frame = device != nullptr ? device->GetFrameCount() : 0;
+			gg_scene_update_calls[slot].dt = dt;
+		}
 		cpu_gpu_mapped_resource_index = GetDevice()->GetBufferIndex(); // this is now saved so that the renderer knows the last resource index that the scene was updated with
 		this->dt = dt;
 		time += dt;

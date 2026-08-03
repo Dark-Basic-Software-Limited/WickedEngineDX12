@@ -167,7 +167,12 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 Gid : SV_GroupID, uint groupIn
 					// ...but only for types this chunk actually built. The per-type build made a
 					// system solely for scanned types, so a cell naming any other type rendered
 					// nothing; matching that keeps density identical instead of adding grass.
-					if (xHairGrassTypes[gg_resolved_type].present < 0.5)
+					// GGMAX 1.88 selective probe: skip the present gate entirely so no strand is
+					// killed by it. If the per-frame churn collapses with only this frozen,
+					// `present` is the flicker. Density is wrong while on — consecutive-frame
+					// diff within this config is the only valid reading.
+					if (!(xHairFlags & HAIR_FLAG_GG_FREEZE_PRESENT)
+						&& xHairGrassTypes[gg_resolved_type].present < 0.5)
 					{
 						strand_length = 0;
 					}

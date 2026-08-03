@@ -40,6 +40,9 @@ namespace wi
 	// GGMAX 1.87: flicker probe, harness SET_GRASSTYPEFREEZE. Suppresses merged grass's per-strand
 	// type adoption. Diagnostic ONLY — density is wrong while it is on. Default off.
 	bool gg_grass_freeze_type = false;
+	// GGMAX 1.88: selective freeze mode. 0 = none, 2 = present, 3 = texture, 4 = length.
+	// (1 is the whole-path freeze, which gg_grass_freeze_type already covers.)
+	int gg_grass_freeze_mode = 0;
 	bool gg_grass_lod = true;
 	float gg_grass_lod_step2_frac = 0.35f;  // fraction of viewDistance where 2x decimation starts
 	float gg_grass_lod_step4_frac = 0.60f;  // fraction of viewDistance where 4x decimation starts
@@ -569,6 +572,10 @@ namespace wi
 			{
 				hcb.xHairFlags |= HAIR_FLAG_GG_FREEZE_TYPE;
 			}
+			// GGMAX 1.88: one suspect at a time.
+			if (gg_grass_freeze_mode == 2) hcb.xHairFlags |= HAIR_FLAG_GG_FREEZE_PRESENT;
+			if (gg_grass_freeze_mode == 3) hcb.xHairFlags |= HAIR_FLAG_GG_FREEZE_TEXTURE;
+			if (gg_grass_freeze_mode == 4) hcb.xHairFlags |= HAIR_FLAG_GG_FREEZE_LENGTH;
 			hcb.xHairAspect = hair.width * (float)std::max(1u, desc.width) / (float)std::max(1u, desc.height);
 			hcb.xHairLength = hair.length;
 			hcb.xHairStiffness = hair.stiffness;

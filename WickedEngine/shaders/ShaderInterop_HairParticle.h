@@ -26,6 +26,12 @@ enum HAIR_FLAGS
 	// Diagnostic only — it changes what renders, so judge it on CONSECUTIVE-FRAME diff within
 	// one config, never against a different config's image.
 	HAIR_FLAG_GG_FREEZE_TYPE = 1 << 3,
+	// GGMAX 1.88: SELECTIVE freezes — same idea, one parameter at a time, so the surviving
+	// suspects can be separated. Whole-freeze proved the flicker is in the type-dependent path
+	// (11.9 -> 0.2 meanAbsDiff); these say WHICH parameter.
+	HAIR_FLAG_GG_FREEZE_PRESENT = 1 << 4,   // ignore per-type `present` (never kill a strand by it)
+	HAIR_FLAG_GG_FREEZE_TEXTURE = 1 << 5,   // every strand uses type 0's blade texture
+	HAIR_FLAG_GG_FREEZE_LENGTH  = 1 << 6,   // every strand uses type 0's length
 };
 
 struct HairParticleAtlasRect

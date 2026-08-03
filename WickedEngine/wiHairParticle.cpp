@@ -583,6 +583,7 @@ namespace wi
 			if (gg_grass_freeze_mode & 4)  hcb.xHairFlags |= HAIR_FLAG_GG_FREEZE_TEXTURE;
 			if (gg_grass_freeze_mode & 8)  hcb.xHairFlags |= HAIR_FLAG_GG_FREEZE_LENGTH;
 			if (gg_grass_freeze_mode & 16) hcb.xHairFlags |= HAIR_FLAG_GG_DEBUG_TYPEVIS;
+			if (gg_grass_freeze_mode & 32) hcb.xHairFlags |= HAIR_FLAG_GG_DEBUG_STABLETYPE;
 			hcb.xHairAspect = hair.width * (float)std::max(1u, desc.width) / (float)std::max(1u, desc.height);
 			hcb.xHairLength = hair.length;
 			hcb.xHairStiffness = hair.stiffness;

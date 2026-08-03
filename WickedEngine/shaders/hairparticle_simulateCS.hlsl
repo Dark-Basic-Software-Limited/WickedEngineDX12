@@ -240,6 +240,10 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 Gid : SV_GroupID, uint groupIn
 	// fewer must still occupy its slots — the extras collapse to zero area below rather than
 	// shortening the stride, which would corrupt every later strand's vertex range.
 	const uint gg_billboards   = gg_merged ? min(xHairGrassTypes[gg_resolved_type].billboardCount, xHairBillboardCount) : xHairBillboardCount;
+	// GGMAX 1.93 discriminator: substitute a STABLE per-strand value for the resolved type, so the
+	// visualisation measures the vertex write/read PLUMBING with the resolve taken out of the
+	// picture. DTid.x is the strand id and never changes frame to frame.
+	const uint gg_encoded_type = (xHairFlags & HAIR_FLAG_GG_DEBUG_STABLETYPE) ? (DTid.x % 8u) : gg_resolved_type;
 
 	float3 diff = GetCamera().position - base;
 	const float distsq = dot(diff, diff);
@@ -413,7 +417,7 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 Gid : SV_GroupID, uint groupIn
 			// so this channel was genuinely unused. Encode as (type+1)/127 — an exact SNORM
 			// integer step — and 0 keeps "no per-strand type" for stock hair.
 			vertexBuffer_NOR[v0] = half4(target, 0); // GGMAX 1.92: type moved to vb_uvs.w (see below)
-			vertexBuffer_UVS[v0] = float4(uv.x, uv.y, uv.x, gg_merged ? ((gg_resolved_type + 1u) / 255.0) : 0.0);
+			vertexBuffer_UVS[v0] = float4(uv.x, uv.y, uv.x, gg_merged ? ((gg_encoded_type + 1u) / 255.0) : 0.0);
 			// GGMAX 1.92 — THE FLICKER FIX. The grass type used to ride in vb_nor.w, which is
 			// R8G8B8A8_SNORM: its quantisation step is 2/255 = 0.0078431 while the type spacing
 			// written was 1/127 = 0.0078740, so ADJACENT TYPES WERE UNDER ONE STEP APART and the
@@ -637,7 +641,7 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 Gid : SV_GroupID, uint groupIn
 			
 				vertexBuffer_POS[v0] = float4(position, 0);
 				vertexBuffer_NOR[v0] = half4(normal, 0); // GGMAX 1.92: type moved to vb_uvs.w
-				vertexBuffer_UVS[v0] = float4(uv.x, uv.y, uv.x, gg_merged ? ((gg_resolved_type + 1u) / 255.0) : 0.0);
+				vertexBuffer_UVS[v0] = float4(uv.x, uv.y, uv.x, gg_merged ? ((gg_encoded_type + 1u) / 255.0) : 0.0);
 			// GGMAX 1.92 — THE FLICKER FIX. The grass type used to ride in vb_nor.w, which is
 			// R8G8B8A8_SNORM: its quantisation step is 2/255 = 0.0078431 while the type spacing
 			// written was 1/127 = 0.0078740, so ADJACENT TYPES WERE UNDER ONE STEP APART and the

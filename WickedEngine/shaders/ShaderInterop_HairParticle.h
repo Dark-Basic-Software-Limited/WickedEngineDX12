@@ -36,6 +36,11 @@ enum HAIR_FLAGS
 	// colour. Never touches a descriptor, so it separates "type value is wrong" from "texture
 	// fetch is wrong". SET_GRASSTYPEFREEZE 5.
 	HAIR_FLAG_GG_DEBUG_TYPEVIS = 1 << 7,
+	// GGMAX 1.93: write a STABLE per-strand hash into the type channel instead of the resolved
+	// type. Combined with TYPEVIS this is the discriminator: if the visualisation goes stable the
+	// vertex write/read plumbing is sound and gg_resolved_type is the churning input; if it still
+	// churns the plumbing itself is corrupt. Mask bit 32.
+	HAIR_FLAG_GG_DEBUG_STABLETYPE = 1 << 8,
 };
 
 struct HairParticleAtlasRect

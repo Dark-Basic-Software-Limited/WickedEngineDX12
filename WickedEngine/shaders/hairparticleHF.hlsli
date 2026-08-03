@@ -36,7 +36,25 @@ struct VertexToPixel
 		const uint idx = xHairGrassTypes[gg_typeidx].textureIndex;
 		if (idx == 0)
 			return false;
-		tex = bindless_textures_half4[descriptor_index(idx)];
+		// GGMAX 1.89 — THE MERGED-GRASS FLICKER FIX. `idx` varies PER STRAND, so within one pixel
+		// wave the lanes can want different descriptors. Indexing an unbounded descriptor array
+		// divergently without NonUniformResourceIndex is undefined behaviour under the D3D12 spec
+		// (globals.hlsli declares `Texture2D<half4> bindless_textures_half4[] : register(space24)`),
+		// and on AMD the compiler scalarizes it — v_readfirstlane broadcasts the FIRST ACTIVE
+		// LANE's descriptor to the whole wave, so every pixel in that wave samples one strand's
+		// blade texture. A wave is a quad-granular screen tile, which is why the artefact is
+		// square patches of another grass type; wave packing is re-decided every frame as the
+		// blades sway, which is why it churns with no cross-frame memory.
+		//
+		// Per-type grass never hit this: it writes grasstype 0 and early-outs above to the single
+		// material texture, uniform by construction. Every other divergent bindless access in this
+		// engine is already wrapped (ShaderInterop_Renderer.h UniformTextureSlot, objectHF/
+		// surfaceHF); the 1.74 GG line was the only one that bypassed it.
+		//
+		// Cost: a waterfall loop, one iteration per unique descriptor in the wave (~7-8 live types
+		// per merged chunk). If that ever proves expensive the answer is a blade-texture ATLAS or
+		// explicit scalarization — never a revert to the undefined behaviour.
+		tex = bindless_textures_half4[NonUniformResourceIndex(descriptor_index(idx))];
 		return true;
 	}
 

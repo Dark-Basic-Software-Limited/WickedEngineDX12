@@ -62,6 +62,53 @@ std::atomic<unsigned long long> gg_dbg_cmdallocator_count{ 0 };
 // bumps gg_dbg_pso_compiles). eager + lazy = what the driver is actually holding.
 std::atomic<unsigned long long> gg_dbg_pso_driver_eager{ 0 };
 
+// GGMAX 1.83: D3D12MA PreferredBlockSize in MB. DEFAULT 16; setup.ini `mablockmb=64` restores
+// D3D12MA's own default and `mablockmb=0` also means "library default".
+//
+// D3D12MA suballocates from 64 MB heaps unless told otherwise, and on TESTPRO1 that left
+// 104-168 MB of DEFAULT-heap padding — nearly all of it in 4 sparse blocks out of 24, where a
+// couple of large allocations pinned a whole 64 MB heap. Measured, four sizes, repeated:
+//
+//   block  padding@level   driver total   non-resource
+//     64   103.8 / 151.7 / 151.8   5619.6      483.4
+//     32   129.8                   5597.8      483.4     <- WORSE than 64, and not by noise
+//     16    11.5 /  11.6 /  11.6   5479.8      483.7     <- the pick
+//      8     1.7                   5475.3      489.1     <- padding keeps falling, heaps start costing
+//
+// **−92 to −140 MB on every level, and the extra heaps cost nothing**: non-resource driver
+// memory moved 483.4 -> 483.7. FPS flat (65.6-66.1 across every config), POLYS bit-identical
+// (3,165,848) in all nine runs. 16 is also far more STABLE than the default it replaces — three
+// runs gave 11.5/11.6/11.6 while 64 MB swung 104-168.
+//
+// 8 MB is not chosen: it buys only 4.5 MB more total while non-resource memory starts to climb,
+// which is the heap-count cost appearing. 32 being worse than 64 is not a mistake in the table —
+// it is non-monotonic because D3D12MA sends any allocation over half a block to its own
+// committed heap, so the size threshold reshuffles which resources pool and which do not.
+//
+// This binds EARLIER than anything the game can reach: the allocator is built with the device,
+// before main() reaches GetSetupIniEarly(). Wiring it through the game's early parse was tried
+// and measured INERT (D3D12MA kept reporting 64 MB) — the fourth time this ordering trap has
+// bitten. So the engine reads the key itself, at the moment it needs it.
+int gg_ma_block_mb = 16;
+static void gg_read_ma_block_mb(void)
+{
+	FILE* fp = nullptr;
+	if (fopen_s(&fp, "setup.ini", "r") != 0 || fp == nullptr) return;
+	char line[1024];
+	while (fgets(line, sizeof(line), fp))
+	{
+		const char* p = line;
+		while (*p == ' ' || *p == '\t') p++;
+		if (_strnicmp(p, "mablockmb", 9) != 0) continue;
+		const char* q = p + 9;
+		while (*q == ' ' || *q == '\t') q++;
+		if (*q != '=') continue;
+		const int v = atoi(q + 1);
+		if (v >= 0 && v <= 1024) gg_ma_block_mb = v;
+	}
+	fclose(fp);
+}
+
 // ============================================================================
 // GGMAX 1.70: VRAM CENSUS (global namespace; driven by harness DUMP_VRAM)
 // Every D3D12MA-backed allocation (texture / buffer / raytracing structure) is
@@ -222,12 +269,21 @@ void GG_DumpVRAMCensus(const char* path)
 	if (f == nullptr) return;
 
 	unsigned long long ma_alloc = 0, ma_block = 0, budget = 0, usage = 0;
+	// GGMAX 1.83: report the DEFAULT-heap (video memory) totals SEPARATELY from the grand total.
+	// `d3d12ma_blocks` sums both memory segments — L1 video memory AND L0 system memory, where
+	// UPLOAD/READBACK staging lives. Deriving "padding" as (blocks - census) therefore charges
+	// system RAM waste to the video budget, and deriving "non-resource" as (driver_usage - blocks)
+	// subtracts system-memory blocks from a video-only driver figure, understating it by the same
+	// amount. The 19-demo audit did both. These two fields let any consumer stay in one segment.
+	unsigned long long ma_alloc_video = 0, ma_block_video = 0;
 	if (gg_vram_allocator != nullptr)
 	{
 		D3D12MA::TotalStatistics stats = {};
 		gg_vram_allocator->CalculateStatistics(&stats);
 		ma_alloc = stats.Total.Stats.AllocationBytes;
 		ma_block = stats.Total.Stats.BlockBytes;
+		ma_alloc_video = stats.HeapType[0].Stats.AllocationBytes; // 0 = D3D12_HEAP_TYPE_DEFAULT
+		ma_block_video = stats.HeapType[0].Stats.BlockBytes;
 		D3D12MA::Budget local = {};
 		gg_vram_allocator->GetBudget(&local, nullptr);
 		budget = local.BudgetBytes;
@@ -236,12 +292,14 @@ void GG_DumpVRAMCensus(const char* path)
 	fprintf(f, "CENSUS v1 records=%llu census_bytes=%llu census_default_heap=%llu census_upload_readback=%llu"
 		" d3d12ma_allocated=%llu d3d12ma_blocks=%llu driver_usage=%llu driver_budget=%llu swapchain=%llu"
 		" pso_creates=%llu pso_compiles=%llu pso_driver_eager=%llu descheap_bytes=%llu cmdalloc=%llu"
-		" pso_compile_ms=%.1f pso_compile_max_ms=%.1f\n",
+		" pso_compile_ms=%.1f pso_compile_max_ms=%.1f"
+		" d3d12ma_allocated_video=%llu d3d12ma_blocks_video=%llu\n",
 		(unsigned long long)snapshot.size(), census_total, census_default, census_other,
 		ma_alloc, ma_block, usage, budget, gg_vram_swapchain_bytes.load(),
 		::gg_dbg_pso_creates.load(), ::gg_dbg_pso_compiles.load(), ::gg_dbg_pso_driver_eager.load(),
 		::gg_dbg_descriptor_heap_bytes.load(), ::gg_dbg_cmdallocator_count.load(),
-		::gg_dbg_pso_compile_us.load() / 1000.0, ::gg_dbg_pso_compile_max_us.load() / 1000.0);
+		::gg_dbg_pso_compile_us.load() / 1000.0, ::gg_dbg_pso_compile_max_us.load() / 1000.0,
+		ma_alloc_video, ma_block_video);
 	// GGMAX 1.77: the driver's reported usage runs ~1.2-1.5 GB above d3d12ma_blocks on EVERY level,
 	// content-independent. Nothing in the resource census can explain it, so record the driver number
 	// at named milestones: the shape of the curve (already-high at startup vs climbing with PSO
@@ -267,6 +325,85 @@ void GG_DumpVRAMCensus(const char* path)
 			r.kind == 0 ? wi::graphics::GetFormatString((wi::graphics::Format)r.format) : "-",
 			r.bind_flags, r.misc_flags, r.usage, r.aliased,
 			r.name);
+	}
+	fclose(f);
+}
+
+// ============================================================================
+// GGMAX 1.83: D3D12MA PADDING ATTRIBUTION (harness DUMP_MAPAD)
+//
+// The 19-demo audit's `pad` column — `d3d12ma_blocks - d3d12ma_allocated` — averages 363 MB and
+// ranges 121-601, and nobody has ever looked at what it is made of. It has three possible owners
+// and they have completely different fixes:
+//
+//   1. TRAILING SPACE in partly-filled blocks. D3D12MA suballocates from 64 MB heaps by default
+//      (PreferredBlockSize is commented out at CreateAllocator, so D3D12MA_DEFAULT_BLOCK_SIZE
+//      applies), so the last block of each vector is typically half empty. Fix = smaller blocks,
+//      exactly like the 1.80 A3 change to the mesh suballocator.
+//   2. FRAGMENTATION between live allocations. Fix = defragmentation, which is a real project.
+//   3. COMMITTED-ALLOCATION rounding. Per the D3D12MA docs a committed allocation "has its own
+//      block", so it lands in BlockCount/BlockBytes too, and any gap between the resource size
+//      and the heap the driver gives it shows up as padding we cannot address at all.
+//
+// UnusedRangeCount plus UnusedRangeSizeMax separates 1 from 2 immediately: a handful of huge
+// ranges is trailing space, thousands of small ones is fragmentation. The JSON dump then gives
+// the per-block ground truth rather than an inference.
+void GG_DumpMAPadding(const char* path)
+{
+	if (gg_vram_allocator == nullptr) return;
+	FILE* f = fopen(path, "w");
+	if (f == nullptr) return;
+
+	D3D12MA::TotalStatistics stats = {};
+	gg_vram_allocator->CalculateStatistics(&stats);
+
+	static const char* heapnames[4] = { "DEFAULT", "UPLOAD", "READBACK", "CUSTOM" };
+	fprintf(f, "# MAPAD v1 — D3D12MA block padding attribution\n");
+	fprintf(f, "# heap blocks allocs block_mb alloc_mb pad_mb unused_ranges pad_per_range_kb "
+		"unused_min_kb unused_max_mb alloc_min_kb alloc_max_mb\n");
+	for (int i = 0; i < 4; ++i)
+	{
+		const D3D12MA::DetailedStatistics& d = stats.HeapType[i];
+		if (d.Stats.BlockCount == 0 && d.Stats.AllocationCount == 0) continue;
+		const unsigned long long pad = d.Stats.BlockBytes - d.Stats.AllocationBytes;
+		fprintf(f, "%-9s %5u %6u %9.1f %9.1f %8.1f %6u %10.1f %8.1f %10.1f %8.1f %10.1f\n",
+			heapnames[i], d.Stats.BlockCount, d.Stats.AllocationCount,
+			d.Stats.BlockBytes / (1024.0 * 1024.0), d.Stats.AllocationBytes / (1024.0 * 1024.0),
+			pad / (1024.0 * 1024.0), d.UnusedRangeCount,
+			d.UnusedRangeCount ? (pad / 1024.0 / d.UnusedRangeCount) : 0.0,
+			d.UnusedRangeSizeMin == UINT64_MAX ? 0.0 : d.UnusedRangeSizeMin / 1024.0,
+			d.UnusedRangeSizeMax / (1024.0 * 1024.0),
+			d.AllocationSizeMin == UINT64_MAX ? 0.0 : d.AllocationSizeMin / 1024.0,
+			d.AllocationSizeMax / (1024.0 * 1024.0));
+	}
+	{
+		const D3D12MA::DetailedStatistics& t = stats.Total;
+		fprintf(f, "%-9s %5u %6u %9.1f %9.1f %8.1f %6u %10.1f %8.1f %10.1f %8.1f %10.1f\n",
+			"TOTAL", t.Stats.BlockCount, t.Stats.AllocationCount,
+			t.Stats.BlockBytes / (1024.0 * 1024.0), t.Stats.AllocationBytes / (1024.0 * 1024.0),
+			(t.Stats.BlockBytes - t.Stats.AllocationBytes) / (1024.0 * 1024.0), t.UnusedRangeCount,
+			t.UnusedRangeCount ? ((t.Stats.BlockBytes - t.Stats.AllocationBytes) / 1024.0 / t.UnusedRangeCount) : 0.0,
+			t.UnusedRangeSizeMin == UINT64_MAX ? 0.0 : t.UnusedRangeSizeMin / 1024.0,
+			t.UnusedRangeSizeMax / (1024.0 * 1024.0),
+			t.AllocationSizeMin == UINT64_MAX ? 0.0 : t.AllocationSizeMin / 1024.0,
+			t.AllocationSizeMax / (1024.0 * 1024.0));
+	}
+
+	// D3D12MA's own per-block map — the ground truth for "how full is each block", which no
+	// aggregate can give. Written as UTF-8 so the analysis tooling can just read it.
+	WCHAR* json = nullptr;
+	gg_vram_allocator->BuildStatsString(&json, TRUE);
+	if (json != nullptr)
+	{
+		fprintf(f, "\n# ---- D3D12MA detailed map (JSON) ----\n");
+		const int len = WideCharToMultiByte(CP_UTF8, 0, json, -1, nullptr, 0, nullptr, nullptr);
+		if (len > 0)
+		{
+			std::vector<char> utf8((size_t)len);
+			WideCharToMultiByte(CP_UTF8, 0, json, -1, utf8.data(), len, nullptr, nullptr);
+			fputs(utf8.data(), f);
+		}
+		gg_vram_allocator->FreeStatsString(json);
 	}
 	fclose(f);
 }
@@ -2749,7 +2886,14 @@ std::mutex queue_locker;
 		D3D12MA::ALLOCATOR_DESC allocatorDesc = {};
 		allocatorDesc.pDevice = device.Get();
 		allocatorDesc.pAdapter = dxgiAdapter.Get();
-		//allocatorDesc.PreferredBlockSize = 256 * 1024 * 1024;
+		// GGMAX 1.83: block size 16 MB by default (was D3D12MA's own 64), worth −92 to −140 MB of
+		// video memory on every level. Full measurement table at gg_ma_block_mb. setup.ini
+		// `mablockmb=64` reverts to stock. See VRAM_FLOOR.md.
+		gg_read_ma_block_mb();
+		if (gg_ma_block_mb > 0)
+		{
+			allocatorDesc.PreferredBlockSize = (UINT64)gg_ma_block_mb * 1024ull * 1024ull;
+		}
 		//allocatorDesc.Flags |= D3D12MA::ALLOCATOR_FLAG_ALWAYS_COMMITTED;
 		allocatorDesc.Flags |= D3D12MA::ALLOCATOR_FLAG_DEFAULT_POOLS_NOT_ZEROED;
 		allocatorDesc.Flags |= D3D12MA::ALLOCATOR_FLAG_MSAA_TEXTURES_ALWAYS_COMMITTED;

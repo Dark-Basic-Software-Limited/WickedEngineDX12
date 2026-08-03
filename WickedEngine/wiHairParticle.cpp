@@ -37,6 +37,9 @@ namespace wi
 	// DEFAULT ON since 2026-07-27 — user-confirmed in a game-mode walk (with the game-side
 	// tier AUTO coupling: no square pops, no flicker) and explicitly requested as default.
 	// Kill switch / A-B: harness SET_GRASSLOD <0|1> [step2frac step4frac boost].
+	// GGMAX 1.87: flicker probe, harness SET_GRASSTYPEFREEZE. Suppresses merged grass's per-strand
+	// type adoption. Diagnostic ONLY — density is wrong while it is on. Default off.
+	bool gg_grass_freeze_type = false;
 	bool gg_grass_lod = true;
 	float gg_grass_lod_step2_frac = 0.35f;  // fraction of viewDistance where 2x decimation starts
 	float gg_grass_lod_step4_frac = 0.60f;  // fraction of viewDistance where 4x decimation starts
@@ -557,6 +560,14 @@ namespace wi
 			if (hair.IsCameraBendEnabled())
 			{
 				hcb.xHairFlags |= HAIR_FLAG_CAMERA_BEND;
+			}
+			// GGMAX 1.87 flicker probe (harness SET_GRASSTYPEFREEZE). Diagnostic only — it
+			// suppresses merged grass's per-strand type adoption so every per-type parameter goes
+			// uniform. Density is deliberately wrong while it is on; judge CONSECUTIVE-FRAME diff
+			// within this config, never against another config's image.
+			if (gg_grass_freeze_type)
+			{
+				hcb.xHairFlags |= HAIR_FLAG_GG_FREEZE_TYPE;
 			}
 			hcb.xHairAspect = hair.width * (float)std::max(1u, desc.width) / (float)std::max(1u, desc.height);
 			hcb.xHairLength = hair.length;

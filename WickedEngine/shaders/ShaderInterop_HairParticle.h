@@ -19,6 +19,13 @@ enum HAIR_FLAGS
 	HAIR_FLAG_REGENERATE_FRAME = 1 << 0,
 	HAIR_FLAG_UNORM_POS = 1 << 1,
 	HAIR_FLAG_CAMERA_BEND = 1 << 2,
+	// GGMAX 1.87 (flicker hunt): freeze merged grass's per-strand type resolution. Strands keep
+	// the entity's own type instead of adopting the paint cell's, so every per-type parameter
+	// becomes uniform across the system. If the scene-wide per-frame churn dies with this set,
+	// the flicker IS the type resolution; if it survives, type resolution is exonerated.
+	// Diagnostic only — it changes what renders, so judge it on CONSECUTIVE-FRAME diff within
+	// one config, never against a different config's image.
+	HAIR_FLAG_GG_FREEZE_TYPE = 1 << 3,
 };
 
 struct HairParticleAtlasRect

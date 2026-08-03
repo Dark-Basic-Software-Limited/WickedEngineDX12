@@ -150,6 +150,13 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 Gid : SV_GroupID, uint groupIn
 				{
 					strand_length = 0; // unpainted cell — no grass of any type here
 				}
+				else if (xHairGrassType == GG_HAIR_GRASS_MERGED && (xHairFlags & HAIR_FLAG_GG_FREEZE_TYPE))
+				{
+					// GGMAX 1.87 flicker probe: keep the strand but do NOT adopt the cell's type,
+					// so gg_resolved_type stays 0 for every strand and all per-type parameters go
+					// uniform. Density is wrong under this flag on purpose — it exists only to
+					// answer whether per-frame churn comes from the type resolution.
+				}
 				else if (xHairGrassType == GG_HAIR_GRASS_MERGED)
 				{
 					// Merged: this system owns every type, so adopt the cell's type instead of

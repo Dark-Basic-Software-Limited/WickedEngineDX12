@@ -81,6 +81,17 @@ namespace wi::profiler
 	void gg_trace_mark_id(const char* prefix, unsigned int id); // formatted "<prefix>_<hex id>" mark
 	unsigned long long gg_trace_now_us(void); // tracer clock, for caller-side gating
 
+	// GGMAX 1.82: HITCH HISTOGRAM — every frame bucketed, not just the >100ms ones the tracer
+	// above catches. Built to measure the cost of lazy object PSOs (first-use compile stalls),
+	// where the sum of compile time and the mean frame rate both hide the thing that matters.
+	// Rides the same always-on path as the tracer, so enabling the profiler is not required.
+	// Buckets are frames slower than 16.7 / 25 / 33 / 50 / 100 ms.
+#define GG_HITCH_BUCKETS 5
+	void gg_hitch_reset(void);
+	void gg_hitch_get(unsigned long long* frames, unsigned long long* over /*[GG_HITCH_BUCKETS]*/,
+		unsigned long long* max_us, unsigned long long* total_us,
+		unsigned long long* pso_compiles, unsigned long long* pso_compile_us);
+
 	// Safe data access (no GPU calls, no rendering - just reads internal timing data)
 	// Returns formatted text of all CPU and GPU profiling ranges with timing in ms.
 	// Profiler must be enabled via SetEnabled(true) for data to be collected.

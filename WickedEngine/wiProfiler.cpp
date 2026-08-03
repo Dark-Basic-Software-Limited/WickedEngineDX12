@@ -83,6 +83,56 @@ namespace wi::profiler
 	std::atomic<unsigned long long> gg_trace_gap_count{ 0 };   // read by harness GAPS: line
 	std::atomic<unsigned long long> gg_trace_gap_last_ms{ 0 };
 	unsigned long long gg_trace_threshold_us = 100000;         // 100ms
+
+	// GGMAX 1.82: HITCH HISTOGRAM.
+	//
+	// The gap tracer above only fires above 100 ms — loading-scale stalls. A first-use PSO compile
+	// is 1-30 ms, which is invisible to it AND invisible to an FPS average (57 compiles smeared
+	// over 600 frames move the mean by nothing) yet is exactly what a player feels as a stutter.
+	// So: count EVERY frame into buckets, keep the worst one, and provide an explicit reset so a
+	// window can be scoped to "the 20 s after a level load" instead of "since launch".
+	//
+	// Deliberately lives on the gap tracer's path because that runs at every BeginFrame regardless
+	// of whether the profiler is ENABLED — turning the profiler on to measure a hitch would change
+	// the thing being measured.
+	static const unsigned long long gg_hitch_thresholds_us[GG_HITCH_BUCKETS] = { 16700, 25000, 33000, 50000, 100000 };
+	static std::atomic<unsigned long long> gg_hitch_frames{ 0 };
+	static std::atomic<unsigned long long> gg_hitch_over[GG_HITCH_BUCKETS];
+	static std::atomic<unsigned long long> gg_hitch_max_us{ 0 };
+	static std::atomic<unsigned long long> gg_hitch_total_us{ 0 };
+	static unsigned long long gg_hitch_pso_snap = 0, gg_hitch_pso_us_snap = 0;
+
+	void gg_hitch_reset(void)
+	{
+		gg_hitch_frames.store(0, std::memory_order_relaxed);
+		for (int i = 0; i < GG_HITCH_BUCKETS; ++i) gg_hitch_over[i].store(0, std::memory_order_relaxed);
+		gg_hitch_max_us.store(0, std::memory_order_relaxed);
+		gg_hitch_total_us.store(0, std::memory_order_relaxed);
+		gg_hitch_pso_snap = gg_dbg_pso_compiles.load();
+		gg_hitch_pso_us_snap = gg_dbg_pso_compile_us.load();
+	}
+	void gg_hitch_get(unsigned long long* frames, unsigned long long* over, unsigned long long* max_us,
+		unsigned long long* total_us, unsigned long long* pso_compiles, unsigned long long* pso_compile_us)
+	{
+		if (frames) *frames = gg_hitch_frames.load(std::memory_order_relaxed);
+		if (over) for (int i = 0; i < GG_HITCH_BUCKETS; ++i) over[i] = gg_hitch_over[i].load(std::memory_order_relaxed);
+		if (max_us) *max_us = gg_hitch_max_us.load(std::memory_order_relaxed);
+		if (total_us) *total_us = gg_hitch_total_us.load(std::memory_order_relaxed);
+		// Reported as deltas since the reset, so the window means what it says.
+		if (pso_compiles) *pso_compiles = gg_dbg_pso_compiles.load() - gg_hitch_pso_snap;
+		if (pso_compile_us) *pso_compile_us = gg_dbg_pso_compile_us.load() - gg_hitch_pso_us_snap;
+	}
+	static void gg_hitch_accumulate(unsigned long long dt_us)
+	{
+		gg_hitch_frames.fetch_add(1, std::memory_order_relaxed);
+		gg_hitch_total_us.fetch_add(dt_us, std::memory_order_relaxed);
+		for (int i = 0; i < GG_HITCH_BUCKETS; ++i)
+		{
+			if (dt_us > gg_hitch_thresholds_us[i]) gg_hitch_over[i].fetch_add(1, std::memory_order_relaxed);
+		}
+		unsigned long long prev = gg_hitch_max_us.load(std::memory_order_relaxed);
+		while (dt_us > prev && !gg_hitch_max_us.compare_exchange_weak(prev, dt_us, std::memory_order_relaxed)) {}
+	}
 	static unsigned long long gg_trace_qpc_us(void)
 	{
 		LARGE_INTEGER f, c;
@@ -120,6 +170,7 @@ namespace wi::profiler
 		if (gg_trace_prev_begin_us != 0)
 		{
 			const unsigned long long dt = now - gg_trace_prev_begin_us;
+			gg_hitch_accumulate(dt); // GGMAX 1.82 — every frame, not just the >100ms ones
 			if (dt > gg_trace_threshold_us)
 			{
 				gg_trace_gap_count.fetch_add(1, std::memory_order_relaxed);

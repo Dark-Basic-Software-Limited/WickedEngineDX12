@@ -41,6 +41,9 @@ using namespace Microsoft::WRL;
 // lazy at-draw-time PSO driver compiles + texture creations — the classic warm-up hitchers.
 std::atomic<unsigned long long> gg_dbg_pso_compiles{ 0 };
 std::atomic<unsigned long long> gg_dbg_pso_compile_us{ 0 };
+// GGMAX 1.82: the SUM of compile time is not what a user feels — a hitch is the WORST SINGLE
+// stall. 57 compiles totalling 400 ms is invisible if they are 7 ms each and fatal if one is 300.
+std::atomic<unsigned long long> gg_dbg_pso_compile_max_us{ 0 };
 std::atomic<unsigned long long> gg_dbg_tex_creates{ 0 };
 std::atomic<unsigned long long> gg_dbg_pso_creates{ 0 }; // GGMAX 1.70: pipeline states created (each costs driver-side video memory the resource census cannot see)
 
@@ -232,11 +235,13 @@ void GG_DumpVRAMCensus(const char* path)
 	}
 	fprintf(f, "CENSUS v1 records=%llu census_bytes=%llu census_default_heap=%llu census_upload_readback=%llu"
 		" d3d12ma_allocated=%llu d3d12ma_blocks=%llu driver_usage=%llu driver_budget=%llu swapchain=%llu"
-		" pso_creates=%llu pso_compiles=%llu pso_driver_eager=%llu descheap_bytes=%llu cmdalloc=%llu\n",
+		" pso_creates=%llu pso_compiles=%llu pso_driver_eager=%llu descheap_bytes=%llu cmdalloc=%llu"
+		" pso_compile_ms=%.1f pso_compile_max_ms=%.1f\n",
 		(unsigned long long)snapshot.size(), census_total, census_default, census_other,
 		ma_alloc, ma_block, usage, budget, gg_vram_swapchain_bytes.load(),
 		::gg_dbg_pso_creates.load(), ::gg_dbg_pso_compiles.load(), ::gg_dbg_pso_driver_eager.load(),
-		::gg_dbg_descriptor_heap_bytes.load(), ::gg_dbg_cmdallocator_count.load());
+		::gg_dbg_descriptor_heap_bytes.load(), ::gg_dbg_cmdallocator_count.load(),
+		::gg_dbg_pso_compile_us.load() / 1000.0, ::gg_dbg_pso_compile_max_us.load() / 1000.0);
 	// GGMAX 1.77: the driver's reported usage runs ~1.2-1.5 GB above d3d12ma_blocks on EVERY level,
 	// content-independent. Nothing in the resource census can explain it, so record the driver number
 	// at named milestones: the shape of the curve (already-high at startup vs climbing with PSO
@@ -2397,8 +2402,15 @@ std::mutex queue_locker;
 				dx12_check(device->CreatePipelineState(&streamDesc, PPV_ARGS(newpso)));
 
 				QueryPerformanceCounter(&gg_c1);
+				const unsigned long long gg_compile_us = (unsigned long long)(((gg_c1.QuadPart - gg_c0.QuadPart) * 1000000.0) / (double)gg_f.QuadPart);
 				gg_dbg_pso_compiles.fetch_add(1, std::memory_order_relaxed);
-				gg_dbg_pso_compile_us.fetch_add((unsigned long long)(((gg_c1.QuadPart - gg_c0.QuadPart) * 1000000.0) / (double)gg_f.QuadPart), std::memory_order_relaxed);
+				gg_dbg_pso_compile_us.fetch_add(gg_compile_us, std::memory_order_relaxed);
+				// GGMAX 1.82: keep the worst single compile — that is the hitch the user actually sees.
+				{
+					unsigned long long gg_prev = gg_dbg_pso_compile_max_us.load(std::memory_order_relaxed);
+					while (gg_compile_us > gg_prev &&
+						!gg_dbg_pso_compile_max_us.compare_exchange_weak(gg_prev, gg_compile_us, std::memory_order_relaxed)) {}
+				}
 
 				commandlist.pipelines_worker.push_back(std::make_pair(pipeline_hash, newpso));
 				pipeline = newpso.Get();

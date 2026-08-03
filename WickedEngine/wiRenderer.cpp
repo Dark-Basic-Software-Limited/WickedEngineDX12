@@ -205,6 +205,7 @@ bool MESHLET_OCCLUSION_CULLING = false;
 bool gg_pso_trim = true;
 
 // GGMAX 1.79 (low-VRAM preset, batch 3): build object PSOs LAZILY.
+// GGMAX 1.82: DEFAULT ON for everybody. Revert with setup.ini `lazypso=0`.
 //
 // After the 1.77 trim there are still ~7,500 object pipelines at ~96 KB of driver video memory
 // each — roughly 720 MB — and a given level binds only a small fraction of them. Passing nullptr
@@ -214,10 +215,18 @@ bool gg_pso_trim = true;
 // {pso, renderpass_hash}. So only pipelines actually used ever reach the driver.
 //
 // This is a supported mode, not a trick — PSO_object_wire, hair, emitters and impostors already
-// use the two-argument form. The cost is a first-use compile hitch per pipeline, which is why
-// this is OFF by default and belongs to the low-VRAM preset rather than the shipping path.
-// gg_dbg_pso_compiles / gg_dbg_pso_compile_us (gap_trace.txt) measure exactly that cost.
-bool gg_pso_lazy_object = false;
+// use the two-argument form. The cost is a first-use compile hitch per pipeline.
+//
+// Why it moved from the low-VRAM preset to the default path: Island Showdown binds 57 pipelines
+// against 6337 built eagerly (~1%), for −633 MB with POLYS bit-identical and FPS flat-to-better.
+// Behind `lowvram=1` that only reached users who hand-edit setup.ini, so the 8 GB majority paid
+// ~700 MB for pipelines they never bind. The hitch is measured, not assumed — see the HITCH:
+// line in GET_PERF_DATA (frame-time histogram + worst single frame) and pso_compile_max_ms in
+// the DUMP_VRAM header, which is the number that matters: the WORST single compile, not the sum.
+//
+// ACCEPTANCE TEST for any change here: POLYS must stay bit-identical. A pipeline that fails to
+// appear makes RenderMeshes skip the draw, so a missing PSO shows up immediately as fewer polys.
+bool gg_pso_lazy_object = true;
 std::atomic<size_t> SHADER_ERRORS{ 0 };
 std::atomic<size_t> SHADER_MISSING{ 0 };
 bool VXGI_ENABLED = false;

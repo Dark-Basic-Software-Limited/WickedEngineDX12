@@ -28,7 +28,12 @@ struct VertexToPixel
 		tex = bindless_textures_half4[descriptor_index(0)];
 		if (grasstype == 0)
 			return false;
-		const uint idx = xHairGrassTypes[min(grasstype - 1, GG_HAIR_MAX_GRASS_TYPES - 1)].textureIndex;
+		// GGMAX 1.88 selective probe (mode 3): every strand takes type 0's blade texture, so the
+		// per-strand texture choice can no longer vary. If the per-frame churn collapses with
+		// only this frozen, the flicker is textureIndex selection.
+		const uint gg_typeidx = (xHairFlags & HAIR_FLAG_GG_FREEZE_TEXTURE)
+			? 0u : min(grasstype - 1, GG_HAIR_MAX_GRASS_TYPES - 1);
+		const uint idx = xHairGrassTypes[gg_typeidx].textureIndex;
 		if (idx == 0)
 			return false;
 		tex = bindless_textures_half4[descriptor_index(idx)];

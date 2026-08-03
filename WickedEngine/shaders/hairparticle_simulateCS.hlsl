@@ -228,7 +228,9 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 Gid : SV_GroupID, uint groupIn
 	// GGMAX 1.74: per-type parameters. In per-type mode these collapse to the entity's own
 	// uniforms, so the generated code is identical to before for every non-merged hair system.
 	const bool gg_merged = (xHairGrassType == GG_HAIR_GRASS_MERGED);
-	const float gg_length      = gg_merged ? xHairGrassTypes[gg_resolved_type].length       : xHairLength;
+	// GGMAX 1.88 selective probe (mode 4): every strand takes type 0's length.
+	const uint gg_len_type     = (xHairFlags & HAIR_FLAG_GG_FREEZE_LENGTH) ? 0u : gg_resolved_type;
+	const float gg_length      = gg_merged ? xHairGrassTypes[gg_len_type].length            : xHairLength;
 	const float gg_width       = gg_merged ? xHairGrassTypes[gg_resolved_type].width        : (atlas_rect.aspect * xHairAspect);
 	const float gg_stiffness   = gg_merged ? xHairGrassTypes[gg_resolved_type].stiffness    : xHairStiffness;
 	const float gg_drag        = gg_merged ? xHairGrassTypes[gg_resolved_type].drag         : xHairDrag;

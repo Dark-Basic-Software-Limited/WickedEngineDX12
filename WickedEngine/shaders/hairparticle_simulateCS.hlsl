@@ -341,7 +341,10 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 Gid : SV_GroupID, uint groupIn
 	// regenerate_frame every strand must build the static primitive buffer + seed its sim state. Drawn
 	// (visible) strands are untouched, so the rendered grass is byte-identical; a culled strand's sim
 	// state simply freezes until it re-enters view (imperceptible settle under wind, none when static).
-	if (!visible && !regenerate_frame)
+	// GGMAX 1.94 probe: normally a culled strand returns here and writes NO vertex slots, so its
+	// slots keep whatever was last written into them. With ALWAYSWRITE set every strand writes
+	// every frame, which is the discriminator for whether unwritten slots are the corruption.
+	if (!visible && !regenerate_frame && !(xHairFlags & HAIR_FLAG_GG_DEBUG_ALWAYSWRITE))
 		return;
 
 	half len = lerp(1, rng.next_float(), saturate(xHairRandomness)) * strand_length;

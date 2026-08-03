@@ -41,6 +41,10 @@ enum HAIR_FLAGS
 	// vertex write/read plumbing is sound and gg_resolved_type is the churning input; if it still
 	// churns the plumbing itself is corrupt. Mask bit 32.
 	HAIR_FLAG_GG_DEBUG_STABLETYPE = 1 << 8,
+	// GGMAX 1.94: suppress the cull early-return so EVERY strand writes its vertex slots every
+	// frame. If the churn collapses with this set, the unwritten-slot path at the early return
+	// is the corruption. Mask bit 64.
+	HAIR_FLAG_GG_DEBUG_ALWAYSWRITE = 1 << 9,
 };
 
 struct HairParticleAtlasRect

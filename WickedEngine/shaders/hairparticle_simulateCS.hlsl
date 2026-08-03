@@ -412,8 +412,15 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 Gid : SV_GroupID, uint groupIn
 			// samples its own texture. The buffer is R8G8B8A8_SNORM and the VS reads only .xyz,
 			// so this channel was genuinely unused. Encode as (type+1)/127 — an exact SNORM
 			// integer step — and 0 keeps "no per-strand type" for stock hair.
-			vertexBuffer_NOR[v0] = half4(target, gg_merged ? ((gg_resolved_type + 1u) / 127.0) : 0);
-			vertexBuffer_UVS[v0] = uv.xyxy; // a second uv set could be used here
+			vertexBuffer_NOR[v0] = half4(target, 0); // GGMAX 1.92: type moved to vb_uvs.w (see below)
+			vertexBuffer_UVS[v0] = float4(uv.x, uv.y, uv.x, gg_merged ? ((gg_resolved_type + 1u) / 255.0) : 0.0);
+			// GGMAX 1.92 — THE FLICKER FIX. The grass type used to ride in vb_nor.w, which is
+			// R8G8B8A8_SNORM: its quantisation step is 2/255 = 0.0078431 while the type spacing
+			// written was 1/127 = 0.0078740, so ADJACENT TYPES WERE UNDER ONE STEP APART and the
+			// 0.4% mismatch accumulated with index. Strands decoded a neighbouring type and
+			// sampled its blade texture — the flickering coloured squares.
+			// vb_uvs is R16G16B16A16_UNORM (wiScene_Components.h:1019): 65535 steps, so /255
+			// leaves 257 steps of margin per type. .w held uv1.y, the unused second UV set.
 			
 			if (distance_culled)
 			{
@@ -629,8 +636,15 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 Gid : SV_GroupID, uint groupIn
 				}
 			
 				vertexBuffer_POS[v0] = float4(position, 0);
-				vertexBuffer_NOR[v0] = half4(normal, gg_merged ? ((gg_resolved_type + 1u) / 127.0) : 0); // GGMAX 1.74: see above
-				vertexBuffer_UVS[v0] = uv.xyxy; // a second uv set could be used here
+				vertexBuffer_NOR[v0] = half4(normal, 0); // GGMAX 1.92: type moved to vb_uvs.w
+				vertexBuffer_UVS[v0] = float4(uv.x, uv.y, uv.x, gg_merged ? ((gg_resolved_type + 1u) / 255.0) : 0.0);
+			// GGMAX 1.92 — THE FLICKER FIX. The grass type used to ride in vb_nor.w, which is
+			// R8G8B8A8_SNORM: its quantisation step is 2/255 = 0.0078431 while the type spacing
+			// written was 1/127 = 0.0078740, so ADJACENT TYPES WERE UNDER ONE STEP APART and the
+			// 0.4% mismatch accumulated with index. Strands decoded a neighbouring type and
+			// sampled its blade texture — the flickering coloured squares.
+			// vb_uvs is R16G16B16A16_UNORM (wiScene_Components.h:1019): 65535 steps, so /255
+			// leaves 257 steps of margin per type. .w held uv1.y, the unused second UV set.
 			
 				if (distance_culled)
 				{

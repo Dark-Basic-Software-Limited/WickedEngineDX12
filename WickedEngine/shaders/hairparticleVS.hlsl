@@ -17,10 +17,15 @@ VertexToPixel main(uint vid : SV_VertexID)
 	float3 position = mul(inst.transform.GetMatrix(), float4(pos_wind.xyz, 1)).xyz;
 	float4 nor_raw = bindless_buffers_float4[descriptor_index(geometry.vb_nor)][vertexID];
 	float3 normal = normalize(nor_raw.xyz);
-	// GGMAX 1.74: .w carries (grasstype + 1) / 127 written by the simulate CS in merged mode.
-	// SNORM 8-bit stores integer steps exactly, so rounding recovers the index losslessly.
-	Out.grasstype = (uint)round(saturate(nor_raw.w) * 127.0);
 	float4 uvsets = bindless_buffers_float4[descriptor_index(geometry.vb_uvs)][vertexID];
+	// GGMAX 1.92 — THE FLICKER FIX. The grass type now arrives in vb_uvs.w, NOT vb_nor.w.
+	// The old claim on this line ("SNORM 8-bit stores integer steps exactly") was simply false:
+	// vb_nor is R8G8B8A8_SNORM with a 2/255 = 0.0078431 step, while the CS wrote types spaced
+	// 1/127 = 0.0078740 apart — adjacent types sat UNDER one quantisation step apart and the
+	// 0.4% mismatch accumulated with index, so strands decoded a neighbouring type and sampled
+	// its blade texture. That was the flickering coloured squares.
+	// vb_uvs is R16G16B16A16_UNORM: 65535 steps, /255 gives 257 steps of margin per type.
+	Out.grasstype = (uint)round(saturate(uvsets.w) * 255.0);
 
 	Out.fade = saturate(distance(position.xyz, GetCamera().position.xyz) / xHairViewDistance);
 	Out.fade = saturate(Out.fade - 0.8f) * 5.0f; // fade will be on edge and inwards 20%

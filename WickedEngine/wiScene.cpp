@@ -1047,8 +1047,17 @@ namespace wi::scene
 
 		wi::profiler::EndRange(gg_range_s5); // GGMAX 1.32
 	}
+	// GGMAX 1.85: declared here because Scene::Clear precedes the tracer below and needs it.
+	std::atomic<unsigned int> gg_hairkill_clear{ 0 };   // hair components wiped by Scene::Clear
+
 	void Scene::Clear()
 	{
+		// A wholesale Clear() wipes hair components without ever reaching Entity_Remove, so it
+		// would be invisible to the tracer below. Count it separately - "the scene was cleared
+		// under us" is a completely different bug from "someone removed our entity", and the two
+		// must not be confusable.
+		gg_hairkill_clear.fetch_add((unsigned int)hairs.GetCount(), std::memory_order_relaxed);
+
 		for(auto& entry : componentLibrary.entries)
 		{
 			entry.second.component_manager->Clear();
@@ -1270,8 +1279,58 @@ namespace wi::scene
 		}
 	}
 
+	// GGMAX 1.85: HAIR-ENTITY DESTRUCTION TRACER.
+	//
+	// Merged grass creates 9 hair entities (game-side counters prove it: created=9, no early exit,
+	// and the grass code's own teardown removes none) and yet Scene::hairs ends up EMPTY. Two
+	// source-read theories about who kills them were already wrong, so this records the killer
+	// instead of arguing about it: every removal of an entity that currently owns a hair component
+	// captures _ReturnAddress(), and the recursive child path records the PARENT it was pulled down
+	// with — which is the difference between "someone removed the grass" and "someone removed the
+	// chunk and the grass went with it".
+	struct GGHairKill { const void* ret; uint32_t entity; uint32_t parent; unsigned long long frame; unsigned int reason; };
+	static GGHairKill gg_hairkill[128];
+	static std::atomic<unsigned int> gg_hairkill_total{ 0 };
+	static thread_local unsigned int gg_hairkill_depth = 0;
+	static thread_local Entity gg_hairkill_parent = INVALID_ENTITY;
+	extern std::atomic<unsigned int> gg_hairkill_clear;        // defined above Scene::Clear
+	static void gg_record_hairkill(const void* ret, Entity e, Entity parent, unsigned int reason)
+	{
+		const unsigned int idx = gg_hairkill_total.fetch_add(1, std::memory_order_relaxed);
+		if (idx < arraysize(gg_hairkill))
+		{
+			gg_hairkill[idx].ret = ret;
+			gg_hairkill[idx].entity = (uint32_t)e;
+			gg_hairkill[idx].parent = (uint32_t)parent;
+			gg_hairkill[idx].frame = 0;
+			gg_hairkill[idx].reason = reason;
+		}
+	}
+	unsigned int GG_GetHairKills(const void** out_ret, unsigned int* out_entity, unsigned int* out_parent,
+		unsigned int* out_reason, unsigned int* out_clearcount, unsigned int max_out)
+	{
+		if (out_clearcount) *out_clearcount = gg_hairkill_clear.load();
+		const unsigned int n = std::min((unsigned int)gg_hairkill_total.load(), (unsigned int)arraysize(gg_hairkill));
+		const unsigned int m = std::min(n, max_out);
+		for (unsigned int i = 0; i < m; ++i)
+		{
+			if (out_ret)    out_ret[i]    = gg_hairkill[i].ret;
+			if (out_entity) out_entity[i] = gg_hairkill[i].entity;
+			if (out_parent) out_parent[i] = gg_hairkill[i].parent;
+			if (out_reason) out_reason[i] = gg_hairkill[i].reason;
+		}
+		return m;
+	}
+
 	void Scene::Entity_Remove(Entity entity, bool recursive, bool keep_sorted)
 	{
+		// GGMAX 1.85: reason 0 = removed directly, 1 = pulled down as a recursive child.
+		if (hairs.Contains(entity))
+		{
+			gg_record_hairkill(_ReturnAddress(), entity,
+				gg_hairkill_depth > 0 ? gg_hairkill_parent : INVALID_ENTITY,
+				gg_hairkill_depth > 0 ? 1u : 0u);
+		}
 		// GGMAX 1.36b: removing an entity that is a hierarchy entry (or a PARENT of entries)
 		// mutates the hierarchy forest — invalidate the subtree snapshot. Conservative: any
 		// removal while a hierarchy exists bumps (a non-hierarchy entity's removal is a no-op
@@ -1293,10 +1352,17 @@ namespace wi::scene
 					entities_to_remove.push_back(child);
 				}
 			}
+			// GGMAX 1.85: mark the subtree walk so a hair entity killed in here is recorded with
+			// the parent that dragged it down, not just "something called Entity_Remove".
+			const Entity gg_prev_parent = gg_hairkill_parent;
+			gg_hairkill_parent = entity;
+			gg_hairkill_depth++;
 			for (auto& child : entities_to_remove)
 			{
 				Entity_Remove(child);
 			}
+			gg_hairkill_depth--;
+			gg_hairkill_parent = gg_prev_parent;
 		}
 
 		for (auto& entry : componentLibrary.entries)

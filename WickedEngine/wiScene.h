@@ -26,6 +26,14 @@ namespace wi::scene
 	unsigned int GG_GetSceneUpdateCalls(const void** out_ret, const void** out_scene,
 		unsigned long long* out_frame, float* out_dt, unsigned int max_out);
 
+	// GGMAX 1.85: hair-entity destruction tracer. Merged grass creates 9 hair entities and the
+	// scene ends up with none, with the grass code's own teardown provably innocent. Records the
+	// caller of every Entity_Remove that takes a live hair component; reason 0 = removed directly,
+	// 1 = pulled down as a recursive child (out_parent then names the parent). out_clearcount is
+	// separate because Scene::Clear wipes components without going through Entity_Remove at all.
+	unsigned int GG_GetHairKills(const void** out_ret, unsigned int* out_entity, unsigned int* out_parent,
+		unsigned int* out_reason, unsigned int* out_clearcount, unsigned int max_out);
+
 	struct Scene
 	{
 		virtual ~Scene() = default;

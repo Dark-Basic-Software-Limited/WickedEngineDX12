@@ -421,13 +421,13 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 Gid : SV_GroupID, uint groupIn
 			// integer step — and 0 keeps "no per-strand type" for stock hair.
 			vertexBuffer_NOR[v0] = half4(target, 0); // GGMAX 1.92: type moved to vb_uvs.w (see below)
 			vertexBuffer_UVS[v0] = float4(uv.x, uv.y, uv.x, gg_merged ? ((gg_encoded_type + 1u) / 255.0) : 0.0);
-			// GGMAX 1.92 — THE FLICKER FIX. The grass type used to ride in vb_nor.w, which is
-			// R8G8B8A8_SNORM: its quantisation step is 2/255 = 0.0078431 while the type spacing
-			// written was 1/127 = 0.0078740, so ADJACENT TYPES WERE UNDER ONE STEP APART and the
-			// 0.4% mismatch accumulated with index. Strands decoded a neighbouring type and
-			// sampled its blade texture — the flickering coloured squares.
-			// vb_uvs is R16G16B16A16_UNORM (wiScene_Components.h:1019): 65535 steps, so /255
-			// leaves 257 steps of margin per type. .w held uv1.y, the unused second UV set.
+			// GGMAX 1.92 (CORRECTED 2026-08-04): the type rides in vb_uvs.w (R16G16B16A16_UNORM,
+			// /255 leaves 257 steps of margin per type; .w held uv1.y, the unused second UV set).
+			// The original 1.92 comment called this THE FLICKER FIX — measurement said otherwise
+			// (churn unchanged 11.9-12.2). It stays as a latent-precision fix: the old vb_nor.w
+			// SNORM8 encoding spaced types 1/127 apart against a 2/255 quantisation step. The real
+			// flicker was the dropped NonUniformResourceIndex annotation at the PS sample — see
+			// GGMAX 1.96 in hairparticleHF.hlsli.
 			
 			if (distance_culled)
 			{
@@ -645,13 +645,9 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 Gid : SV_GroupID, uint groupIn
 				vertexBuffer_POS[v0] = float4(position, 0);
 				vertexBuffer_NOR[v0] = half4(normal, 0); // GGMAX 1.92: type moved to vb_uvs.w
 				vertexBuffer_UVS[v0] = float4(uv.x, uv.y, uv.x, gg_merged ? ((gg_encoded_type + 1u) / 255.0) : 0.0);
-			// GGMAX 1.92 — THE FLICKER FIX. The grass type used to ride in vb_nor.w, which is
-			// R8G8B8A8_SNORM: its quantisation step is 2/255 = 0.0078431 while the type spacing
-			// written was 1/127 = 0.0078740, so ADJACENT TYPES WERE UNDER ONE STEP APART and the
-			// 0.4% mismatch accumulated with index. Strands decoded a neighbouring type and
-			// sampled its blade texture — the flickering coloured squares.
-			// vb_uvs is R16G16B16A16_UNORM (wiScene_Components.h:1019): 65535 steps, so /255
-			// leaves 257 steps of margin per type. .w held uv1.y, the unused second UV set.
+			// GGMAX 1.92 (CORRECTED 2026-08-04): latent-precision fix only, NOT the flicker —
+			// see the corrected comment at the root-vertex write above and GGMAX 1.96 in
+			// hairparticleHF.hlsli for the real fix (dropped NonUniform annotation).
 			
 				if (distance_culled)
 				{

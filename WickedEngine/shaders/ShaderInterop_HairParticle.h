@@ -45,7 +45,31 @@ enum HAIR_FLAGS
 	// frame. If the churn collapses with this set, the unwritten-slot path at the early return
 	// is the corruption. Mask bit 64.
 	HAIR_FLAG_GG_DEBUG_ALWAYSWRITE = 1 << 9,
+	// GGMAX 1.95: resolve xHairGrassTypes[].textureIndex via a UNIFORM-index compare loop in the
+	// hair PS instead of a divergent dynamic CB-array read. The 2026-08-04 ladder proved the
+	// flicker is the texture fetch alone (mode 4 collapses 12.0 -> 0.3 while width/length/etc
+	// still vary), the fetched INDEX VALUE is stable (mode 48), and streaming is exonerated
+	// (paused-from-second-zero churn unchanged). The one unhardened step left is the CB read at
+	// hairparticleHF.hlsli GGGetGrassTexture: 1.89 wrapped the DESCRIPTOR index in
+	// NonUniformResourceIndex but the CB-array read one line earlier can be scalarized
+	// (readfirstlane) by the compiler, handing every pixel-wave the first active lane's texture
+	// — square wave-tile patches, re-rolled per frame by rasterizer wave packing. It also
+	// explains why 1.89's predicted waterfall never appeared: idx was already wave-uniform.
+	// Mask bit 128. If churn collapses with this set, the CB read is the flicker.
+	// RESULT 2026-08-04: churn UNCHANGED (12.26/12.29/12.36 vs control 12.5) — the CB read is
+	// NOT scalarized. Kept for the ledger. Together with FREEZE_TEXTURE collapsing to 0.30 this
+	// narrows the defect to the per-type textures themselves being sampled: either one type's
+	// descriptor points at per-frame-changing content, or divergent-resource sampling per se.
+	HAIR_FLAG_GG_DEBUG_UNIFORMCB = 1 << 10,
+	// GGMAX 1.95b: bits 16-23 of xHairFlags carry (forcedType+1); non-zero forces EVERY pixel's
+	// texture lookup to that type — a "FREEZE_TEXTURE for each k". The bisector for the two
+	// worlds above: if some forced type k churns while the others are clean, type k's texture
+	// content is the flicker (name the resource via DUMP_GRASSTYPES); if every forced type is
+	// clean individually but the real mixed scene churns, divergent sampling itself is the bug.
+	// Harness: SET_GRASSTYPEFREEZE (k+1)*256.
 };
+#define HAIR_FLAG_GG_FORCETYPE_SHIFT 16u
+#define HAIR_FLAG_GG_FORCETYPE_MASK 0xFFu
 
 struct HairParticleAtlasRect
 {
@@ -147,7 +171,9 @@ CBUFFER(HairParticleCB, CBSLOT_OTHER_HAIRPARTICLE)
 	float xHairGrassMinHeightUnderwater;
 	float xHairGrassMaxHeightUnderwater;
 	float xHairGGLodWidthBoost; // GGMAX 1.49b widening endpoint per halving; 2.0 = coverage-neutral, <2 = far thinning
-	float xHair_padding_alt1;
+	// GGMAX 1.95: number of live entries in xHairGrassTypes[] (0 outside merged mode), so the
+	// uniform-index resolve loop is bounded by the ~7-8 painted types instead of all 88 slots.
+	uint xHairGrassTypeCount;
 	float xHair_padding_alt2;
 
 	HairParticleAtlasRect xHairAtlasRects[64];

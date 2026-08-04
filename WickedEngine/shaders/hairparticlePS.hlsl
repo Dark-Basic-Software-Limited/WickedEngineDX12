@@ -35,11 +35,14 @@ float4 main(VertexToPixel input) : SV_Target
 
 	// GGMAX 1.74 merged grass: a merged chunk holds every painted type in one system, so the
 	// blade texture is chosen per strand rather than per material.
-	Texture2D<half4> ggtex;
+	// GGMAX 1.96 flicker fix: the subscript+Sample must be ONE expression with the NonUniform
+	// annotation at the subscript — dxc drops the annotation if the handle passes through a
+	// local/out-param (see GGGetGrassTextureIndex). Verify with dxc -dumpbin: nonUniformIndex=true.
+	uint ggtexidx;
 	[branch]
-	if (input.GGGetGrassTexture(ggtex) && (GetFrame().options & OPTION_BIT_DISABLE_ALBEDO_MAPS) == 0)
+	if (input.GGGetGrassTextureIndex(ggtexidx) && (GetFrame().options & OPTION_BIT_DISABLE_ALBEDO_MAPS) == 0)
 	{
-		color = ggtex.Sample(sampler_linear_wrap, input.tex.xy);
+		color = bindless_textures_half4[NonUniformResourceIndex(descriptor_index(ggtexidx))].Sample(sampler_linear_wrap, input.tex.xy);
 	}
 	else
 	[branch]

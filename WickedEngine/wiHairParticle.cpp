@@ -585,6 +585,10 @@ namespace wi
 			if (gg_grass_freeze_mode & 16) hcb.xHairFlags |= HAIR_FLAG_GG_DEBUG_TYPEVIS;
 			if (gg_grass_freeze_mode & 32) hcb.xHairFlags |= HAIR_FLAG_GG_DEBUG_STABLETYPE;
 			if (gg_grass_freeze_mode & 64) hcb.xHairFlags |= HAIR_FLAG_GG_DEBUG_ALWAYSWRITE;
+			if (gg_grass_freeze_mode & 128) hcb.xHairFlags |= HAIR_FLAG_GG_DEBUG_UNIFORMCB; // GGMAX 1.95: uniform-index CB resolve probe (null result — kept for ledger)
+			// GGMAX 1.95b: harness mask bits 8-15 carry (forcedType+1) into xHairFlags bits 16-23
+			// — force every pixel's texture lookup to one type (per-type bisect of the flicker).
+			hcb.xHairFlags |= (((uint32_t)gg_grass_freeze_mode >> 8) & HAIR_FLAG_GG_FORCETYPE_MASK) << HAIR_FLAG_GG_FORCETYPE_SHIFT;
 			hcb.xHairAspect = hair.width * (float)std::max(1u, desc.width) / (float)std::max(1u, desc.height);
 			hcb.xHairLength = hair.length;
 			hcb.xHairStiffness = hair.stiffness;
@@ -636,6 +640,7 @@ namespace wi
 			// which the shader treats as "fall back to the material texture".
 			{
 				const size_t typecount = std::min(hair.grass_types.size(), (size_t)GG_HAIR_MAX_GRASS_TYPES);
+				hcb.xHairGrassTypeCount = (uint32_t)typecount; // GGMAX 1.95: bounds the uniform-index resolve loop
 				for (size_t t = 0; t < typecount; ++t)
 				{
 					const HairParticleSystem::GrassTypeParams& src = hair.grass_types[t];

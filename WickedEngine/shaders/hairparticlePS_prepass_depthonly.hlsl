@@ -10,11 +10,13 @@ void main(VertexToPixel input, out uint coverage : SV_Coverage)
 	float alpha = 1;
 
 	// GGMAX 1.74 merged grass: per-strand texture, same reason as the prepass.
-	Texture2D<half4> ggtex;
+	// GGMAX 1.96 flicker fix: NonUniform annotation AT the subscript, one expression (see
+	// GGGetGrassTextureIndex — the out-param Texture2D version dropped it in the DXIL).
+	uint ggtexidx;
 	[branch]
-	if (input.GGGetGrassTexture(ggtex))
+	if (input.GGGetGrassTextureIndex(ggtexidx))
 	{
-		alpha = ggtex.Sample(sampler_linear_clamp, input.tex.xy).a;
+		alpha = bindless_textures_half4[NonUniformResourceIndex(descriptor_index(ggtexidx))].Sample(sampler_linear_clamp, input.tex.xy).a;
 	}
 	else
 	[branch]

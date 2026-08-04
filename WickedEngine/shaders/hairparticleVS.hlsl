@@ -18,13 +18,11 @@ VertexToPixel main(uint vid : SV_VertexID)
 	float4 nor_raw = bindless_buffers_float4[descriptor_index(geometry.vb_nor)][vertexID];
 	float3 normal = normalize(nor_raw.xyz);
 	float4 uvsets = bindless_buffers_float4[descriptor_index(geometry.vb_uvs)][vertexID];
-	// GGMAX 1.92 — THE FLICKER FIX. The grass type now arrives in vb_uvs.w, NOT vb_nor.w.
-	// The old claim on this line ("SNORM 8-bit stores integer steps exactly") was simply false:
-	// vb_nor is R8G8B8A8_SNORM with a 2/255 = 0.0078431 step, while the CS wrote types spaced
-	// 1/127 = 0.0078740 apart — adjacent types sat UNDER one quantisation step apart and the
-	// 0.4% mismatch accumulated with index, so strands decoded a neighbouring type and sampled
-	// its blade texture. That was the flickering coloured squares.
-	// vb_uvs is R16G16B16A16_UNORM: 65535 steps, /255 gives 257 steps of margin per type.
+	// GGMAX 1.92 (CORRECTED 2026-08-04): the grass type arrives in vb_uvs.w
+	// (R16G16B16A16_UNORM, 257 steps of margin per type at /255 spacing) — a latent-precision
+	// fix over the old SNORM8 vb_nor.w encoding, but NOT the flicker: measured churn was
+	// unchanged by this move. The real flicker was the NonUniformResourceIndex annotation being
+	// dropped at the PS sample — GGMAX 1.96, hairparticleHF.hlsli.
 	Out.grasstype = (uint)round(saturate(uvsets.w) * 255.0);
 
 	Out.fade = saturate(distance(position.xyz, GetCamera().position.xyz) / xHairViewDistance);

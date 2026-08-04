@@ -95,6 +95,10 @@ namespace wi
 			FLAG_COLLIDERS_DISABLED = 1 << 7,
 			FLAG_USE_RAIN_BLOCKER = 1 << 8,
 			FLAG_TAKE_COLOR_FROM_MESH = 1 << 9,
+			// GGMAX 2.00: the DX11 GameGuru fork used bit 7 for this. Bit 7 is now
+			// FLAG_COLLIDERS_DISABLED upstream, so legacy .PE flags MUST be remapped
+			// onto this bit by the loader rather than carried across raw.
+			FLAG_EMIT_PAUSE = 1 << 10,
 		};
 		uint32_t _flags = FLAG_EMPTY;
 
@@ -135,6 +139,64 @@ namespace wi
 		uint32_t frameCount = 1;
 		uint32_t frameStart = 0;
 		float frameRate = 0; // frames per second
+
+		// ---- GGMAX 2.00: GameGuru WPE emitter extensions -------------------------
+		// Re-ported from the DX11 fork (D:\max\WickedRepo\WickedEngine\wiEmittedParticle.h,
+		// its commented //#ifdef GGREDUCED block). These are what the .PE effects in
+		// Files\particlesbank\wpe were authored against; without them the effects load
+		// but do not look like the shipping DX11 product.
+		// Defaults here are the DX11 fork's defaults, EXCEPT fadein_time which defaults
+		// to -1 (= keep stock opacity-curve behaviour) so stock emitters are unaffected.
+		float fadein_time = -1.0f;      // fraction of lifetime; <0 = use stock opacity curve
+		float endcolor_red = 1.0f;      // colour-over-life target, 0-1
+		float endcolor_green = 1.0f;
+		float endcolor_blue = 1.0f;
+
+		float normal_factor_x = 0.0f;   // per-axis emission bias (phase = rand*2PI)
+		float normal_factor_y = 0.0f;
+		float normal_factor_z = 0.0f;
+		float burst_factor_x = 0.0f;    // per-axis burst bias (phase = thread index)
+		float burst_factor_y = 0.0f;
+		float burst_factor_z = 0.0f;
+		float burst_factor_speed = 1.0f;
+
+		float normal_random = 1.0f;     // the DX11 fork's four independent randomisers;
+		float rotation_random = 0.0f;   // upstream conflates all of these into random_factor
+		float size_random = 0.0f;
+		float scaling_random = 1.0f;
+
+		float start_rotation = 0.0f;
+		float random_position = 0.0f;
+		float random_position_scale = 1.0f;
+		XMFLOAT3 startpos = {};
+
+		float burst_amount = 0.0f;
+		float burst_split = 0.0f;
+		float burst_delay = 0.0f;       // MILLISECONDS
+		float burst_delay_timer = 0.0f;
+		float spawn_random = 0.0f;      // gust / stutter emission model
+		float randemit = 0.0f;
+		uint32_t randpause = 0;
+		uint32_t total_emit_count = 0;
+
+		float distance_sort_bias = 0.0f;
+
+		// Render/lifecycle gating the DX11 fork had and upstream does not.
+		// bActive drives the auto-deactivate that lets fire-and-forget decal effects
+		// stop costing anything once they have finished emitting.
+		bool bVisible = true;
+		bool bActive = true;
+		bool bFindFloor = false;        // consumed game-side, not by the engine
+		bool bFollowCamera = false;     // consumed game-side, not by the engine
+		float inactive_timer = 0.0f;
+
+		inline bool IsVisible() const { return bVisible; }
+		inline void SetVisible(bool value) { bVisible = value; }
+		inline bool IsActive() const { return bActive; }
+		inline void SetActive(bool value) { bActive = value; }
+		inline bool IsEmitPaused() const { return _flags & FLAG_EMIT_PAUSE; }
+		inline void SetEmitPaused(bool value) { if (value) { _flags |= FLAG_EMIT_PAUSE; } else { _flags &= ~FLAG_EMIT_PAUSE; } }
+		// -------------------------------------------------------------------------
 
 		void SetMaxParticleCount(uint32_t value);
 		uint32_t GetMaxParticleCount() const { return MAX_PARTICLES; }

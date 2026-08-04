@@ -340,13 +340,58 @@ namespace wi
 
 		center = transform.GetPosition();
 
-		emit += (float)count * dt;
+		// GGMAX 2.00: GameGuru WPE emission model, re-ported from the DX11 fork.
+		// Three behaviours upstream does not have:
+		//  1. spawn_random - a gust/stutter model: emission pauses for a random number of
+		//     frames, then releases a randomised amount. Rain and fire were tuned with it.
+		//  2. burst_delay (MILLISECONDS) + burst_split - a burst is released in chunks over
+		//     time rather than all at once, which is what makes explosions read as a sequence.
+		//  3. bActive auto-deactivate - once an emitter has produced nothing for twice its
+		//     worst-case particle lifetime it drops out of simulate AND draw. This is how
+		//     fire-and-forget decal effects (blood, sparks, impact) stop costing anything.
+		float ggEmitRate = (float)count;
+		if (spawn_random > 0.0f)
+		{
+			if (randpause > 0)
+			{
+				randpause--;
+				ggEmitRate = 0.0f;
+			}
+			else
+			{
+				ggEmitRate = (float)count * (1.0f + (wi::random::GetRandom(0.0f, 1.0f) - 0.5f) * spawn_random);
+				if (ggEmitRate < 0.0f) ggEmitRate = 0.0f;
+				randpause = (uint32_t)wi::random::GetRandom(0, (int)std::max(1.0f, spawn_random * 4.0f));
+			}
+		}
+		if (IsEmitPaused())
+		{
+			ggEmitRate = 0.0f;
+			burst = 0;
+		}
+
+		emit += ggEmitRate * dt;
+
+		// Staged burst release
+		if (burst_amount > 0.0f)
+		{
+			burst_delay_timer -= dt * 1000.0f; // burst_delay is in milliseconds
+			if (burst_delay_timer <= 0.0f)
+			{
+				const float chunk = (burst_split > 0.0f) ? std::min(burst_amount, burst_split) : burst_amount;
+				burst += (int)chunk;
+				burst_amount -= chunk;
+				if (burst_amount < 0.0f) burst_amount = 0.0f;
+				burst_delay_timer = burst_delay;
+			}
+		}
 
 		emit += burst;
 		burst = 0;
 
 		if ((uint)emit > 0)
 		{
+			total_emit_count += (uint32_t)emit;
 			EmitLocation& location = emit_locations.emplace_back();
 			location.transform.init();
 			location.count = (uint)emit;
@@ -366,6 +411,24 @@ namespace wi
 		if (statistics.aliveCount > 0 || statistics.aliveCount_afterSimulation > 0)
 		{
 			active_frames |= 1; // activate current frame
+		}
+
+		// GGMAX 2.00: bActive auto-deactivate (DX11 fork behaviour). Once nothing has been
+		// emitted and nothing is alive for twice the worst-case particle lifetime, park the
+		// emitter so it costs neither a simulate dispatch nor a draw.
+		if (active_frames & 1)
+		{
+			inactive_timer = 0.0f;
+			bActive = true;
+		}
+		else if (bActive)
+		{
+			inactive_timer += dt;
+			const float worst_case_life = life * (1.0f + std::abs(random_life) * 0.5f);
+			if (inactive_timer > worst_case_life * 2.0f + 0.1f)
+			{
+				bActive = false;
+			}
 		}
 
 		if (!opacityCurveTex.IsValid())
@@ -499,6 +562,24 @@ namespace wi
 			cb.xParticleRandomColorFactor = random_color;
 			cb.xEmitterLayerMask = layerMask;
 			cb.xEmitterInstanceIndex = instanceIndex;
+
+			// GGMAX 2.00: GameGuru WPE parameters (see PARTICLE_SYSTEM_PLAN.md section 6).
+			cb.xParticleEndColor = XMFLOAT3(endcolor_red, endcolor_green, endcolor_blue);
+			cb.xEmitterFadeinTime = fadein_time;
+			cb.xParticleNormalFactorXYZ = XMFLOAT3(normal_factor_x, normal_factor_y, normal_factor_z);
+			cb.xParticleBurstFactorSpeed = burst_factor_speed;
+			cb.xParticleBurstFactor = XMFLOAT3(burst_factor_x, burst_factor_y, burst_factor_z);
+			cb.xParticleNormalRandom = normal_random;
+			cb.xParticleSinPos = startpos;
+			cb.xParticleRotationRandom = rotation_random;
+			cb.xParticleSizeRandom = size_random;
+			cb.xParticleScalingRandom = scaling_random;
+			cb.xParticleStartRotation = start_rotation;
+			cb.xParticleRandomPos = random_position;
+			cb.xParticleRandomPosScale = random_position_scale;
+			cb.xTotalEmitCount = total_emit_count;
+			cb.xParticlePadding0 = 0;
+			cb.xParticlePadding1 = 0;
 
 			cb.xEmitterOptions = 0;
 			if (IsSPHEnabled())

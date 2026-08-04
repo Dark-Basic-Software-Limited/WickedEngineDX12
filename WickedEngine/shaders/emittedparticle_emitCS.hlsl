@@ -167,18 +167,51 @@ void main(uint3 DTid : SV_DispatchThreadID)
 		return;
 	}
 
-	float particleStartingSize = xParticleSize + xParticleSize * (rng.next_float() - 0.5f) * xParticleRandomFactor;
+	// GGMAX 2.00: GameGuru WPE spawn offsets, re-ported from the DX11 fork's emitCS.
+	// The random-position term is guarded on xParticleRandomPos != 0; the DX11 original was
+	// unguarded and relied on integer % 0 (see PARTICLE_SYSTEM_PLAN.md 6.3). Every shipped
+	// effect has random_position == 0, so guarding it keeps their spawn point exactly where
+	// the DX11 build put it while making the knob usable for new content.
+#ifndef EMITTER_VOLUME
+	if (xParticleRandomPos != 0)
+	{
+		uint fixedseed = xTotalEmitCount % max(1u, (uint)xParticleRandomPos);
+		RNG rngfixed;
+		rngfixed.init(uint2(fixedseed, asuint(xParticleRandomPosScale)), 0);
+		pos.x += (rngfixed.next_float() - 0.5f) * xParticleRandomPosScale;
+		pos.z += (rngfixed.next_float() - 0.5f) * xParticleRandomPosScale;
+	}
+#endif // EMITTER_VOLUME
+
+	// sin/cos orbital spawn offset (DX11 xParticleSinPos, phased by burst_factor_speed)
+	pos += float3(
+		sin((float)(GetFrame().time * xParticleBurstFactorSpeed) + DTid.x) * xParticleSinPos.x,
+		(rng.next_float() - 0.5f) * xParticleSinPos.y,
+		cos((float)(GetFrame().time * xParticleBurstFactorSpeed) + DTid.x) * xParticleSinPos.z);
+
+	// GGMAX 2.00: the fork replaced the single random_factor knob with independent
+	// randomisers, so use size_random here rather than xParticleRandomFactor.
+	float particleStartingSize = xParticleSize + xParticleSize * (rng.next_float() - 0.5f) * xParticleSizeRandom;
 
 	// create new particle:
 	Particle particle;
 	particle.position = pos;
 	particle.force = 0;
 	particle.mass = xParticleMass;
-	particle.velocity = velocity + (nor + (float3(rng.next_float(), rng.next_float(), rng.next_float()) - 0.5f) * xParticleRandomFactor) * xParticleNormalFactor;
-	particle.rotation_rotationVelocity = pack_half2(float2((rng.next_float() - 0.5f) * xParticleRandomFactor * PI * 2, xParticleRotation * (rng.next_float() - 0.5f) * (1 + xParticleRandomFactor)));
+	particle.velocity = velocity + (nor + (float3(rng.next_float(), rng.next_float(), rng.next_float()) - 0.5f) * xParticleNormalRandom) * xParticleNormalFactor;
+	// two additive per-axis terms: normal_factor_* phased on rand*2PI, burst_factor_* on thread index
+	particle.velocity += float3(
+		sin((float)rng.next_float() * PI * 2) * xParticleNormalFactorXYZ.x,
+		(rng.next_float() - 0.5f) * xParticleNormalFactorXYZ.y,
+		cos((float)rng.next_float() * PI * 2) * xParticleNormalFactorXYZ.z);
+	particle.velocity += float3(
+		sin((float)DTid.x) * xParticleBurstFactor.x,
+		(rng.next_float() - 0.5f) * xParticleBurstFactor.y,
+		cos((float)DTid.x) * xParticleBurstFactor.z);
+	particle.rotation_rotationVelocity = pack_half2(float2(xParticleStartRotation, xParticleRotation + (rng.next_float() - 0.5f) * xParticleRotationRandom));
 	particle.maxLife = xParticleLifeSpan + xParticleLifeSpan * (rng.next_float() - 0.5f) * xParticleLifeSpanRandomness;
 	particle.life = particle.maxLife;
-	particle.sizeBeginEnd = float2(particleStartingSize, particleStartingSize * xParticleScaling);
+	particle.sizeBeginEnd = float2(particleStartingSize, particleStartingSize * xParticleScaling + (rng.next_float() - 0.5f) * xParticleScalingRandom);
 
 	baseColor.r *= lerp(1, rng.next_float(), xParticleRandomColorFactor);
 	baseColor.g *= lerp(1, rng.next_float(), xParticleRandomColorFactor);

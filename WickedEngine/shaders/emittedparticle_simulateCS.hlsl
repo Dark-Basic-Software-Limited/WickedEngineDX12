@@ -278,8 +278,30 @@ void main(uint3 DTid : SV_DispatchThreadID, uint Gid : SV_GroupIndex)
 		// Write out render buffers:
 		//	These must be persistent, not culled (raytracing, surfels...)
 
-		float opacity = saturate(lifeOpa * EmitterGetMaterial().GetBaseColor().a);
+		// GGMAX 2.00: GameGuru WPE alpha and colour-over-life, re-ported from the DX11 fork.
+		// The nesting of the saturates is load-bearing: shipped content sets baseColor.a as
+		// high as 20, so saturate(linearFade * 20) holds alpha at 1.0 for most of the life
+		// and then cliff-drops. Folding the fade-in inside that saturate (or baking the whole
+		// thing into the opacity curve) gives a visibly softer result.
+		// See GameGuru Core/PARTICLE_SYSTEM_PLAN.md section 6.1.
+		const float baseAlpha = EmitterGetMaterial().GetBaseColor().a;
+		float opacity;
+		if (xEmitterFadeinTime >= 0)
+		{
+			opacity = saturate(lerp(1, 0, lifeLerp) * baseAlpha);
+			const float normalizedTime = saturate(lifeLerp / max(xEmitterFadeinTime, 0.000001));
+			opacity = saturate(lerp(0, opacity, normalizedTime));
+		}
+		else
+		{
+			opacity = saturate(lifeOpa * baseAlpha);
+		}
 		float4 particleColor = unpack_rgba(particle.color);
+		if (xEmitterFadeinTime >= 0)
+		{
+			// colour-over-life toward endcolor_* (defaults to white, as in the DX11 fork)
+			particleColor.rgb = lerp(particleColor.rgb, xParticleEndColor, lifeLerp);
+		}
 		particleColor.a *= opacity;
 		
 		float rotation = rotation_rotationVel.x;

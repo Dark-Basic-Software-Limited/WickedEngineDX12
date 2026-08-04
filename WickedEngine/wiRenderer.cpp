@@ -4160,6 +4160,17 @@ void UpdateVisibility(Visibility& vis)
 				{
 					continue;
 				}
+				// GGMAX 2.00: restore the DX11 fork's per-emitter render gates. The port
+				// dropped these two lines, which is why the game's "not visible" emitter
+				// action (its most-called one) could not be honoured even once un-stubbed.
+				if (!emitter.IsVisible())
+				{
+					continue;
+				}
+				if (!emitter.IsActive())
+				{
+					continue;
+				}
 				vis.visibleEmitters.push_back((uint32_t)i);
 			}
 			});

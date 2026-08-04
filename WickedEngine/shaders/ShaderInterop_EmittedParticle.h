@@ -91,6 +91,34 @@ CBUFFER(EmittedParticleCB, CBSLOT_OTHER_EMITTEDPARTICLE)
 	float		xParticleDrag;
 
 	ShaderTransform xEmitterBaseMeshUnormRemap;
+
+	// GGMAX 2.00: GameGuru WPE emitter parameters, re-ported from the DX11 fork
+	// (D:\max\WickedRepo). See GameGuru Core/PARTICLE_SYSTEM_PLAN.md section 6.
+	// NOTE the DX11 fork uploaded these under CROSSED-OVER names: its
+	// xParticleNormalFactorX/Y/Z carried burst_factor_*, and its
+	// xParticleNormalFactor2X/Y/Z carried normal_factor_*. The names below are
+	// corrected to match the emitter member they actually come from.
+	float3		xParticleEndColor;			// colour-over-life target, 0-1 (DX11 endcolor_rgb / 255)
+	float		xEmitterFadeinTime;			// <0 = use the stock opacity curve instead
+
+	float3		xParticleNormalFactorXYZ;	// per-axis emission bias, phase = rand*2PI
+	float		xParticleBurstFactorSpeed;
+
+	float3		xParticleBurstFactor;		// per-axis burst bias, phase = thread index
+	float		xParticleNormalRandom;
+
+	float3		xParticleSinPos;			// sin/cos orbital spawn offset
+	float		xParticleRotationRandom;
+
+	float		xParticleSizeRandom;
+	float		xParticleScalingRandom;
+	float		xParticleStartRotation;
+	float		xParticleRandomPos;
+
+	float		xParticleRandomPosScale;
+	uint		xTotalEmitCount;
+	float		xParticlePadding0;
+	float		xParticlePadding1;
 };
 
 struct EmitLocation

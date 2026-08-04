@@ -316,22 +316,10 @@ namespace wi
 			}
 		}
 
-		// Other resources:
-		{
-			TextureDesc desc;
-			desc.width = internalResolution.x;
-			desc.height = internalResolution.y;
-			desc.mip_levels = 1;
-			desc.array_size = 1;
-			desc.format = Format::R8G8B8A8_UNORM;
-			desc.sample_count = 1;
-			desc.usage = Usage::DEFAULT;
-			desc.bind_flags = BindFlag::SHADER_RESOURCE | BindFlag::UNORDERED_ACCESS;
-			desc.layout = ResourceState::SHADER_RESOURCE;
-
-			device->CreateTexture(&desc, nullptr, &debugUAV);
-			device->SetName(&debugUAV, "debugUAV");
-		}
+		// GGMAX: debugUAV (viewport-res RGBA8, ~5 MB) is only consumed by debug visualizations
+		// (light-culling debug, VRS classification debug, SurfelGI). Created on demand in
+		// PreRender when one of those turns on; dropped here so a resize re-evaluates.
+		debugUAV = {};
 		wi::renderer::CreateTiledLightResources(tiledLightResources, internalResolution);
 		wi::renderer::CreateScreenSpaceShadowResources(screenspaceshadowResources, internalResolution);
 
@@ -696,14 +684,45 @@ namespace wi
 			wi::renderer::GetVXGIEnabled()
 			)
 		{
-			if (!visibilityResources.IsValid())
+			// GGMAX: payloads only exist for compute shading; recreate if that mode turns on later
+			if (!visibilityResources.IsValid() ||
+				(visibility_shading_in_compute && !visibilityResources.texture_payload_0.IsValid()))
 			{
-				wi::renderer::CreateVisibilityResources(visibilityResources, internalResolution);
+				wi::renderer::CreateVisibilityResources(visibilityResources, internalResolution, visibility_shading_in_compute);
 			}
 		}
 		else
 		{
 			visibilityResources = {};
+		}
+
+		// GGMAX: lazy debugUAV — see ResizeBuffers. SurfelGI is included because its coverage
+		// CS binds the UAV unconditionally while SurfelGI is enabled, not only in debug mode.
+		{
+			const bool need_debugUAV =
+				wi::renderer::GetDebugLightCulling() ||
+				wi::renderer::GetVariableRateShadingClassificationDebug() ||
+				wi::renderer::GetSurfelGIEnabled() ||
+				wi::renderer::GetSurfelGIDebugEnabled();
+			if (need_debugUAV && (!debugUAV.IsValid() || debugUAV.desc.width != internalResolution.x || debugUAV.desc.height != internalResolution.y))
+			{
+				TextureDesc desc;
+				desc.width = internalResolution.x;
+				desc.height = internalResolution.y;
+				desc.mip_levels = 1;
+				desc.array_size = 1;
+				desc.format = Format::R8G8B8A8_UNORM;
+				desc.sample_count = 1;
+				desc.usage = Usage::DEFAULT;
+				desc.bind_flags = BindFlag::SHADER_RESOURCE | BindFlag::UNORDERED_ACCESS;
+				desc.layout = ResourceState::SHADER_RESOURCE;
+				device->CreateTexture(&desc, nullptr, &debugUAV);
+				device->SetName(&debugUAV, "debugUAV");
+			}
+			else if (!need_debugUAV && debugUAV.IsValid())
+			{
+				debugUAV = {};
+			}
 		}
 
 		// Check for depth of field allocation:
@@ -928,15 +947,17 @@ namespace wi
 			);
 			wi::renderer::UpdateRenderData(visibility_main, frameCB, cmd);
 
-			uint32_t num_barriers = 2;
-			GPUBarrier barriers[] = {
-				GPUBarrier::Image(&debugUAV, debugUAV.desc.layout, ResourceState::UNORDERED_ACCESS),
-				GPUBarrier::Aliasing(&rtPostprocess, &rtPrimitiveID),
-				GPUBarrier::Image(&rtMain, rtMain.desc.layout, ResourceState::SHADER_RESOURCE_COMPUTE), // prepares transition for discard in dx12
-			};
+			// GGMAX: debugUAV barrier only when the lazy texture exists
+			GPUBarrier barriers[3];
+			uint32_t num_barriers = 0;
+			if (debugUAV.IsValid())
+			{
+				barriers[num_barriers++] = GPUBarrier::Image(&debugUAV, debugUAV.desc.layout, ResourceState::UNORDERED_ACCESS);
+			}
+			barriers[num_barriers++] = GPUBarrier::Aliasing(&rtPostprocess, &rtPrimitiveID);
 			if (visibility_shading_in_compute)
 			{
-				num_barriers++;
+				barriers[num_barriers++] = GPUBarrier::Image(&rtMain, rtMain.desc.layout, ResourceState::SHADER_RESOURCE_COMPUTE); // prepares transition for discard in dx12
 			}
 			device->Barrier(barriers, num_barriers, cmd);
 
@@ -1833,12 +1854,16 @@ namespace wi
 
 			// Depth buffers expect a non-pixel shader resource state as they are generated on compute queue:
 			{
-				GPUBarrier barriers[] = {
-					GPUBarrier::Image(&rtLinearDepth, ResourceState::SHADER_RESOURCE, rtLinearDepth.desc.layout),
-					GPUBarrier::Image(&depthBuffer_Copy, ResourceState::SHADER_RESOURCE, depthBuffer_Copy.desc.layout),
-					GPUBarrier::Image(&debugUAV, ResourceState::UNORDERED_ACCESS, debugUAV.desc.layout),
-				};
-				device->Barrier(barriers, arraysize(barriers), cmd);
+				// GGMAX: debugUAV barrier only when the lazy texture exists
+				GPUBarrier barriers[3];
+				uint32_t num_barriers = 0;
+				barriers[num_barriers++] = GPUBarrier::Image(&rtLinearDepth, ResourceState::SHADER_RESOURCE, rtLinearDepth.desc.layout);
+				barriers[num_barriers++] = GPUBarrier::Image(&depthBuffer_Copy, ResourceState::SHADER_RESOURCE, depthBuffer_Copy.desc.layout);
+				if (debugUAV.IsValid())
+				{
+					barriers[num_barriers++] = GPUBarrier::Image(&debugUAV, ResourceState::UNORDERED_ACCESS, debugUAV.desc.layout);
+				}
+				device->Barrier(barriers, num_barriers, cmd);
 			}
 			wi::profiler::EndRange(gg_range); // GGMAX 1.32
 
@@ -1888,9 +1913,10 @@ namespace wi
 		wi::image::Draw(GetLastPostprocessRT(), fx, cmd);
 
 		if (
-			wi::renderer::GetDebugLightCulling() ||
+			(wi::renderer::GetDebugLightCulling() ||
 			wi::renderer::GetVariableRateShadingClassificationDebug() ||
-			wi::renderer::GetSurfelGIDebugEnabled()
+			wi::renderer::GetSurfelGIDebugEnabled())
+			&& debugUAV.IsValid() // GGMAX: lazy — first frame after a debug toggle may not have it yet
 			)
 		{
 			fx.enableFullScreen();

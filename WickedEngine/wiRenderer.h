@@ -442,7 +442,11 @@ namespace wi::renderer
 
 		inline bool IsValid() const { return bins.IsValid(); }
 	};
-	void CreateVisibilityResources(VisibilityResources& res, XMUINT2 resolution);
+	// GGMAX: include_payload=false skips texture_payload_0/1 (32 B/pixel — ~39 MB at 1536x801).
+	// The payloads are written/read ONLY by Visibility_Surface + Visibility_Shade, which run
+	// solely under visibility_shading_in_compute; SSR & co. use Visibility_Surface_Reduced,
+	// which needs just normals/roughness. Pass visibility_shading_in_compute here.
+	void CreateVisibilityResources(VisibilityResources& res, XMUINT2 resolution, bool include_payload = true);
 	void Visibility_Prepare(
 		const VisibilityResources& res,
 		const wi::graphics::Texture& input_primitiveID, // can be MSAA

@@ -4930,6 +4930,17 @@ void UpdatePerFrameData(
 		device->SetName(&texture_weatherMap, "texture_weatherMap");
 
 	}
+	else if (!scene.weather.IsVolumetricClouds() && texture_shapeNoise.IsValid())
+	{
+		// GGMAX: free the cloud noise statics (~5.4 MB) when clouds are off — upstream never
+		// releases them. Deferred-destroy makes this safe mid-frame; the precompute flag reset
+		// regenerates them on the next enable via the existing one-time pass.
+		texture_shapeNoise = {};
+		texture_detailNoise = {};
+		texture_curlNoise = {};
+		texture_weatherMap = {};
+		volumetric_clouds_precomputed = false;
+	}
 
 	// Fill Entity Array with decals + envprobes + lights in the frustum:
 	uint envprobearray_offset = 0;
@@ -12343,7 +12354,7 @@ void ComputeShadingRateClassification(
 	device->EventEnd(cmd);
 }
 
-void CreateVisibilityResources(VisibilityResources& res, XMUINT2 resolution)
+void CreateVisibilityResources(VisibilityResources& res, XMUINT2 resolution, bool include_payload)
 {
 	res.tile_count = GetVisibilityTileCount(resolution);
 	{
@@ -12379,11 +12390,19 @@ void CreateVisibilityResources(VisibilityResources& res, XMUINT2 resolution)
 		device->CreateTexture(&desc, nullptr, &res.texture_roughness);
 		device->SetName(&res.texture_roughness, "res.texture_roughness");
 
-		desc.format = Format::R32G32B32A32_UINT;
-		device->CreateTexture(&desc, nullptr, &res.texture_payload_0);
-		device->SetName(&res.texture_payload_0, "res.texture_payload_0");
-		device->CreateTexture(&desc, nullptr, &res.texture_payload_1);
-		device->SetName(&res.texture_payload_1, "res.texture_payload_1");
+		if (include_payload)
+		{
+			desc.format = Format::R32G32B32A32_UINT;
+			device->CreateTexture(&desc, nullptr, &res.texture_payload_0);
+			device->SetName(&res.texture_payload_0, "res.texture_payload_0");
+			device->CreateTexture(&desc, nullptr, &res.texture_payload_1);
+			device->SetName(&res.texture_payload_1, "res.texture_payload_1");
+		}
+		else
+		{
+			res.texture_payload_0 = {};
+			res.texture_payload_1 = {};
+		}
 	}
 }
 void Visibility_Prepare(

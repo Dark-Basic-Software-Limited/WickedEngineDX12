@@ -2092,6 +2092,12 @@ std::mutex queue_locker;
 
 			GPUBufferDesc uploaddesc;
 			uploaddesc.size = wi::math::GetNextPowerOfTwo(staging_size);
+			// GGMAX: above 64 MB, pow2 rounding wastes up to ~2x (a 134.5 MB sky-cube upload
+			// minted a 256 MB buffer). Round big requests to 16 MB multiples instead.
+			if (staging_size > (64ull << 20))
+			{
+				uploaddesc.size = (staging_size + (16ull << 20) - 1) & ~((16ull << 20) - 1);
+			}
 			uploaddesc.size = std::max(uploaddesc.size, uint64_t(65536));
 			uploaddesc.usage = Usage::UPLOAD;
 			bool upload_success = device->CreateBuffer(&uploaddesc, nullptr, &cmd.uploadbuffer);
@@ -2126,7 +2132,28 @@ std::mutex queue_locker;
 		dx12_check(cmd.fence->SetEventOnCompletion(1, nullptr));
 
 		std::scoped_lock lock(locker);
+		cmd.last_used_frame = device->FRAMECOUNT; // GGMAX: stamp for trim()
 		freelist.push_back(cmd);
+	}
+	void GraphicsDevice_DX12::CopyAllocator::trim(uint64_t current_frame)
+	{
+		// GGMAX: see header. >=32 MB idle 64+ frames, or anything idle 600+ frames.
+		std::scoped_lock lock(locker);
+		for (size_t i = 0; i < freelist.size();)
+		{
+			const uint64_t idle = current_frame - freelist[i].last_used_frame;
+			const bool big = freelist[i].uploadbuffer.desc.size >= (32ull << 20);
+			if ((big && idle > 64) || idle > 600)
+			{
+				::gg_dbg_cmdallocator_count.fetch_sub(1, std::memory_order_relaxed); // GGMAX 1.77 instrument stays honest
+				std::swap(freelist[i], freelist.back());
+				freelist.pop_back();
+			}
+			else
+			{
+				++i;
+			}
+		}
 	}
 
 	void GraphicsDevice_DX12::DescriptorBinder::init(GraphicsDevice_DX12* device)
@@ -6107,6 +6134,7 @@ std::mutex queue_locker;
 		}
 
 		allocationhandler->Update(FRAMECOUNT, BUFFERCOUNT);
+		copyAllocator.trim(FRAMECOUNT); // GGMAX: age out oversized staging buffers
 
 		{
 			// GGMAX 1.48a: publish the frame's counters

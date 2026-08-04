@@ -106,6 +106,7 @@ namespace wi::graphics
 				Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> commandList;
 				Microsoft::WRL::ComPtr<ID3D12Fence> fence;
 				GPUBuffer uploadbuffer;
+				uint64_t last_used_frame = 0; // GGMAX: for idle-based trim
 				inline bool IsValid() const { return commandList != nullptr; }
 			};
 			wi::vector<CopyCMD> freelist;
@@ -113,6 +114,13 @@ namespace wi::graphics
 			void init(GraphicsDevice_DX12* device);
 			CopyCMD allocate(uint64_t staging_size);
 			void submit(CopyCMD cmd);
+			// GGMAX: age out pooled staging buffers. The freelist was previously retained
+			// forever, so the pool equalled the load-time high-water mark (~283 MB system RAM
+			// on sky-cube levels). Big buffers (>=32 MB) only serve one-shot level-load
+			// uploads and are dropped after a short idle; everything smaller stays warm much
+			// longer for the mip streamer. Entries are GPU-idle by construction (submit()
+			// blocks on the copy fence before repooling).
+			void trim(uint64_t current_frame);
 		};
 		mutable CopyAllocator copyAllocator;
 

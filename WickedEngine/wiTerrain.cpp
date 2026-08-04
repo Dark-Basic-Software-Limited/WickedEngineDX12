@@ -343,6 +343,15 @@ namespace wi::terrain
 	// Applied when the atlas is next created, so it needs a level (re)load.
 	uint32_t gg_svt_atlas_height = 12288u;
 
+	// GGMAX 1.98 (A4): MAX never assigns EMISSIVEMAP on any terrain material (only basecolor/
+	// normal/surface — GGTerrainWicked.cpp), yet the atlas allocated a fourth sparse map and
+	// its pool share unconditionally. BC1 emissive = 1/6 of the pool = 96 MB at the shipping
+	// 12288 atlas. Dropping it requires binding an EXPLICIT 1x1 black into the material's
+	// emissive slot — the 2026-08-02 attempt left the slot unbound and the whole scene washed
+	// to white (undefined sparse sample feeding the tonemapper). setup.ini `svtemissive=1`
+	// restores the stock fourth map (needs level reload).
+	bool gg_svt_keep_emissive = false;
+
 	std::atomic<unsigned long long> gg_dbg_vt_rebuilds{ 0 };   // rebuild executions
 	std::atomic<unsigned long long> gg_dbg_vt_scan_us{ 0 };    // clear+scan phase time
 	std::atomic<unsigned long long> gg_dbg_vt_sort_us{ 0 };    // std::sort phase time
@@ -1760,6 +1769,8 @@ namespace wi::terrain
 
 				for (uint32_t map_type = 0; map_type < arraysize(atlas.maps); ++map_type)
 				{
+					if (map_type == MaterialComponent::EMISSIVEMAP && !gg_svt_keep_emissive)
+						continue; // GGMAX 1.98 (A4): no emissive map, no pool share
 					TextureDesc desc;
 					desc.width = physical_width;
 					desc.height = physical_height;
@@ -1842,6 +1853,8 @@ namespace wi::terrain
 				uint32_t offset = 0;
 				for (uint32_t map_type = 0; map_type < arraysize(atlas.maps); ++map_type)
 				{
+					if (!atlas.maps[map_type].texture.IsValid())
+						continue; // GGMAX 1.98 (A4): emissive map not created
 					// Sparse mapping for block compression aliasing:
 					SparseUpdateCommand commands[2];
 					commands[0].sparse_resource = &atlas.maps[map_type].texture;
@@ -1924,6 +1937,16 @@ namespace wi::terrain
 
 				for (uint32_t map_type = 0; map_type < arraysize(atlas.maps); ++map_type)
 				{
+					if (!atlas.maps[map_type].texture.IsValid())
+					{
+						// GGMAX 1.98 (A4): the map was dropped. Bind an EXPLICIT 1x1 black —
+						// leaving the slot unbound feeds an undefined sparse sample into the
+						// shader and the whole scene washes to white (2026-08-02 post-mortem).
+						material->textures[map_type].resource.SetTexture(*wi::texturehelper::getBlack());
+						material->textures[map_type].sparse_residencymap_descriptor = -1;
+						material->textures[map_type].sparse_feedbackmap_descriptor = -1;
+						continue;
+					}
 					material->textures[map_type].resource.SetTexture(atlas.maps[map_type].texture);
 					if (vt.residency != nullptr)
 					{
@@ -2331,6 +2354,8 @@ namespace wi::terrain
 				continue;
 			for (uint32_t map_type = 0; map_type < arraysize(atlas.maps); map_type++)
 			{
+				if (!atlas.maps[map_type].texture_raw_block.IsValid())
+					continue; // GGMAX 1.98 (A4): emissive map not created (belt+braces; push.output_texture would be -1 anyway)
 				TerrainVirtualTexturePush push = {};
 
 				switch (map_type)

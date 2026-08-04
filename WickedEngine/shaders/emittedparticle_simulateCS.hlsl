@@ -301,8 +301,22 @@ void main(uint3 DTid : SV_DispatchThreadID, uint Gid : SV_GroupIndex)
 		{
 			// colour-over-life toward endcolor_* (defaults to white, as in the DX11 fork)
 			particleColor.rgb = lerp(particleColor.rgb, xParticleEndColor, lifeLerp);
+
+			// ASSIGN, do not multiply. The emit shader already baked material baseColor.a
+			// into particle.color (emitCS: baseColor = GetBaseColor() * location.color), and
+			// `opacity` above ALSO contains baseColor.a - so the stock '*=' applies it twice
+			// and every effect comes out at alpha^2. With the shipped baseColor.a of 0.33
+			// that is 0.11 instead of 0.33, which reads as roughly half the solidity of DX11.
+			// The DX11 vertex shader overwrites the alpha byte outright:
+			//   Out.color = (red + (green<<8) + (blue<<16)) | (uint(opacity*255) << 24)
+			// so assignment is the faithful behaviour, and it is exact for every effect
+			// rather than a blanket brightness multiplier.
+			particleColor.a = opacity;
 		}
-		particleColor.a *= opacity;
+		else
+		{
+			particleColor.a *= opacity;
+		}
 		
 		float rotation = rotation_rotationVel.x;
 		float2x2 rot = float2x2(

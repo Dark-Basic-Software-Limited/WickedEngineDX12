@@ -340,58 +340,72 @@ namespace wi
 
 		center = transform.GetPosition();
 
-		// GGMAX 2.00: GameGuru WPE emission model, re-ported from the DX11 fork.
-		// Three behaviours upstream does not have:
-		//  1. spawn_random - a gust/stutter model: emission pauses for a random number of
-		//     frames, then releases a randomised amount. Rain and fire were tuned with it.
-		//  2. burst_delay (MILLISECONDS) + burst_split - a burst is released in chunks over
-		//     time rather than all at once, which is what makes explosions read as a sequence.
-		//  3. bActive auto-deactivate - once an emitter has produced nothing for twice its
-		//     worst-case particle lifetime it drops out of simulate AND draw. This is how
-		//     fire-and-forget decal effects (blood, sparks, impact) stop costing anything.
-		float ggEmitRate = (float)count;
-		if (spawn_random > 0.0f)
+		// GGMAX 2.00: GameGuru WPE emission model, ported verbatim from the DX11 fork
+		// (WickedRepo/WickedEngine/wiEmittedParticle.cpp UpdateCPU). Two behaviours upstream
+		// does not have:
+		//  1. spawn_random - a gust/stutter model. Emission pauses for a randomised number of
+		//     frames and then decays back in, which is what stops rain and fire looking like a
+		//     metronome. With spawn_random == 0 randpause is always 0, so this reduces exactly
+		//     to upstream's 'emit += count * dt'.
+		//  2. burst_delay (MILLISECONDS) + burst_split - a burst is released in fractions over
+		//     several frames rather than all in one, which is what makes an explosion read as a
+		//     sequence rather than a single pop.
+		// Do NOT "simplify" these: the shipped effects were tuned against these exact curves.
+		if (randpause == 0)
 		{
-			if (randpause > 0)
+			randpause = (uint32_t)((wi::random::GetRandom(0, 1000) * 0.001f) * spawn_random);
+			if (randpause < (spawn_random * 0.6f))
+				randpause = 0;
+			else
+				randpause -= (uint32_t)(spawn_random * 0.5f);
+			if (randpause > spawn_random)
+				randpause = 0;
+
+			emit += (float)count * dt;
+			randemit = (float)count;
+		}
+		else
+		{
+			emit += randemit * dt;
+			randemit *= 0.05f;
+			randpause--;
+		}
+
+		if (emit < 0)
+			emit = 0;
+
+		if (burst_delay_timer > 0)
+		{
+			burst_delay_timer -= 1000.0f * dt;
+			if (burst_delay_timer < 0) burst_delay_timer = 0;
+		}
+		else
+		{
+			if (burst_split > 0)
 			{
-				randpause--;
-				ggEmitRate = 0.0f;
+				float amount = (float)burst / burst_split;
+				emit += amount;
+				burst -= (int)amount;
+				if (burst < 0) burst = 0;
 			}
 			else
 			{
-				ggEmitRate = (float)count * (1.0f + (wi::random::GetRandom(0.0f, 1.0f) - 0.5f) * spawn_random);
-				if (ggEmitRate < 0.0f) ggEmitRate = 0.0f;
-				randpause = (uint32_t)wi::random::GetRandom(0, (int)std::max(1.0f, spawn_random * 4.0f));
+				emit += (float)burst;
+				burst = 0;
 			}
 		}
+
 		if (IsEmitPaused())
 		{
-			ggEmitRate = 0.0f;
+			// let the live particles time out rather than killing them
+			emit = 0;
 			burst = 0;
 		}
 
-		emit += ggEmitRate * dt;
-
-		// Staged burst release
-		if (burst_amount > 0.0f)
-		{
-			burst_delay_timer -= dt * 1000.0f; // burst_delay is in milliseconds
-			if (burst_delay_timer <= 0.0f)
-			{
-				const float chunk = (burst_split > 0.0f) ? std::min(burst_amount, burst_split) : burst_amount;
-				burst += (int)chunk;
-				burst_amount -= chunk;
-				if (burst_amount < 0.0f) burst_amount = 0.0f;
-				burst_delay_timer = burst_delay;
-			}
-		}
-
-		emit += burst;
-		burst = 0;
+		total_emit_count += (uint32_t)emit;
 
 		if ((uint)emit > 0)
 		{
-			total_emit_count += (uint32_t)emit;
 			EmitLocation& location = emit_locations.emplace_back();
 			location.transform.init();
 			location.count = (uint)emit;
@@ -440,6 +454,17 @@ namespace wi
 	{
 		if (IsPaused())
 			return;
+
+		// GGMAX 2.00: the DX11 GameGuru fork treated num <= 0 as "fire the emitter's own
+		// configured burst_amount" and (re)armed the staged-release timer. Callers rely on
+		// it: the editor preview, the LUA WParticleEffectAction(1) and the weapon/decal
+		// paths all call Burst(0). With upstream's plain 'burst += num' that is a no-op, so
+		// every burst-only effect (explosions, blood, impacts - count == 0) fired nothing.
+		if (num <= 0)
+		{
+			num = (int)burst_amount;
+			burst_delay_timer = burst_delay;
+		}
 
 		burst += num;
 

@@ -7136,6 +7136,46 @@ namespace wi::scene
 				const XMVECTOR rayDirection_local = XMVector3Normalize(XMVector3TransformNormal(rayDirection, objectMat_Inverse));
 				const ArmatureComponent* armature = mesh->IsSkinned() ? armatures.GetComponent(mesh->armatureID) : nullptr;
 
+				// GGMAX: memoize CPU vertex skinning across the triangle loop. A mesh with a live
+				// armature has no BVH, so a ray entering its AABB brute-force tests EVERY triangle,
+				// and shared vertices were re-skinned once per referencing triangle corner (~6x per
+				// vertex; 4-8 matrix transposes+transforms each). One crosshair ray through a
+				// ~20k-tri corpse measured ~18 ms — the "look down at a dead character" FPS
+				// plummet. Skin each vertex once per candidate instead: generation-stamped
+				// thread_local scratch, no semantic change, POLYS untouched, benefits every LOS /
+				// gunfire / pickup ray against characters.
+				thread_local static wi::vector<XMFLOAT3> gg_skin_memo_pos;
+				thread_local static wi::vector<uint32_t> gg_skin_memo_gen;
+				thread_local static uint32_t gg_skin_memo_generation = 0;
+				const bool gg_skinned_candidate =
+					(softbody != nullptr && !softbody->boneData.empty()) ||
+					(armature != nullptr && !armature->boneData.empty());
+				if (gg_skinned_candidate)
+				{
+					const size_t vcount = mesh->vertex_positions.size();
+					if (gg_skin_memo_gen.size() < vcount)
+					{
+						gg_skin_memo_gen.resize(vcount, 0u);
+						gg_skin_memo_pos.resize(vcount);
+					}
+					if (++gg_skin_memo_generation == 0u) // wrap: invalidate everything once per 4G candidates
+					{
+						std::fill(gg_skin_memo_gen.begin(), gg_skin_memo_gen.end(), 0u);
+						gg_skin_memo_generation = 1u;
+					}
+				}
+				auto gg_skin_vertex_memo = [&](uint32_t i) -> XMVECTOR
+				{
+					if (gg_skin_memo_gen[i] == gg_skin_memo_generation)
+						return XMLoadFloat3(&gg_skin_memo_pos[i]);
+					const XMVECTOR p = (softbody != nullptr && !softbody->boneData.empty())
+						? SkinVertex(*mesh, *softbody, i)
+						: SkinVertex(*mesh, *armature, i);
+					XMStoreFloat3(&gg_skin_memo_pos[i], p);
+					gg_skin_memo_gen[i] = gg_skin_memo_generation;
+					return p;
+				};
+
 				auto intersect_triangle = [&](uint32_t subsetIndex, uint32_t indexOffset, uint32_t triangleIndex)
 				{
 					gg_dbg_isect_tris.fetch_add(1, std::memory_order_relaxed);
@@ -7146,18 +7186,13 @@ namespace wi::scene
 					XMVECTOR p0;
 					XMVECTOR p1;
 					XMVECTOR p2;
-					if (softbody != nullptr && !softbody->boneData.empty())
+					if (gg_skinned_candidate)
 					{
-						p0 = SkinVertex(*mesh, *softbody, i0);
-						p1 = SkinVertex(*mesh, *softbody, i1);
-						p2 = SkinVertex(*mesh, *softbody, i2);
-					}
-					else if (armature != nullptr && !armature->boneData.empty())
-					{
-						gg_dbg_isect_skintris.fetch_add(1, std::memory_order_relaxed);
-						p0 = SkinVertex(*mesh, *armature, i0);
-						p1 = SkinVertex(*mesh, *armature, i1);
-						p2 = SkinVertex(*mesh, *armature, i2);
+						if (armature != nullptr && !armature->boneData.empty())
+							gg_dbg_isect_skintris.fetch_add(1, std::memory_order_relaxed);
+						p0 = gg_skin_vertex_memo(i0);
+						p1 = gg_skin_vertex_memo(i1);
+						p2 = gg_skin_vertex_memo(i2);
 					}
 					else
 					{

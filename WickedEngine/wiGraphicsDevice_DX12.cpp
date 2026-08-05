@@ -408,6 +408,10 @@ void GG_DumpMAPadding(const char* path)
 	fclose(f);
 }
 
+// GGMAX 2.05 diagnostic: leakall.txt knob (see ctor + AllocationHandler::Update). GLOBAL
+// scope on purpose — MSVC binds the header's block-scope extern to the global namespace.
+bool gg_leak_all_destroys = false;
+
 namespace wi::graphics
 {
 	// GGMAX 1.48a: submit-tail attribution (print-only; read by the game's GET_PERF_DATA).
@@ -2690,6 +2694,17 @@ std::mutex queue_locker;
 			ss << "Failed to load D3D12CreateVersionedRootSignatureDeserializer! ERROR: " << std::hex << GetLastError();
 			wi::helper::messageBox(ss.str(), "Error!");
 			gg_fatal_device_init();
+		}
+
+		// GGMAX 2.05 DIAGNOSTIC: leakall.txt next to the EXE = never release deferred
+		// destroys (see AllocationHandler::Update in the header). Hunt-only knob.
+		{
+			const std::string leakflag = wi::helper::GetDirectoryFromPath(wi::helper::GetExecutablePath()) + "leakall.txt";
+			if (wi::helper::FileExists(leakflag) || wi::helper::FileExists("leakall.txt"))
+			{
+				gg_leak_all_destroys = true;
+				wi::backlog::post("GGMAX 2.05: leakall.txt found - ALL deferred destroys retained (device-hang diagnostic)");
+			}
 		}
 
 		// GGMAX 1.51: arm DRED without the debug layer when dred.txt sits next to the EXE (see knob).

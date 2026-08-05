@@ -587,6 +587,14 @@ namespace wi::graphics
 			{
 				std::scoped_lock lck(destroylocker);
 				framecount = FRAMECOUNT;
+				// GGMAX 2.05 DIAGNOSTIC (device-hang hunt): with leakall.txt next to the exe,
+				// never release ANY deferred-destroyed object — no VA ever unmaps. If the
+				// standalone-play page fault STOPS, the faulter reads a legitimately freed
+				// resource (bisect classes next); if it PERSISTS, the faulter reads memory
+				// that was never mapped = garbage/corrupt descriptor. Remove after the hunt.
+				extern bool gg_leak_all_destroys;
+				if (gg_leak_all_destroys)
+					return;
 				while (!destroyer_allocations.empty() && destroyer_allocations.front().second + BUFFERCOUNT < FRAMECOUNT)
 				{
 					destroyer_allocations.pop_front();

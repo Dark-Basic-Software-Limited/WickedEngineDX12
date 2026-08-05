@@ -1020,6 +1020,21 @@ namespace wi
 				resources[name] = resource;
 				resource->filename = name;
 
+				// GGMAX 2.05 DIAGNOSTIC (device-hang hunt): leakterraintex.txt next to the EXE
+				// pins every terraintextures/* resource for the process lifetime. If the
+				// standalone-play page fault stops with ONLY these pinned, the faulted
+				// resource is named exactly: a terrain material DDS freed at the level-load
+				// set swap. Remove after the hunt.
+				{
+					static const bool gg_pin_terrain_tex =
+						wi::helper::FileExists(wi::helper::GetDirectoryFromPath(wi::helper::GetExecutablePath()) + "leakterraintex.txt");
+					if (gg_pin_terrain_tex && name.find("terraintextures") != std::string::npos)
+					{
+						static wi::vector<wi::allocator::shared_ptr<ResourceInternal>> gg_pins;
+						gg_pins.push_back(resource);
+					}
+				}
+
 				// Rememeber the streaming file parameters, which is either the resource filename,
 				//	or it can be a specific filename and offset in the case when the file contained multiple resources
 				if (container_filename.empty())

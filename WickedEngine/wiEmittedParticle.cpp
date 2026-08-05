@@ -1301,9 +1301,9 @@ namespace wi
 			// D:\max\WickedRepo\WickedEngine\wiEmittedParticle.cpp:953-1003, its 5072-5077
 			// version bands); this is that set, minus the three wpe_filler_* placeholders and
 			// spawn_pause/spawn_pause_random which have no member in this struct.
-			// Guarded on the emitters component-library version (wiScene.h), bumped 2 -> 3, so
+			// Guarded on the emitters component-library version (wiScene.h), bumped 2 -> 4 (3 is skipped: upstream took it for burst_on_create), so
 			// scenes written before this change still read correctly and keep the defaults.
-			if (seri.GetVersion() >= 3)
+			if (seri.GetVersion() >= 4)
 			{
 				archive >> fadein_time;
 				archive >> burst_amount;
@@ -1389,7 +1389,7 @@ namespace wi
 			}
 
 			// GGMAX 2.01: must mirror the read block above field-for-field and in order.
-			if (seri.GetVersion() >= 3)
+			if (seri.GetVersion() >= 4)
 			{
 				archive << fadein_time;
 				archive << burst_amount;

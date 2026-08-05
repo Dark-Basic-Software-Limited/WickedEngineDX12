@@ -58,11 +58,14 @@ namespace wi::scene
 		wi::ecs::ComponentManager<DecalComponent>& decals = componentLibrary.Register<DecalComponent>("wi::scene::Scene::decals", 1); // version = 1
 		wi::ecs::ComponentManager<AnimationComponent>& animations = componentLibrary.Register<AnimationComponent>("wi::scene::Scene::animations", 2); // version = 2
 		wi::ecs::ComponentManager<AnimationDataComponent>& animation_datas = componentLibrary.Register<AnimationDataComponent>("wi::scene::Scene::animation_datas");
-		// GGMAX 2.01: bumped 2 -> 3. Version 3 adds the GameGuru WPE emitter extensions to
+		// GGMAX 2.01: bumped 2 -> 4. Version 4 adds the GameGuru WPE emitter extensions to
 		// EmittedParticleSystem::Serialize, without which Entity_Duplicate() produced clones
 		// with burst_amount = 0 (i.e. clones that emit nothing). Older scenes store 2 and are
 		// read exactly as before.
-		wi::ecs::ComponentManager<EmittedParticleSystem>& emitters = componentLibrary.Register<EmittedParticleSystem>("wi::scene::Scene::emitters", 3); // version = 3
+		// 3 IS DELIBERATELY SKIPPED: upstream Wicked has already taken emitter version 3 for
+		// its burst_on_create field, which this clone does not carry. Reusing 3 would make a
+		// future upstream pull silently misread whichever of the two wrote the file.
+		wi::ecs::ComponentManager<EmittedParticleSystem>& emitters = componentLibrary.Register<EmittedParticleSystem>("wi::scene::Scene::emitters", 4); // version = 4
 		wi::ecs::ComponentManager<HairParticleSystem>& hairs = componentLibrary.Register<HairParticleSystem>("wi::scene::Scene::hairs", 3); // version = 3
 		wi::ecs::ComponentManager<WeatherComponent>& weathers = componentLibrary.Register<WeatherComponent>("wi::scene::Scene::weathers", 6); // version = 6
 		wi::ecs::ComponentManager<SoundComponent>& sounds = componentLibrary.Register<SoundComponent>("wi::scene::Scene::sounds", 1); // version = 1

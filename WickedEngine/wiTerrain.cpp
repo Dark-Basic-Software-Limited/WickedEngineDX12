@@ -2391,16 +2391,49 @@ namespace wi::terrain
 				auto mem = device->AllocateGPU(sizeof(uint) * push.blendmap_layers, cmd);
 				const uint splineMaterialCount = (uint)splineMaterialEntities.size();
 				const uint baseMaterialCount = push.blendmap_layers - splineMaterialCount;
+				// GGMAX 2.04: an entity in these lists without a live MaterialComponent makes
+				// GetIndex return SIZE_MAX -> material_index 0xFFFFFFFF -> the tile-render CS
+				// reads a ShaderMaterial miles out of bounds -> garbage texture descriptor ->
+				// GPU page fault -> DXGI_ERROR_DEVICE_HUNG (Aztec PLAY GAME, 6/6 repro, always
+				// mid "Render Tile Regions"). Clamp to material 0 and shout once per session.
+				const size_t gg_mat_count = scene->materials.GetCount();
+				static bool gg_badmat_reported = false;
+				auto gg_safe_material_index = [&](Entity entity, const char* which, uint slot) -> uint
+				{
+					size_t idx = scene->materials.GetIndex(entity);
+					if (idx >= gg_mat_count)
+					{
+						if (!gg_badmat_reported)
+						{
+							gg_badmat_reported = true;
+							wi::backlog::post("GGMAX 2.04: terrain tile render hit a material entity WITHOUT a live MaterialComponent (" + std::string(which) + " slot " + std::to_string(slot) + ", entity " + std::to_string((unsigned long long)entity) + ") - clamped to material 0. This was the DEVICE_HUNG page-fault path.", wi::backlog::LogLevel::Error);
+						}
+						return 0u;
+					}
+					return (uint)idx;
+				};
 				for (uint i = 0; i < splineMaterialCount; ++i)
 				{
-					const Entity entity = splineMaterialEntities[i];
-					const uint material_index = (uint)scene->materials.GetIndex(entity);
+					const uint material_index = gg_safe_material_index(splineMaterialEntities[i], "spline", i);
 					std::memcpy((uint*)mem.data + baseMaterialCount + i, &material_index, sizeof(uint)); // force memcpy to avoid uncached read from GPU pointer!
 				}
+				// GGMAX 2.04: baseMaterialCount comes from the CHUNK's blendmap array size — if a
+				// chunk carries more painted layers than the registered material entities (set
+				// swap, paint data ahead of slot registration), materialEntities[i] was an OOB
+				// vector read (UB) before the entity check even ran. Clamp the loop too.
+				const uint gg_live_base = std::min(baseMaterialCount, (uint)materialEntities.size());
 				for (uint i = 0; i < baseMaterialCount; ++i)
 				{
-					const Entity entity = materialEntities[i];
-					const uint material_index = (uint)scene->materials.GetIndex(entity);
+					uint material_index = 0u;
+					if (i < gg_live_base)
+					{
+						material_index = gg_safe_material_index(materialEntities[i], "base/painted", i);
+					}
+					else if (!gg_badmat_reported)
+					{
+						gg_badmat_reported = true;
+						wi::backlog::post("GGMAX 2.04: chunk blendmap has " + std::to_string(baseMaterialCount) + " base layers but only " + std::to_string((uint)materialEntities.size()) + " material entities are registered - layer " + std::to_string(i) + " clamped to material 0. This was the DEVICE_HUNG page-fault path.", wi::backlog::LogLevel::Error);
+					}
 					std::memcpy((uint*)mem.data + i, &material_index, sizeof(uint)); // force memcpy to avoid uncached read from GPU pointer!
 				}
 

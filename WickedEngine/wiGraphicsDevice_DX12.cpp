@@ -8405,10 +8405,15 @@ std::mutex queue_locker;
 			return;
 		if (gg_dred_armed)
 		{
-			// GGMAX 2.03: DRED breadcrumb contexts only decode the legacy embedded ANSI/UNICODE
-			// markers, not the PIX3 blobs WinPixEventRuntime emits — so with DRED armed emit raw
-			// markers instead, and dred_report.txt names the pass around every breadcrumb op
-			commandlist.GetGraphicsCommandList()->BeginEvent(1 /*PIX_EVENT_ANSI_VERSION*/, name, (UINT)strlen(name) + 1);
+			// GGMAX 2.03: DRED breadcrumb contexts only decode legacy embedded markers, not the
+			// PIX3 blobs WinPixEventRuntime emits — so with DRED armed emit raw markers instead,
+			// and dred_report.txt names the pass around every breadcrumb op. UNICODE metadata (0):
+			// the ANSI form (1) produced no context strings on this driver.
+			wchar_t wtext[128];
+			if (wi::helper::StringConvert(name, wtext, arraysize(wtext)) > 0)
+			{
+				commandlist.GetGraphicsCommandList()->BeginEvent(0 /*PIX_EVENT_UNICODE_VERSION*/, wtext, (UINT)((wcslen(wtext) + 1) * sizeof(wchar_t)));
+			}
 			return;
 		}
 		wchar_t text[128];
@@ -8436,7 +8441,11 @@ std::mutex queue_locker;
 			return;
 		if (gg_dred_armed)
 		{
-			commandlist.GetGraphicsCommandList()->SetMarker(1 /*PIX_EVENT_ANSI_VERSION*/, name, (UINT)strlen(name) + 1);
+			wchar_t wtext[128];
+			if (wi::helper::StringConvert(name, wtext, arraysize(wtext)) > 0)
+			{
+				commandlist.GetGraphicsCommandList()->SetMarker(0 /*PIX_EVENT_UNICODE_VERSION*/, wtext, (UINT)((wcslen(wtext) + 1) * sizeof(wchar_t)));
+			}
 			return;
 		}
 		wchar_t text[128];

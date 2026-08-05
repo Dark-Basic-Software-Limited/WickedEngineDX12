@@ -281,6 +281,26 @@ int max_shadow_resolution_cube = 256;
 // atlas rewrite dropped. -1 = uncapped (stock engine, byte-identical); 0 = local shadows off.
 static int localShadowBudget = -1;
 static int localShadowGrantedCount = 0;   // local casters granted a shadow slot this frame
+
+// GGMAX 2.06: shadow-pack diagnostics (pose-dependent spot-shadow flicker hunt) — the
+// final pack scale and each packed light's rect, readable via GG_GetShadowRects below.
+float gg_dbg_shadow_pack_scale = 1.0f;
+struct GGShadowRectDbg { uint32_t entity; int w; int h; int type; };
+GGShadowRectDbg gg_dbg_shadow_rects[64];
+uint32_t gg_dbg_shadow_rect_count = 0;
+uint32_t GG_GetShadowRects(uint32_t* entities, int* widths, int* heights, int* types, uint32_t maxn, float* scale)
+{
+	if (scale) *scale = gg_dbg_shadow_pack_scale;
+	uint32_t n = std::min(gg_dbg_shadow_rect_count, maxn);
+	for (uint32_t i = 0; i < n; ++i)
+	{
+		entities[i] = gg_dbg_shadow_rects[i].entity;
+		widths[i] = gg_dbg_shadow_rects[i].w;
+		heights[i] = gg_dbg_shadow_rects[i].h;
+		types[i] = gg_dbg_shadow_rects[i].type;
+	}
+	return n;
+}
 static int localShadowCappedCount = 0;    // local casters denied a slot (rendered fully lit)
 static int localShadowRenderedCount = 0;  // local shadows actually re-rendered this frame
 static wi::vector<wi::ecs::Entity> localShadowGrantedPrev; // last frame's granted set (Phase 1.5 hysteresis)
@@ -4490,6 +4510,21 @@ void UpdateVisibility(Visibility& vis)
 								break;
 							}
 						}
+					}
+
+					// GGMAX 2.06: record the pack outcome for the harness (DUMP_SHADOWRECTS)
+					gg_dbg_shadow_pack_scale = iterative_scaling;
+					gg_dbg_shadow_rect_count = 0;
+					for (auto& dbg_rect : vis.shadow_packer.rects)
+					{
+						if (dbg_rect.id == -1 || !dbg_rect.was_packed) continue;
+						if (gg_dbg_shadow_rect_count >= 64) break;
+						uint32_t dbg_li = uint32_t(dbg_rect.id);
+						GGShadowRectDbg& d = gg_dbg_shadow_rects[gg_dbg_shadow_rect_count++];
+						d.entity = (uint32_t)vis.scene->lights.GetEntity(dbg_li);
+						d.w = vis.visibleLightShadowRects[dbg_li].w; // slice multiplier already removed
+						d.h = vis.visibleLightShadowRects[dbg_li].h;
+						d.type = (int)vis.scene->lights[dbg_li].GetType();
 					}
 
 					if ((int)shadowMapAtlas.desc.width < vis.shadow_packer.width || (int)shadowMapAtlas.desc.height < vis.shadow_packer.height)

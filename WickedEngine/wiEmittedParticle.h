@@ -98,7 +98,13 @@ namespace wi
 			// GGMAX 2.00: the DX11 GameGuru fork used bit 7 for this. Bit 7 is now
 			// FLAG_COLLIDERS_DISABLED upstream, so legacy .PE flags MUST be remapped
 			// onto this bit by the loader rather than carried across raw.
-			FLAG_EMIT_PAUSE = 1 << 10,
+			// GGMAX 2.02: moved 1<<10 -> 1<<28. Upstream grows this enum by sequential
+			// append (bits 7-9 are all upstream additions) and its next append IS bit 10,
+			// which would silently collide. CONVENTION: GGMAX-added bits in upstream-owned
+			// FLAGS enums live in the reserved range 24-31, never the next sequential slot.
+			// Safe to move because no MAX code path persists emitter _flags to disk (no
+			// .wiscene save path; the legacy .PE loader assigns this SYMBOLICALLY).
+			FLAG_EMIT_PAUSE = 1 << 28,
 		};
 		uint32_t _flags = FLAG_EMPTY;
 

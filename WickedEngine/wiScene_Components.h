@@ -1167,7 +1167,14 @@ namespace wi::scene
 			NOT_VISIBLE_IN_MAIN_CAMERA = 1 << 8,
 			NOT_VISIBLE_IN_REFLECTIONS = 1 << 9,
 			WETMAP_ENABLED = 1 << 10,
-			OCCLUSION_QUERY_DISABLED = 1 << 11,	// GGMAX: opt this object out of per-object GPU occlusion queries (always treated as visible)
+			// GGMAX 2.02: moved 1<<11 -> 1<<28. Upstream grows this enum by sequential
+			// append (bits 8/9/10 were appended in 2023-2024, verified on upstream/master)
+			// and its next append IS bit 11, which would silently collide with this bit.
+			// CONVENTION: GGMAX-added bits in upstream-owned FLAGS enums live in the
+			// reserved range 24-31, never the next sequential slot. Safe to move because
+			// object _flags are never persisted by MAX (objects are rebuilt from FPE/model
+			// load every level load; the tree pool re-asserts this flag at creation).
+			OCCLUSION_QUERY_DISABLED = 1 << 28,	// GGMAX: opt this object out of per-object GPU occlusion queries (always treated as visible)
 		};
 		uint32_t _flags = RENDERABLE | CAST_SHADOW;
 

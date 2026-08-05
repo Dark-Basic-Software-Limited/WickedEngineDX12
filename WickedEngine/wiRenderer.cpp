@@ -6262,7 +6262,10 @@ void UpdateRenderDataAsync(
 		{
 			const wi::EmittedParticleSystem& emitter = vis.scene->emitters[emitterIndex];
 			Entity entity = vis.scene->emitters.GetEntity(emitterIndex);
-			const TransformComponent& transform = *vis.scene->transforms.GetComponent(entity);
+			// GGMAX 2.02: removed a dead `*transforms.GetComponent(entity)` dereference here.
+			// The variable was unused, and an emitter entity without a TransformComponent
+			// (possible via game-side entity assembly) made it a latent null deref in the
+			// per-frame simulate loop.
 			const MeshComponent* mesh = vis.scene->meshes.GetComponent(emitter.meshID);
 			const uint32_t instanceIndex = uint32_t(vis.scene->objects.GetCount() + vis.scene->hairs.GetCount()) + emitterIndex;
 

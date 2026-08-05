@@ -518,7 +518,18 @@ namespace wi::graphics
 				void block_allocate()
 				{
 					heaps.emplace_back();
-					dx12_check(device->device->CreateDescriptorHeap(&desc, PPV_ARGS(heaps.back())));
+					HRESULT hr_block = device->device->CreateDescriptorHeap(&desc, PPV_ARGS(heaps.back()));
+					if (FAILED(hr_block) || heaps.back() == nullptr)
+					{
+						// GGMAX 2.03: CreateDescriptorHeap fails once the device is removed;
+						// dereferencing the null heap was an AV inside CreateTexture during level
+						// load. Route to the removal handler (writes the DRED report) and exit
+						// cleanly instead. OnDeviceRemoved() is mutex-serialized, so this also
+						// waits out a dump already in progress on the removal-callback thread.
+						device->OnDeviceRemoved();
+						ExitProcess(1);
+					}
+					dx12_check(hr_block);
 					D3D12_CPU_DESCRIPTOR_HANDLE heap_start = heaps.back()->GetCPUDescriptorHandleForHeapStart();
 					for (UINT i = 0; i < desc.NumDescriptors; ++i)
 					{

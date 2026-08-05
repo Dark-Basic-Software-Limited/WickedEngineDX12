@@ -1,4 +1,5 @@
 #include "wiScene_Components.h"
+#include <atomic> // GGMAX 2026-08-05: tripwire event cap
 #include "wiTextureHelper.h"
 #include "wiResourceManager.h"
 #include "wiPhysics.h"
@@ -160,8 +161,25 @@ namespace wi::scene
 #ifdef _WIN32
 		//GGMAX debug tripwire (parrot corruption hunt): if the decompose was garbage,
 		//log the caller so the source of the bad world matrix can be identified.
+		// GGMAX 2026-08-05: CAPPED at 64 detailed events per session. Forensics on the
+		// accumulated file showed 13,086 events since 2026-07-18 (~800 per level load,
+		// ALL from WickedCall_LoadNode composing sheared model-node transforms, all healed
+		// by the guard above) - the tripwire was costing a synchronous fopen/append storm
+		// on every load and 12 MB of repeating text. First 64 keep full diagnostics; after
+		// that a single suppression line records the running total per session.
 		if (!rotationValid)
 		{
+			static std::atomic<uint32_t> gg_garbage_events{ 0 };
+			const uint32_t evt = gg_garbage_events.fetch_add(1);
+			if (evt == 64)
+			{
+				FILE* fs = fopen("applytransform_garbage.txt", "a");
+				if (fs) { fprintf(fs, "SUPPRESSED: further events this session are counted but not logged\n"); fclose(fs); }
+			}
+			if (evt >= 64)
+			{
+				return; // guard already applied above; only the logging is suppressed
+			}
 			void* stack[24];
 			unsigned short frames = RtlCaptureStackBackTrace(0, 24, stack, nullptr);
 			FILE* f = fopen("applytransform_garbage.txt", "a");

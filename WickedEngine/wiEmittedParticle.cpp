@@ -1290,6 +1290,48 @@ namespace wi
 				opacityCurveControlPeakEnd = opacityCurveControlPeakStart;
 			}
 
+			// GGMAX 2.01: the GameGuru emitter extensions added in 2.00 were NOT round-tripped
+			// here, and Scene::Entity_Duplicate() duplicates entities by serializing them
+			// through this very function. preload_wicked_particle_effect() (M-Entity_part5.cpp)
+			// builds its 5-slot ready_decals[] clone cache with exactly that call, so clones
+			// 1-4 came back with every field below at its default - burst_amount = 0 above all.
+			// Burst(0) resolves num = burst_amount, so 4 of every 5 impact/blood/explosion
+			// effects fired nothing at all, and overlapping repeat hits looked like "only one
+			// effect can play at a time". The DX11 fork serialized this same set (see
+			// D:\max\WickedRepo\WickedEngine\wiEmittedParticle.cpp:953-1003, its 5072-5077
+			// version bands); this is that set, minus the three wpe_filler_* placeholders and
+			// spawn_pause/spawn_pause_random which have no member in this struct.
+			// Guarded on the emitters component-library version (wiScene.h), bumped 2 -> 3, so
+			// scenes written before this change still read correctly and keep the defaults.
+			if (seri.GetVersion() >= 3)
+			{
+				archive >> fadein_time;
+				archive >> burst_amount;
+				archive >> burst_delay;
+				archive >> normal_factor_x;
+				archive >> normal_factor_y;
+				archive >> normal_factor_z;
+				archive >> normal_random;
+				archive >> rotation_random;
+				archive >> size_random;
+				archive >> spawn_random;
+				archive >> scaling_random;
+				archive >> endcolor_red;
+				archive >> endcolor_green;
+				archive >> endcolor_blue;
+				archive >> burst_split;
+				archive >> burst_factor_x;
+				archive >> burst_factor_y;
+				archive >> burst_factor_z;
+				archive >> startpos;
+				archive >> bFindFloor;
+				archive >> burst_factor_speed;
+				archive >> start_rotation;
+				archive >> bFollowCamera;
+				archive >> random_position;
+				archive >> random_position_scale;
+				archive >> distance_sort_bias;
+			}
 		}
 		else
 		{
@@ -1344,6 +1386,37 @@ namespace wi
 			if (seri.GetVersion() >= 2)
 			{
 				archive << opacityCurveControlPeakEnd;
+			}
+
+			// GGMAX 2.01: must mirror the read block above field-for-field and in order.
+			if (seri.GetVersion() >= 3)
+			{
+				archive << fadein_time;
+				archive << burst_amount;
+				archive << burst_delay;
+				archive << normal_factor_x;
+				archive << normal_factor_y;
+				archive << normal_factor_z;
+				archive << normal_random;
+				archive << rotation_random;
+				archive << size_random;
+				archive << spawn_random;
+				archive << scaling_random;
+				archive << endcolor_red;
+				archive << endcolor_green;
+				archive << endcolor_blue;
+				archive << burst_split;
+				archive << burst_factor_x;
+				archive << burst_factor_y;
+				archive << burst_factor_z;
+				archive << startpos;
+				archive << bFindFloor;
+				archive << burst_factor_speed;
+				archive << start_rotation;
+				archive << bFollowCamera;
+				archive << random_position;
+				archive << random_position_scale;
+				archive << distance_sort_bias;
 			}
 		}
 	}

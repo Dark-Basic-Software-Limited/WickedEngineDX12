@@ -3413,6 +3413,12 @@ void Workaround(const int bug , CommandList cmd)
 	return;
 }
 
+// GGMAX 2026-08-05 (outline hunt diagnostic): draws that bound a nonzero USER stencil
+// ref, per render pass, plus TOTAL draws per pass (proves whether a pass uses
+// RenderMeshes at all). Read by the harness DUMP_OUTLINE command via the bridge below.
+std::atomic<uint64_t> gg_dbg_userstencil_draws[RENDERPASS_COUNT] = {};
+std::atomic<uint64_t> gg_dbg_total_draws[RENDERPASS_COUNT] = {};
+
 void RenderMeshes(
 	const Visibility& vis,
 	const RenderQueue& renderQueue,
@@ -3609,6 +3615,17 @@ void RenderMeshes(
 			STENCILREF engineStencilRef = material.engineStencilRef;
 			uint8_t userStencilRef = userStencilRefOverride > 0 ? userStencilRefOverride : material.userStencilRef;
 			uint32_t stencilRef = CombineStencilrefs(engineStencilRef, userStencilRef);
+			// GGMAX 2026-08-05 (outline hunt diagnostic): count draws that actually bind a
+			// nonzero USER stencil ref, split by render pass. The selection-outline mask
+			// reads these bits back; a zero counter here with objects carrying
+			// userStencilRef means the ref is lost between the component and the draw.
+			if (renderPass < RENDERPASS_COUNT)
+			{
+				extern std::atomic<uint64_t> gg_dbg_userstencil_draws[RENDERPASS_COUNT];
+				extern std::atomic<uint64_t> gg_dbg_total_draws[RENDERPASS_COUNT];
+				gg_dbg_total_draws[renderPass].fetch_add(1, std::memory_order_relaxed);
+				if (userStencilRef != 0) gg_dbg_userstencil_draws[renderPass].fetch_add(1, std::memory_order_relaxed);
+			}
 			if (stencilRef != prev_stencilref)
 			{
 				prev_stencilref = stencilRef;
@@ -20236,4 +20253,18 @@ wi::Resource CreatePaintableTexture(uint32_t width, uint32_t height, uint32_t mi
 	return resource;
 }
 
+}
+
+// GGMAX 2026-08-05: global-scope bridge for the automation harness DUMP_OUTLINE command
+// (avoids namespaced externs game-side). Returns the per-renderpass user-stencil draw
+// counters defined above RenderMeshes.
+namespace wi::renderer { extern std::atomic<uint64_t> gg_dbg_userstencil_draws[wi::enums::RENDERPASS_COUNT]; }
+std::atomic<uint64_t>* GG_GetUserStencilDrawCounters(void)
+{
+	return wi::renderer::gg_dbg_userstencil_draws;
+}
+namespace wi::renderer { extern std::atomic<uint64_t> gg_dbg_total_draws[wi::enums::RENDERPASS_COUNT]; }
+std::atomic<uint64_t>* GG_GetTotalDrawCounters(void)
+{
+	return wi::renderer::gg_dbg_total_draws;
 }

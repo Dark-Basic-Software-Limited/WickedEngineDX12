@@ -190,15 +190,23 @@ inline void light_directional(in ShaderEntity light, in Surface surface, inout L
 #endif // WATER
 }
 
-inline half attenuation_pointlight(in half dist2, in half range, in half range2)
+// GGMAX 2.07g: attenuation math promoted HALF -> FLOAT. fp16 overflows at 65504, so any
+// light with range > 255.9 had range2 = +INF: dist2/range2 collapsed to 0, the falloff
+// WINDOW vanished, and the light decayed as raw 1/d^2 that NEVER reaches zero. Its tiled-
+// culling boundary (16px screen tiles) then cut a still-visible intensity/d^2 contribution
+// = the user-reported screen-tile-aligned staircase divides on the floor (spot range 503
+// showed it; point lights with range < 256 stayed windowed and clean - the misleading
+// spot/point asymmetry). Beyond ~256u dist2 itself also overflowed (rsqrt(INF)=0 -> L=0),
+// hard-killing big lights at a fixed 256u circle regardless of authored range.
+inline half attenuation_pointlight(in float dist2, in float range, in float range2)
 {
 	// GLTF recommendation: https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_lights_punctual#range-property
 	//return saturate(1 - pow(dist / range, 4)) / dist2;
 
 	// Removed pow(x, 4):
-	half dist_per_range = dist2 / range2; // pow2 (note: range cannot be 0, in that case light is not uploaded to GPU, so here will not be zero-division)
+	float dist_per_range = dist2 / range2; // pow2 (note: range cannot be 0, in that case light is not uploaded to GPU, so here will not be zero-division)
 	dist_per_range *= dist_per_range; // pow4
-	return saturate(1 - dist_per_range) / max(0.0001, dist2);
+	return (half)(saturate(1 - dist_per_range) / max(0.0001, dist2));
 }
 inline void light_point(in ShaderEntity light, in Surface surface, inout Lighting lighting, in half shadow_mask = 1)
 {
@@ -223,9 +231,9 @@ inline void light_point(in ShaderEntity light, in Surface surface, inout Lightin
 	}
 #endif // DISABLE_AREA_LIGHTS
 
-	const half dist2 = dot(Lunnormalized, Lunnormalized);
-	const half range = light.GetRange();
-	const half range2 = range * range;
+	const float dist2 = dot(Lunnormalized, Lunnormalized); // GGMAX 2.07g: float — fp16 overflows past 255.9u
+	const float range = light.GetRange();
+	const float range2 = range * range;
 
 	if (dist2 > range2)
 		return; // outside range
@@ -309,7 +317,7 @@ inline void light_point(in ShaderEntity light, in Surface surface, inout Lightin
 #endif // LIGHTING_SCATTER
 }
 
-inline half attenuation_spotlight(in half dist2, in half range, in half range2, in half spot_factor, in half angle_scale, in half angle_offset)
+inline half attenuation_spotlight(in float dist2, in float range, in float range2, in half spot_factor, in half angle_scale, in half angle_offset)
 {
 	half attenuation = attenuation_pointlight(dist2, range, range2);
 	half angularAttenuation = saturate(mad(spot_factor, angle_scale, angle_offset));
@@ -325,9 +333,9 @@ inline void light_spot(in ShaderEntity light, in Surface surface, inout Lighting
 		return; // layer mismatch
 	
 	float3 Lunnormalized = light.position - surface.P;
-	const half dist2 = dot(Lunnormalized, Lunnormalized);
-	const half range = light.GetRange();
-	const half range2 = range * range;
+	const float dist2 = dot(Lunnormalized, Lunnormalized); // GGMAX 2.07g: float — fp16 overflows past 255.9u
+	const float range = light.GetRange();
+	const float range2 = range * range;
 	
 	if (dist2 > range2)
 		return; // outside range
@@ -371,8 +379,9 @@ inline void light_spot(in ShaderEntity light, in Surface surface, inout Lighting
 				// ran the same graded-tolerance gather (scaleFactor 65536, spot = cascade 0) and
 				// never acne'd. POINT never had this problem: shadow_cube carries its own 0.989
 				// distance cushion (the user-observed spot/point asymmetry).
-				const float gg_camera_distance = length(GetCamera().position - surface.P);
-				light_color *= shadow_2D_feathered(light, shadow_pos.z, shadow_uv.xy, 0, gg_camera_distance);
+				// GGMAX 2.07f: camera_distance -1 = FIXED 8 taps (DX11 spot parity — the sun's
+				// distance-stepped tap count put camera-anchored brightness divides in spot shadows).
+				light_color *= shadow_2D_feathered(light, shadow_pos.z, shadow_uv.xy, 0, -1.0);
 			}
 		}
 
@@ -449,9 +458,9 @@ inline void light_rect(in ShaderEntity light, in Surface surface, inout Lighting
 		
 	float3 Lunnormalized = rectangle_point - surface.P;
 
-	const half dist2 = dot(Lunnormalized, Lunnormalized);
-	const half range = light.GetRange();
-	const half range2 = range * range;
+	const float dist2 = dot(Lunnormalized, Lunnormalized); // GGMAX 2.07g: float — fp16 overflows past 255.9u
+	const float range = light.GetRange();
+	const float range2 = range * range;
 
 	if (dist2 > range2)
 		return; // outside range
@@ -508,8 +517,8 @@ inline void light_rect(in ShaderEntity light, in Surface surface, inout Lighting
 			{
 				// GGMAX 2.07e: same feathered receiver compare as SPOT (see light_spot) — rect
 				// lights share the perspective 2D shadow path and the same acne exposure.
-				const float gg_camera_distance = length(GetCamera().position - surface.P);
-				light_color *= shadow_2D_feathered(light, shadow_pos.z, shadow_uv.xy, 0, gg_camera_distance);
+				// GGMAX 2.07f: fixed taps (camera_distance -1), same reason as light_spot.
+				light_color *= shadow_2D_feathered(light, shadow_pos.z, shadow_uv.xy, 0, -1.0);
 			}
 		}
 

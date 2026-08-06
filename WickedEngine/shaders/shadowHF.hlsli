@@ -283,7 +283,15 @@ inline half3 shadow_2D_feathered(in ShaderEntity light, in float z, in float2 sh
 	interp = interp.zxzx * interp.wwyy;
 
 	const float scaleFactor = 65536.0 / (cascade + 1u); // feather widens per cascade (DX11 constant, D32-scale)
-	const int samplenum = 8 - (int)min(camera_distance * 0.003f, 7.0f); // 8 near .. 1 far (DX11 formula)
+	// GGMAX 2.07f: the distance-stepped tap count is the DX11 DIRECTIONAL formula. DX11's
+	// SPOT path (shadowCascadeSpot) used a FIXED 9-tap kernel — no stepping. Applying the
+	// stepping to spots (2.07e) created visible brightness DIVIDES along iso-camera-distance
+	// contours wherever partial occlusion exists (dappled shadow): each tap-count band
+	// averages a different neighborhood. The bands follow the CAMERA (fixed distances from
+	// the eye), so they read as screen-attached tile-like divides, and they are shadow-map-
+	// resolution independent — the user-reported warehouse artifact. camera_distance < 0 =
+	// spot/rect caller = constant 8 taps (DX11 spot parity).
+	const int samplenum = camera_distance < 0 ? 8 : (8 - (int)min(camera_distance * 0.003f, 7.0f)); // sun: 8 near .. 1 far (DX11 formula)
 
 	float occlusion = 0;
 	[loop]

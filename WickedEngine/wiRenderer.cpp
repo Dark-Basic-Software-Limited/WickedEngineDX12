@@ -4648,6 +4648,43 @@ void UpdateVisibility(Visibility& vis)
 					}
 				}
 			}
+			// GGMAX 2.07d: dynamic CASTERS invalidate the cache too — the slots above key the
+			// LIGHTS' state, but a shadow-casting object moving inside a granted light's range
+			// changes that light's shadow content (user repro: box moved under the spot, its
+			// shadow stayed at the old position until the LIGHT was nudged). An object counts as
+			// moved when its world matrix differs from last frame's; the light sphere is expanded
+			// by the translation delta so an object that just LEFT the range still invalidates.
+			// Note: bone-only animation (idling character) does not change the object matrix and
+			// is NOT detected here — a known Phase 2 limitation, masked in practice by rect churn.
+			if (!changed && !cur.empty()
+				&& vis.scene->matrix_objects.size() == vis.scene->objects.GetCount()
+				&& vis.scene->matrix_objects_prev.size() == vis.scene->objects.GetCount())
+			{
+				for (size_t i = 0; i < vis.scene->aabb_objects.size() && !changed; ++i)
+				{
+					const ObjectComponent& object = vis.scene->objects[i];
+					if (!object.IsRenderable() || !object.IsCastingShadow())
+						continue;
+					const XMFLOAT4X4& mNow = vis.scene->matrix_objects[i];
+					const XMFLOAT4X4& mPrev = vis.scene->matrix_objects_prev[i];
+					if (std::memcmp(&mNow, &mPrev, sizeof(XMFLOAT4X4)) == 0)
+						continue; // did not move
+					const float dx = mNow._41 - mPrev._41;
+					const float dy = mNow._42 - mPrev._42;
+					const float dz = mNow._43 - mPrev._43;
+					const float delta = std::sqrt(dx * dx + dy * dy + dz * dz);
+					const AABB& aabb = vis.scene->aabb_objects[i];
+					for (const LocalShadowSlot& s : cur)
+					{
+						Sphere sph(s.pos, s.range + delta);
+						if (sph.intersects(aabb))
+						{
+							changed = true;
+							break;
+						}
+					}
+				}
+			}
 			localAtlasFullClear = changed;
 			if (changed)
 			{

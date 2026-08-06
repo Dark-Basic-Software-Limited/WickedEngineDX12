@@ -7791,7 +7791,11 @@ void DrawShadowmaps(
 		case LightComponent::SPOT:
 		case LightComponent::RECTANGLE:
 		{
-			if (max_shadow_resolution_2D == 0 && light.forced_shadow_resolution < 0)
+			// GGMAX 2.07b: guard on the SPOT resolution knob, not the sun cascade one. Upstream
+			// sizes spot rects from max_shadow_resolution_2D so its guard checked the same
+			// variable; in GG the game feeds that from the SUN dropdown, so "Sun = Off" silently
+			// stopped spot shadow RENDERING while the rect still packed (sampled as empty = lit).
+			if (max_shadow_resolution_spot == 0 && light.forced_shadow_resolution < 0)
 				break;
 
 			SHCAM shcam;

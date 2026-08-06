@@ -1141,8 +1141,12 @@ namespace wi::renderer
 
 	void SetShadowProps2D(int max_resolution);
 	void SetShadowPropsCube(int max_resolution);
-	// GG: cap local (point/spot/rect) shadow casters per frame (revives iShadowPointMax). -1 uncapped, 0 off.
-	void SetLocalShadowBudget(int maxLocalShadows);
+	// GGMAX 2.07: spot/rect shadow resolution knob (was riding SetShadowProps2D = the sun cascade res).
+	void SetShadowPropsSpot(int max_resolution);
+	// GG: cap local shadow casters per frame (revives iShadowSpotMax/iShadowPointMax). -1 uncapped, 0 off.
+	// GGMAX 2.07: split per type — spot/rect casters compete against maxSpotShadows, point casters
+	// against maxPointShadows (one shared pool fed by the point knob made the spot knob dead).
+	void SetLocalShadowBudget(int maxSpotShadows, int maxPointShadows);
 	void GetLocalShadowStats(int& granted, int& capped, int& rendered);
 	// GG Phase 2: cache static local shadows (render once, reuse atlas texels until something changes).
 	void SetLocalShadowCachingEnabled(bool value);

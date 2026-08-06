@@ -363,10 +363,19 @@ inline void light_spot(in ShaderEntity light, in Surface surface, inout Lighting
 			[branch]
 			if (is_saturated(shadow_uv))
 			{
-				light_color *= shadow_2D(light, shadow_pos.z, shadow_uv.xy, 0, surface.pixel);
+				// GGMAX 2.07e: SPOT uses the DX11 feathered compare like the sun does (1.58 ported
+				// it directional-only). The stock hard SampleCmp has ZERO receiver-side tolerance on
+				// D32 (raster bias units are float-exponent-scaled = negligible), so directly-lit
+				// surfaces sat on a knife-edge depth compare and camera pose jitter flipped pixels
+				// IN/OUT of self-shadow — the mouselook "shadow flicker". DX11's shadowCascadeSpot
+				// ran the same graded-tolerance gather (scaleFactor 65536, spot = cascade 0) and
+				// never acne'd. POINT never had this problem: shadow_cube carries its own 0.989
+				// distance cushion (the user-observed spot/point asymmetry).
+				const float gg_camera_distance = length(GetCamera().position - surface.P);
+				light_color *= shadow_2D_feathered(light, shadow_pos.z, shadow_uv.xy, 0, gg_camera_distance);
 			}
 		}
-		
+
 		if (!any(light_color))
 			return; // light color lost after shadow
 	}
@@ -497,14 +506,17 @@ inline void light_rect(in ShaderEntity light, in Surface surface, inout Lighting
 			[branch]
 			if (is_saturated(shadow_uv))
 			{
-				light_color *= shadow_2D(light, shadow_pos.z, shadow_uv.xy, 0, surface.pixel);
+				// GGMAX 2.07e: same feathered receiver compare as SPOT (see light_spot) — rect
+				// lights share the perspective 2D shadow path and the same acne exposure.
+				const float gg_camera_distance = length(GetCamera().position - surface.P);
+				light_color *= shadow_2D_feathered(light, shadow_pos.z, shadow_uv.xy, 0, gg_camera_distance);
 			}
 		}
-		
+
 		if (!any(light_color))
 			return; // light color lost after shadow
 	}
-		
+
 	light_color *= attenuation_pointlight(dist2, range, range2); // dist2 is the closest point on rectangle, so it will not be a falloff from light center, but as if a point light is placed on the closest rectangle point
 	
 	half3 light_color_diffuse = light_color * light_area * PI; // I increase the light color by the surface area, because I want larger lights to illuminate more.

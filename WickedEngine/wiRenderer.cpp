@@ -320,7 +320,11 @@ static bool localShadowCachingEnabled = false;      // master switch (game enabl
 static bool localAtlasFullClear = true;             // this frame: whole atlas clears + all locals re-render
 static bool localShadowInvalidate = true;           // settings/level change -> next decision forces a full clear
 static uint64_t localShadowDecisionFrame = ~0ull;   // frame the Phase 2 decision was produced
-struct LocalShadowSlot { wi::ecs::Entity ent = wi::ecs::INVALID_ENTITY; int rx = 0, ry = 0, rw = 0, rh = 0; XMFLOAT3 pos = {}; float range = 0; };
+// GGMAX 2.07c: dir + cone are part of the key — the spot shadow's content depends on the
+// light's DIRECTION and CONE ANGLE too. Without them, editing Spotlight Radius (or rotating
+// a spot in place) changed the projection while the cache kept serving the map rendered with
+// the old cone: shadows landed where they shouldn't until any move re-keyed the position.
+struct LocalShadowSlot { wi::ecs::Entity ent = wi::ecs::INVALID_ENTITY; int rx = 0, ry = 0, rw = 0, rh = 0; XMFLOAT3 pos = {}; float range = 0; XMFLOAT3 dir = {}; float cone = 0; };
 static wi::vector<LocalShadowSlot> localShadowCache; // last-rendered granted layout (sorted by Entity)
 static uint32_t localShadowCacheAtlasW = 0, localShadowCacheAtlasH = 0;
 // GGMAX far-cascade caster cull (DX11 parity): objects only shadow into the near directional cascades;
@@ -4620,6 +4624,7 @@ void UpdateVisibility(Visibility& vis)
 				s.ent = vis.scene->lights.GetEntity(li);
 				s.rx = r.x; s.ry = r.y; s.rw = r.w; s.rh = r.h;
 				s.pos = L.position; s.range = L.GetRange();
+				s.dir = L.direction; s.cone = L.outerConeAngle; // 2.07c: rotation/cone edits must invalidate
 				cur.push_back(s);
 			}
 			std::sort(cur.begin(), cur.end(),
@@ -4635,7 +4640,8 @@ void UpdateVisibility(Visibility& vis)
 					const LocalShadowSlot& a = cur[i];
 					const LocalShadowSlot& b = localShadowCache[i];
 					if (a.ent != b.ent || a.rx != b.rx || a.ry != b.ry || a.rw != b.rw || a.rh != b.rh
-						|| a.pos.x != b.pos.x || a.pos.y != b.pos.y || a.pos.z != b.pos.z || a.range != b.range)
+						|| a.pos.x != b.pos.x || a.pos.y != b.pos.y || a.pos.z != b.pos.z || a.range != b.range
+						|| a.dir.x != b.dir.x || a.dir.y != b.dir.y || a.dir.z != b.dir.z || a.cone != b.cone)
 					{
 						changed = true;
 						break;

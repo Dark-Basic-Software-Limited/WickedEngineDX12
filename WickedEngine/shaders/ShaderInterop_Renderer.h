@@ -1251,6 +1251,12 @@ enum FRAME_OPTIONS
 	OPTION_BIT_CAPSULE_SHADOW_ENABLED = 1 << 20,
 	OPTION_BIT_DISABLE_SHADOWMAPS = 1 << 21,
 	OPTION_BIT_DEBUG_NORMAL_VIS = 1 << 22,
+
+	// GGMAX-added bits live in the reserved high range 24-31 (upstream appends sequentially
+	// from the low end and would silently collide with the next slot — engine 2.02 rule):
+	// GGMAX 2.10: punctual lights use the DX11 product falloff — energy*(1-d2/r2)^2, no
+	// inverse-square term; intensity is then in DX11 energy units (see lightingHF.hlsli).
+	OPTION_BIT_GG_DX11_LIGHT_FALLOFF = 1 << 30,
 };
 
 // ---------- Common Constant buffers: -----------------

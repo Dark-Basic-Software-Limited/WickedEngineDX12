@@ -2577,7 +2577,39 @@ std::mutex queue_locker;
 				}
 
 				ComPtr<ID3D12PipelineState> newpso;
-				dx12_check(device->CreatePipelineState(&streamDesc, PPV_ARGS(newpso)));
+				HRESULT gg_pso_hr = dx12_check(device->CreatePipelineState(&streamDesc, PPV_ARGS(newpso)));
+
+				// GGMAX 2026-08-07: a driver-rejected lazy PSO compile used to fall through to
+				// SetPipelineState(nullptr) below — d3d12.dll AV at 0x18c, no diagnostics (the
+				// Release assert is a no-op and wi::backlog's tail is lost in the crash). Name
+				// the failure in a per-line-flushed file and skip the bind instead: the draw
+				// comes out wrong (previous pipeline stays bound) but the app survives and the
+				// evidence lands on disk. First customer: the gpup particle restore (task #118).
+				if (newpso == nullptr)
+				{
+					FILE* gg_f = nullptr;
+					fopen_s(&gg_f, "gg_pso_fail.txt", "a");
+					if (gg_f)
+					{
+						const InputLayout* il = pso->desc.il;
+						fprintf(gg_f, "pso_validate lazy compile FAILED hr=0x%08lX pso=%p vs=%p ps=%p il_elems=%d",
+							(unsigned long)gg_pso_hr, (const void*)pso, (const void*)pso->desc.vs, (const void*)pso->desc.ps,
+							il ? (int)il->elements.size() : -1);
+						if (il)
+						{
+							for (auto& e : il->elements)
+								fprintf(gg_f, " [%s fmt=%d]", e.semantic_name.c_str(), (int)e.format);
+						}
+						fprintf(gg_f, " rp: rt_count=%u rt0=%d ds=%d samples=%u\n",
+							commandlist.renderpass_info.rt_count,
+							commandlist.renderpass_info.rt_count > 0 ? (int)commandlist.renderpass_info.rt_formats[0] : -1,
+							(int)commandlist.renderpass_info.ds_format,
+							commandlist.renderpass_info.sample_count);
+						fclose(gg_f);
+					}
+					commandlist.dirty_pso = false;
+					return;
+				}
 
 				QueryPerformanceCounter(&gg_c1);
 				const unsigned long long gg_compile_us = (unsigned long long)(((gg_c1.QuadPart - gg_c0.QuadPart) * 1000000.0) / (double)gg_f.QuadPart);

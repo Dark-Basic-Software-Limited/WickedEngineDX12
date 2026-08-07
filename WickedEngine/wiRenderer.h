@@ -53,6 +53,9 @@ namespace wi::renderer
 	// GGMAX 2.09: first-person weapon depth carve (DX11 BLENDMODE_FORCEDEPTH). Same selection-time
 	// nature as the flag above — live-toggleable via the harness SET_WEAPONDEPTH, no reload.
 	extern bool gg_weapon_forcedepth;
+	// GGMAX 2.10: DX11 product light falloff for punctual lights (energy*(1-d2/r2)^2, no 1/d2);
+	// game passes intensity in DX11 energy units (30) when this is on. setup.ini `lightfalloff=0`.
+	extern bool gg_dx11_light_falloff;
 	uint64_t GG_GetForceDepthDrawCount();
 
 	constexpr uint8_t raytracing_inclusion_mask_shadow = 1 << 0;

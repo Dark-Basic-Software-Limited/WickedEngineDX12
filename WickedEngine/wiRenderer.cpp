@@ -269,6 +269,19 @@ bool gg_transparent_doublesided_nodepthwrite = true;
 //
 // Revert with setup.ini `weaponforcedepth=0`, or live with the harness `SET_WEAPONDEPTH 0`.
 bool gg_weapon_forcedepth = true;
+
+// GGMAX 2.10: punctual lights use the DX11 product falloff (OPTION_BIT_GG_DX11_LIGHT_FALLOFF).
+// The DX11 product shaded every point/spot light as energy * (1 - d2/r2)^2 — no inverse-square
+// term — with a constant energy of 30 set once at light creation (DX11 wickedcalls.cpp:6655);
+// range alone shaped the curve. The DX12 port kept upstream's windowed 1/d2 attenuation and
+// tried to bridge the difference with a range²×π/4 intensity heuristic (tuned while the 2.07g
+// fp16 overflow had deleted the attenuation window), which can never reproduce the DX11 SHAPE:
+// mid-range flood reads roughly half as bright and collapses into a hot pool at the source.
+// With this bit on, lightingHF swaps in the DX11 curve and the game passes intensity in DX11
+// energy units (30) — a 1:1 unit match since both engines carry exactly one Lambert 1/PI on
+// diffuse and both specular D terms their own. Revert with setup.ini `lightfalloff=0`, or live
+// with the harness `SET_LIGHTFALLOFF 0` for a same-session A/B.
+bool gg_dx11_light_falloff = true;
 std::atomic<size_t> SHADER_ERRORS{ 0 };
 std::atomic<size_t> SHADER_MISSING{ 0 };
 bool VXGI_ENABLED = false;
@@ -5203,6 +5216,10 @@ void UpdatePerFrameData(
 	frameCB.gg_debugvis = gg_debugvis; // GGMAX 1.62 tangent-vis
 
 	frameCB.options = 0;
+	if (gg_dx11_light_falloff)
+	{
+		frameCB.options |= OPTION_BIT_GG_DX11_LIGHT_FALLOFF; // GGMAX 2.10
+	}
 	if (GetTemporalAAEnabled())
 	{
 		frameCB.options |= OPTION_BIT_TEMPORALAA_ENABLED;

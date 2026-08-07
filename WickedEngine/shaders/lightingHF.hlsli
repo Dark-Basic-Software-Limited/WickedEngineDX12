@@ -200,6 +200,23 @@ inline void light_directional(in ShaderEntity light, in Surface surface, inout L
 // hard-killing big lights at a fixed 256u circle regardless of authored range.
 inline half attenuation_pointlight(in float dist2, in float range, in float range2)
 {
+	// GGMAX 2.10: DX11 product falloff behind OPTION_BIT_GG_DX11_LIGHT_FALLOFF.
+	// The DX11 fork shaded punctual lights as energy * (1 - d2/r2)^2 with NO inverse-square
+	// term (WickedRepo lightingHF.hlsli:621). NO 1/PI correction belongs here: both engines
+	// carry exactly one Lambert 1/PI on diffuse (DX11 inside BRDF_GetDiffuse, brdf.hlsli:449;
+	// DX12 at ApplyLighting's direct.diffuse/PI) and both specular D terms carry their own,
+	// so with this curve LightComponent::intensity is in DX11 "energy" units 1:1 and the
+	// game passes the DX11 product's constant (30) straight through. The curve reaches
+	// exactly zero at range, so the Forward+ tile cull boundary never truncates a visible
+	// contribution (the 2.07g artifact class). Every consumer follows automatically:
+	// surface lighting, volumetricLight_*, raytraceCS, ddgi, surfels, renderlightmap.
+	[branch]
+	if (GetFrame().options & OPTION_BIT_GG_DX11_LIGHT_FALLOFF)
+	{
+		float att = saturate(1 - dist2 / max(0.0001, range2));
+		return (half)(att * att);
+	}
+
 	// GLTF recommendation: https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_lights_punctual#range-property
 	//return saturate(1 - pow(dist / range, 4)) / dist2;
 
@@ -321,6 +338,18 @@ inline half attenuation_spotlight(in float dist2, in float range, in float range
 {
 	half attenuation = attenuation_pointlight(dist2, range, range2);
 	half angularAttenuation = saturate(mad(spot_factor, angle_scale, angle_offset));
+
+	// GGMAX 2.10: DX11 cone falloff = saturate(1 - (1-SpotFactor)/(1-coneCos)) — LINEAR from
+	// the cone edge to dead center, never squared (WickedRepo lightingHF.hlsli:700). GG never
+	// sets innerConeAngle (default 0 -> cos=1), so the packed angle_scale/angle_offset already
+	// reduce mad(spot_factor, scale, offset) to exactly that DX11 term; only the modern
+	// squaring must be skipped. The distance curve comes from attenuation_pointlight above.
+	[branch]
+	if (GetFrame().options & OPTION_BIT_GG_DX11_LIGHT_FALLOFF)
+	{
+		return attenuation * angularAttenuation;
+	}
+
 	angularAttenuation *= angularAttenuation;
 	attenuation *= angularAttenuation;
 	return attenuation;

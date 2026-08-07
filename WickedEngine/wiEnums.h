@@ -481,6 +481,11 @@ namespace wi::enums
 		DSSTYPE_EXTRACT_STENCIL_BIT_5,
 		DSSTYPE_EXTRACT_STENCIL_BIT_6,
 		DSSTYPE_EXTRACT_STENCIL_BIT_7,
+		// GGMAX 2.08: DSSTYPE_TRANSPARENT with depth WRITE off (test + stencil unchanged).
+		// DX11 parity for double-sided transparent geometry — hair and leaves. Appended at
+		// the end on purpose: upstream grows this enum by insertion, and a GGMAX value in a
+		// sequential slot would silently renumber everything after it on the next pull.
+		DSSTYPE_TRANSPARENT_NODEPTHWRITE,
 		DSSTYPE_COUNT
 	};
 	// blend states

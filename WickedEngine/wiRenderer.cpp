@@ -227,6 +227,29 @@ bool gg_pso_trim = true;
 // ACCEPTANCE TEST for any change here: POLYS must stay bit-identical. A pipeline that fails to
 // appear makes RenderMeshes skip the draw, so a missing PSO shows up immediately as fewer polys.
 bool gg_pso_lazy_object = true;
+
+// GGMAX 2.08: DX11 parity for DOUBLE-SIDED TRANSPARENT geometry — hair cards and leaves.
+//
+// The DX11 fork (WickedRepo, wiRenderer.cpp ~3736) carried a GGREDUCED-only rule with the
+// comment "if mesh is double sided, probably hair or leaves, so ensure NO DEPTH WRITE happens
+// to mess up coverage!". It did two things that upstream does not:
+//   1. forced BLENDMODE_ALPHA -> BLENDMODE_ALPHANOZ, whose depth-stencil state is
+//      DSSTYPE_DEPTHREAD — depth test on, depth WRITE OFF;
+//   2. drew the back faces (cull FRONT) and then the FRONT faces only (cull BACK), rather than
+//      back faces followed by both faces.
+// Neither survived the DX12 port: upstream puts every transparent in DSSTYPE_TRANSPARENT, which
+// writes depth (GGMAX 2.08 note: that is upstream commit c3e8d2df "transparent render pass allows
+// equal depth test", not a fork regression).
+//
+// Why it eats hair: transparents are sorted back-to-front PER OBJECT, never per triangle. Inside
+// one hair mesh the cards draw in index order, so a near card that happens to be drawn early
+// writes depth across its whole footprint — including the soft feathered texels that carry alpha
+// 0.2-0.9 and make hair read as hair — and every card behind it then fails the depth test and is
+// never blended. The result is card-shaped bites taken out of the hair mass with the scalp
+// showing through. Alpha test does not save it: it only rejects the fully transparent texels.
+//
+// Revert with setup.ini `hairnodepthwrite=0`.
+bool gg_transparent_doublesided_nodepthwrite = true;
 std::atomic<size_t> SHADER_ERRORS{ 0 };
 std::atomic<size_t> SHADER_MISSING{ 0 };
 bool VXGI_ENABLED = false;
@@ -554,6 +577,7 @@ union ObjectRenderingVariant
 		uint32_t alphatest : 1;		// bool
 		uint32_t sample_count : 4;	// 1, 2, 4, 8
 		uint32_t mesh_shader : 1;	// bool
+		uint32_t nodepthwrite : 1;	// GGMAX 2.08: bool — DSSTYPE_TRANSPARENT_NODEPTHWRITE (hair/leaves)
 	} bits;
 	uint32_t value;
 };
@@ -2154,6 +2178,19 @@ void LoadShaders()
 									if ((renderPass == RENDERPASS_PREPASS || renderPass == RENDERPASS_PREPASS_DEPTHONLY) && transparency)
 										continue;
 
+									// GGMAX 2.08 (hair/leaf DX11 parity): the depth-write-OFF permutation is built
+									// only where RenderMeshes can ask for it — the MAIN colour pass, a transparent
+									// blend mode, and the two single-face cull modes the double-sided transparent
+									// pair uses (BACK = front faces, FRONT = back faces). Everything else stays one
+									// pipeline, so the eager permutation count barely moves. Body deliberately not
+									// re-indented: this file merges from upstream and a 100-line whitespace change
+									// would bury the real diff.
+									const uint32_t gg_nodepthwrite_max =
+										(renderPass == RENDERPASS_MAIN && transparency &&
+										 (cullMode == (uint32_t)CullMode::BACK || cullMode == (uint32_t)CullMode::FRONT)) ? 1u : 0u;
+									for (uint32_t gg_nodepthwrite = 0; gg_nodepthwrite <= gg_nodepthwrite_max; ++gg_nodepthwrite)
+									{
+
 									PipelineStateDesc desc;
 
 									if (mesh_shader)
@@ -2233,6 +2270,11 @@ void LoadShaders()
 										{
 											desc.dss = &depthStencils[DSSTYPE_DEPTHREAD];
 										}
+										else if (gg_nodepthwrite)
+										{
+											// GGMAX 2.08: hair/leaf parity — see gg_transparent_doublesided_nodepthwrite
+											desc.dss = &depthStencils[DSSTYPE_TRANSPARENT_NODEPTHWRITE];
+										}
 										else
 										{
 											desc.dss = &depthStencils[transparency ? DSSTYPE_TRANSPARENT : DSSTYPE_DEPTHREADEQUAL];
@@ -2311,6 +2353,7 @@ void LoadShaders()
 									variant.bits.alphatest = alphatest;
 									variant.bits.sample_count = 1;
 									variant.bits.mesh_shader = mesh_shader;
+									variant.bits.nodepthwrite = gg_nodepthwrite; // GGMAX 2.08
 
 									switch (renderPass)
 									{
@@ -2406,6 +2449,8 @@ void LoadShaders()
 											});
 										break;
 									}
+
+									} // GGMAX 2.08: end gg_nodepthwrite permutation loop
 								}
 							}
 						}
@@ -2670,6 +2715,15 @@ void SetUpStates()
 
 	dsd.depth_func = ComparisonFunc::GREATER_EQUAL;
 	depthStencils[DSSTYPE_TRANSPARENT] = dsd;
+
+	// GGMAX 2.08: same state with depth WRITE disabled — the DX11 fork's BLENDMODE_ALPHANOZ.
+	// Depth test and stencil are deliberately left exactly as DSSTYPE_TRANSPARENT so the
+	// selection-outline / SSS stencil bits and the sort order behave identically; the only
+	// difference is that a half-transparent hair texel no longer occludes the strands behind it.
+	dsd.depth_write_mask = DepthWriteMask::ZERO;
+	depthStencils[DSSTYPE_TRANSPARENT_NODEPTHWRITE] = dsd;
+	dsd.depth_write_mask = DepthWriteMask::ALL;
+
 	dsd.depth_func = ComparisonFunc::GREATER;
 
 	dsd.depth_write_mask = DepthWriteMask::ZERO;
@@ -3452,6 +3506,12 @@ void Workaround(const int bug , CommandList cmd)
 std::atomic<uint64_t> gg_dbg_userstencil_draws[RENDERPASS_COUNT] = {};
 std::atomic<uint64_t> gg_dbg_total_draws[RENDERPASS_COUNT] = {};
 
+// GGMAX 2.08: subsets that took the hair/leaf no-depth-write parity path in the MAIN pass.
+// Cumulative. A zero here with the knob on means the rule never matched — the material is not
+// double-sided, or not transparent, and the fix would be aimed at the wrong thing.
+std::atomic<uint64_t> gg_dbg_nodepthwrite_draws{ 0 };
+uint64_t GG_GetNoDepthWriteDrawCount() { return gg_dbg_nodepthwrite_draws.load(std::memory_order_relaxed); }
+
 void RenderMeshes(
 	const Visibility& vis,
 	const RenderQueue& renderQueue,
@@ -3635,8 +3695,41 @@ void RenderMeshes(
 
 					if ((filterMask & FILTER_TRANSPARENT) && variant.bits.cullmode == (uint32_t)CullMode::NONE)
 					{
-						variant.bits.cullmode = (uint32_t)CullMode::FRONT;
-						pso_backside = GetObjectPSO(variant);
+						// GGMAX 2.08: DX11 parity for double-sided transparent geometry (hair, leaves).
+						// See gg_transparent_doublesided_nodepthwrite for why depth write has to go.
+						// Upstream draws back faces (cull FRONT) and then BOTH faces (cull NONE), which
+						// blends every back face twice; the DX11 fork drew back faces and then FRONT
+						// faces only. Match the fork: each face is blended exactly once, and neither
+						// pass writes depth, so the strands behind survive.
+						// The blendmode guard is load-bearing, not belt-and-braces: GetObjectPSO indexes an
+						// unordered_map with operator[], so asking for a permutation LoadShaders never built
+						// would INSERT from a render thread. Only MAIN + a transparent blend mode + cull
+						// BACK/FRONT exist with nodepthwrite=1, so only ask for exactly those.
+						if (gg_transparent_doublesided_nodepthwrite && renderPass == RENDERPASS_MAIN &&
+							variant.bits.blendmode != BLENDMODE_OPAQUE)
+						{
+							gg_dbg_nodepthwrite_draws.fetch_add(1, std::memory_order_relaxed);
+							variant.bits.nodepthwrite = 1;
+							variant.bits.cullmode = (uint32_t)CullMode::BACK;	// front faces
+							pso = GetObjectPSO(variant);
+							variant.bits.cullmode = (uint32_t)CullMode::FRONT;	// back faces
+							pso_backside = GetObjectPSO(variant);
+							// If either pipeline has not finished compiling yet (lazy object PSOs), fall
+							// back to the upstream pair for this frame rather than dropping the draw.
+							if (pso == nullptr || !pso->IsValid() || pso_backside == nullptr || !pso_backside->IsValid())
+							{
+								variant.bits.nodepthwrite = 0;
+								variant.bits.cullmode = (uint32_t)CullMode::NONE;
+								pso = GetObjectPSO(variant);
+								variant.bits.cullmode = (uint32_t)CullMode::FRONT;
+								pso_backside = GetObjectPSO(variant);
+							}
+						}
+						else
+						{
+							variant.bits.cullmode = (uint32_t)CullMode::FRONT;
+							pso_backside = GetObjectPSO(variant);
+						}
 					}
 				}
 			}

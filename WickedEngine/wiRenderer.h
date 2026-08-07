@@ -42,6 +42,14 @@ namespace wi::renderer
 	// See the definition in wiRenderer.cpp for what it trades away.
 	extern bool gg_pso_lazy_object;
 
+	// GGMAX 2.08: hair/leaf DX11 parity — double-sided transparent geometry does not write depth.
+	// Unlike gg_pso_lazy_object this is a SELECTION-time flag: both pipeline permutations are always
+	// built, so it can be flipped live (harness SET_HAIRDEPTH) with no shader reload. See the
+	// definition in wiRenderer.cpp for the full root cause.
+	extern bool gg_transparent_doublesided_nodepthwrite;
+	// Draws that took the parity path, cumulative. Proves the rule fired instead of assuming it.
+	uint64_t GG_GetNoDepthWriteDrawCount();
+
 	constexpr uint8_t raytracing_inclusion_mask_shadow = 1 << 0;
 	constexpr uint8_t raytracing_inclusion_mask_reflection = 1 << 1;
 

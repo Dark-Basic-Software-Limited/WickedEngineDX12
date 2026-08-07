@@ -138,7 +138,15 @@ namespace wi::scene
 			DISABLE_TEXTURE_STREAMING = 1 << 15,
 			COPLANAR_BLENDING = 1 << 16, // force transparent material draw in opaque pass (useful for coplanar polygons)
 			DISABLE_CAPSULE_SHADOW = 1 << 17,
-			INTERNAL = 1 << 18 // used only for internal purposes
+			INTERNAL = 1 << 18, // used only for internal purposes
+
+			// GGMAX 2.09: the first-person weapon carves its own depth volume — the DX11 fork's
+			// BLENDMODE_FORCEDEPTH. Set by WickedCall_SetMeshDisableDepth (i.e. by the DBP command
+			// DisableObjectZDepth), so it also covers HUD layers, importer collision shapes and the
+			// editor grid plane, exactly as FORCEDEPTH did on DX11.
+			// GGMAX-added bits live in the RESERVED 24-31 range, never the next sequential slot:
+			// upstream grows this enum by append and would silently collide (see engine 2.02).
+			GG_FORCEDEPTH = 1 << 24
 		};
 		uint32_t _flags = CAST_SHADOW;
 
@@ -294,6 +302,7 @@ namespace wi::scene
 
 		constexpr bool IsCastingShadow() const { return _flags & CAST_SHADOW; }
 		constexpr bool IsAlphaTestEnabled() const { return alphaRef <= 1.0f - 1.0f / 256.0f; }
+		constexpr bool IsForceDepth() const { return _flags & GG_FORCEDEPTH; } // GGMAX 2.09
 		constexpr bool IsUsingVertexColors() const { return _flags & USE_VERTEXCOLORS; }
 		constexpr bool IsUsingWind() const { return _flags & USE_WIND; }
 		constexpr bool IsReceiveShadow() const { return (_flags & DISABLE_RECEIVE_SHADOW) == 0; }
@@ -333,6 +342,9 @@ namespace wi::scene
 		constexpr void SetSubsurfaceScatteringAmount(float value) { SetDirty(); subsurfaceScattering.w = value; }
 		constexpr void SetOpacity(float value) { SetDirty(); baseColor.w = value; }
 		constexpr void SetAlphaRef(float value) { SetDirty();  alphaRef = value; }
+		// GGMAX 2.09: rides the existing _flags serialization, so it survives Entity_Duplicate's
+		// serialize round-trip (see the "unserialized field silently defaults in every clone" rule).
+		constexpr void SetForceDepth(bool value) { SetDirty(); if (value) { _flags |= GG_FORCEDEPTH; } else { _flags &= ~GG_FORCEDEPTH; } }
 		constexpr void SetUseVertexColors(bool value) { SetDirty(); if (value) { _flags |= USE_VERTEXCOLORS; } else { _flags &= ~USE_VERTEXCOLORS; } }
 		constexpr void SetUseWind(bool value) { SetDirty(); if (value) { _flags |= USE_WIND; } else { _flags &= ~USE_WIND; } }
 		constexpr void SetUseSpecularGlossinessWorkflow(bool value) { SetDirty(); if (value) { _flags |= SPECULAR_GLOSSINESS_WORKFLOW; } else { _flags &= ~SPECULAR_GLOSSINESS_WORKFLOW; } }

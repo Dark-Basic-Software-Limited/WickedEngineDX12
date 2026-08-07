@@ -250,6 +250,25 @@ bool gg_pso_lazy_object = true;
 //
 // Revert with setup.ini `hairnodepthwrite=0`.
 bool gg_transparent_doublesided_nodepthwrite = true;
+
+// GGMAX 2.09: DX11 parity for the FIRST-PERSON WEAPON — BLENDMODE_FORCEDEPTH.
+//
+// The DX11 fork gave `DisableObjectZDepth` objects (the gun, its secondary, the arms, HUD layers,
+// importer collision shapes, the editor grid plane) userBlendMode = BLENDMODE_FORCEDEPTH, and
+// RenderMeshes ran a second full pass over the batch list for exactly those materials:
+//   pass A — back faces, DSSTYPE_WRITEONLY (depth write, compare ALWAYS), no blending;
+//   pass B — front faces, BLENDMODE_ALPHA with the ordinary transparent depth state.
+// Pass A stamps the weapon's own volume over the world's depth, so pass B cannot be clipped by
+// whatever the player is standing against, while still self-occluding correctly.
+//
+// The DX12 port mapped FORCEDEPTH to BLENDMODE_OPAQUE (wickedcalls_part1.cpp) and kept only the
+// SetDoubleSided(true), so the weapon became an ordinary opaque double-sided mesh that the world
+// depth-tests against — measured live: pressing the player into a crate cut the front half off the
+// pistol. Restored here on the (pso_backside, pso) pair that already exists for double-sided
+// transparents, which is the same two draws in the same order.
+//
+// Revert with setup.ini `weaponforcedepth=0`, or live with the harness `SET_WEAPONDEPTH 0`.
+bool gg_weapon_forcedepth = true;
 std::atomic<size_t> SHADER_ERRORS{ 0 };
 std::atomic<size_t> SHADER_MISSING{ 0 };
 bool VXGI_ENABLED = false;
@@ -577,15 +596,48 @@ union ObjectRenderingVariant
 		uint32_t alphatest : 1;		// bool
 		uint32_t sample_count : 4;	// 1, 2, 4, 8
 		uint32_t mesh_shader : 1;	// bool
-		uint32_t nodepthwrite : 1;	// GGMAX 2.08: bool — DSSTYPE_TRANSPARENT_NODEPTHWRITE (hair/leaves)
+		uint32_t ggdepthmode : 2;	// GGMAX 2.09: GGDEPTHMODE — DX11 depth-behaviour parity, see below
 	} bits;
 	uint32_t value;
 };
+// GGMAX 2.09: the DX11 fork carried two depth behaviours that upstream has no equivalent for, and
+// a material can only ever be in one of them — hence one field rather than two independent bits,
+// so "both set" is not representable. 2.08 shipped this as a single `nodepthwrite` bit; widening it
+// here is the same storage (the variant still fits in uint32_t) with the exclusivity made structural.
+enum GGDEPTHMODE
+{
+	GGDEPTHMODE_STOCK = 0,		// upstream behaviour
+	GGDEPTHMODE_NODEPTHWRITE,	// hair/leaves: DSSTYPE_TRANSPARENT_NODEPTHWRITE (was BLENDMODE_ALPHANOZ)
+	GGDEPTHMODE_FORCEDEPTH,		// weapon carve, Z-PREPASS stamp: DSSTYPE_WRITEONLY (write + ALWAYS)
+	GGDEPTHMODE_FORCEDEPTH_FILL,// weapon carve, MAIN back-face colour fill: DSSTYPE_FORCEDEPTH_FILL
+};
 static_assert(sizeof(ObjectRenderingVariant) == sizeof(uint32_t));
-inline PipelineState* GetObjectPSO(ObjectRenderingVariant variant)
+inline wi::unordered_map<uint32_t, PipelineState>& GetObjectPSOMap(ObjectRenderingVariant variant)
 {
 	static wi::unordered_map<uint32_t, PipelineState> PSO_object[RENDERPASS_COUNT][MaterialComponent::SHADERTYPE_COUNT][OBJECT_MESH_SHADER_PSO_COUNT];
-	return &PSO_object[variant.bits.renderpass][variant.bits.shadertype][variant.bits.mesh_shader][variant.value];
+	return PSO_object[variant.bits.renderpass][variant.bits.shadertype][variant.bits.mesh_shader];
+}
+// GGMAX 2.09: FIND-ONLY. This used to be `return &map[variant.value];`, and `wi::unordered_map` is
+// `ska::flat_hash_map` — OPEN ADDRESSING (see wiUnorderedMap.h). operator[] on a missing key inserts,
+// and an insert that rehashes frees the entries array, so:
+//   * every PipelineState* previously handed out DANGLES, and RenderMeshes holds two at a time
+//     (pso and pso_backside) across further lookups;
+//   * the insert happens from whichever render thread got there first, on a container with no
+//     thread safety, while the parallel opaque / transparent / reflection recording jobs run.
+// Neither could bite while every requested variant already existed, which is why it survived — but
+// it made "ask for a permutation LoadShaders did not build" a memory-safety bug rather than a
+// missing draw. Reading only removes the whole class. Callers already null-check; the one that did
+// not (Workaround) now does.
+inline PipelineState* GetObjectPSO(ObjectRenderingVariant variant)
+{
+	auto& map = GetObjectPSOMap(variant);
+	auto it = map.find(variant.value);
+	return it == map.end() ? nullptr : &it->second;
+}
+// Insert/assign — LoadShaders only, from the EVENT_THREAD_SAFE_POINT callback (single-threaded).
+inline void SetObjectPSO(ObjectRenderingVariant variant, const PipelineState& pso)
+{
+	GetObjectPSOMap(variant)[variant.value] = pso;
 }
 wi::jobsystem::context mesh_shader_ctx;
 wi::jobsystem::context object_pso_job_ctx;
@@ -2175,21 +2227,55 @@ void LoadShaders()
 								for (uint32_t alphatest = 0; alphatest <= 1; ++alphatest)
 								{
 									const bool transparency = blendMode != BLENDMODE_OPAQUE;
-									if ((renderPass == RENDERPASS_PREPASS || renderPass == RENDERPASS_PREPASS_DEPTHONLY) && transparency)
+									// GGMAX 2.09: transparents have no Z-prepass pipeline upstream — with one
+									// exception, the weapon carve. RenderPath3D issues a second PREPASS
+									// DrawScene for GG_FORCEDEPTH materials (see the comment there), because
+									// the weapon is a SOLID object that merely has to live in the transparent
+									// pass. Note the prepass VS/PS ignore `transparency` entirely
+									// (GetVSTYPE/GetPSTYPE), so this reuses the ordinary prepass shaders.
+									const bool gg_prepass_carve = (renderPass == RENDERPASS_PREPASS) && transparency;
+									if ((renderPass == RENDERPASS_PREPASS || renderPass == RENDERPASS_PREPASS_DEPTHONLY)
+										&& transparency && !gg_prepass_carve)
 										continue;
 
-									// GGMAX 2.08 (hair/leaf DX11 parity): the depth-write-OFF permutation is built
-									// only where RenderMeshes can ask for it — the MAIN colour pass, a transparent
-									// blend mode, and the two single-face cull modes the double-sided transparent
-									// pair uses (BACK = front faces, FRONT = back faces). Everything else stays one
-									// pipeline, so the eager permutation count barely moves. Body deliberately not
-									// re-indented: this file merges from upstream and a 100-line whitespace change
-									// would bury the real diff.
-									const uint32_t gg_nodepthwrite_max =
-										(renderPass == RENDERPASS_MAIN && transparency &&
-										 (cullMode == (uint32_t)CullMode::BACK || cullMode == (uint32_t)CullMode::FRONT)) ? 1u : 0u;
-									for (uint32_t gg_nodepthwrite = 0; gg_nodepthwrite <= gg_nodepthwrite_max; ++gg_nodepthwrite)
+									// GGMAX 2.08/2.09 (DX11 depth-behaviour parity): the extra permutations are built
+									// only where RenderMeshes can ask for them — the MAIN colour pass, a transparent
+									// blend mode, and the two single-face cull modes the double-sided pair uses
+									// (BACK = front faces, FRONT = back faces). That gate has to match the selection
+									// code exactly: GetObjectPSO indexes an unordered_map with operator[], so asking
+									// for a permutation that was never built would INSERT from a render thread.
+									// Body deliberately not re-indented: this file merges from upstream and a
+									// 100-line whitespace change would bury the real diff.
+									uint32_t gg_depthmodes[3] = { GGDEPTHMODE_STOCK, 0, 0 };
+									int gg_depthmode_count = 1;
+									if (gg_prepass_carve)
 									{
+										// The ONLY transparent prepass pipeline that exists is the carve, and
+										// only for cull FRONT (back faces), matching DX11's use of the
+										// FORCEDEPTH BACKSIDE pipeline in its prepass. No STOCK entry — a
+										// stock transparent prepass pipeline must stay unbuildable so nothing
+										// can accidentally select one.
+										if (cullMode != (uint32_t)CullMode::FRONT)
+											continue;
+										gg_depthmodes[0] = GGDEPTHMODE_FORCEDEPTH;
+									}
+									else if (renderPass == RENDERPASS_MAIN && transparency)
+									{
+										// 2.08 hair/leaves asks for BOTH single-face cull modes (front pass
+										// and back pass are both no-depth-write).
+										if (cullMode == (uint32_t)CullMode::BACK || cullMode == (uint32_t)CullMode::FRONT)
+											gg_depthmodes[gg_depthmode_count++] = GGDEPTHMODE_NODEPTHWRITE;
+										// 2.09 weapon carve asks for cull FRONT only — both the prepass stamp
+										// and the main-pass back-face colour fill draw back faces; the
+										// visible front-face draw uses GGDEPTHMODE_STOCK. Building the BACK
+										// half too would be pipelines nothing can ever select.
+										// Selection sites: search GGDEPTHMODE_FORCEDEPTH in RenderMeshes.
+										if (cullMode == (uint32_t)CullMode::FRONT)
+											gg_depthmodes[gg_depthmode_count++] = GGDEPTHMODE_FORCEDEPTH_FILL;
+									}
+									for (int gg_dm_i = 0; gg_dm_i < gg_depthmode_count; ++gg_dm_i)
+									{
+									const uint32_t gg_depthmode = gg_depthmodes[gg_dm_i];
 
 									PipelineStateDesc desc;
 
@@ -2248,6 +2334,16 @@ void LoadShaders()
 										break;
 									}
 
+									// GGMAX 2.09: the DX11 FORCEDEPTH pass passed bs = nullptr, i.e. the device
+									// default — blending OFF, full colour write. BSTYPE_OPAQUE is that state.
+									// Colour write is left ON deliberately rather than using
+									// BSTYPE_COLORWRITEDISABLE: on a weapon mesh with open geometry, DX11 showed
+									// the shaded back face there, and this is a parity fix.
+									if (gg_depthmode == GGDEPTHMODE_FORCEDEPTH || gg_depthmode == GGDEPTHMODE_FORCEDEPTH_FILL)
+									{
+										desc.bs = &blendStates[BSTYPE_OPAQUE];
+									}
+
 									switch (renderPass)
 									{
 									case RENDERPASS_SHADOW:
@@ -2266,11 +2362,34 @@ void LoadShaders()
 										desc.dss = &depthStencils[transparency ? DSSTYPE_DEPTHREAD : DSSTYPE_SHADOW];
 										break;
 									case RENDERPASS_MAIN:
-										if (blendMode == BLENDMODE_ADDITIVE)
+										// GGMAX 2.09: the carve modes come first — their unconditional ALWAYS
+										// compare is the point, so they must beat the ADDITIVE case below.
+										if (gg_depthmode == GGDEPTHMODE_FORCEDEPTH_FILL)
+										{
+											// Back-face colour fill: depth READ, no write, GREATER_EQUAL.
+											//
+											// It must be depth-TESTED, not ALWAYS. DX11's equivalent was
+											// ALWAYS and got away with it only because its fill ran in a
+											// pass before ANY front faces drew; here the fill is adjacent
+											// to the front draw per subset, so ALWAYS let the gun's back
+											// faces paint straight over the glove — measured, the same
+											// ordering fault as the earlier depth-stamp version, moved
+											// from depth to colour. GREATER_EQUAL still fills the pixels
+											// that need it: the prepass stamped this exact back-face
+											// depth, so the test is an equality hit.
+											desc.dss = &depthStencils[DSSTYPE_DEPTHREAD];
+										}
+										else if (gg_depthmode == GGDEPTHMODE_FORCEDEPTH)
+										{
+											// depth write ALL + compare ALWAYS + stencil off: stamp the
+											// surface unconditionally over whatever the opaque pass left.
+											desc.dss = &depthStencils[DSSTYPE_WRITEONLY];
+										}
+										else if (blendMode == BLENDMODE_ADDITIVE)
 										{
 											desc.dss = &depthStencils[DSSTYPE_DEPTHREAD];
 										}
-										else if (gg_nodepthwrite)
+										else if (gg_depthmode == GGDEPTHMODE_NODEPTHWRITE)
 										{
 											// GGMAX 2.08: hair/leaf parity — see gg_transparent_doublesided_nodepthwrite
 											desc.dss = &depthStencils[DSSTYPE_TRANSPARENT_NODEPTHWRITE];
@@ -2290,7 +2409,14 @@ void LoadShaders()
 										desc.dss = &depthStencils[DSSTYPE_DEFAULT];
 										break;
 									default:
-										if (blendMode == BLENDMODE_ADDITIVE)
+										// GGMAX 2.09: RENDERPASS_PREPASS lands here. The carve stamps with
+										// compare ALWAYS in the prepass too — exactly as DX11 did, which used
+										// its FORCEDEPTH (DSSTYPE_WRITEONLY) pipeline for the prepass draw.
+										if (gg_depthmode == GGDEPTHMODE_FORCEDEPTH)
+										{
+											desc.dss = &depthStencils[DSSTYPE_WRITEONLY];
+										}
+										else if (blendMode == BLENDMODE_ADDITIVE)
 										{
 											desc.dss = &depthStencils[DSSTYPE_DEPTHREAD];
 										}
@@ -2353,7 +2479,7 @@ void LoadShaders()
 									variant.bits.alphatest = alphatest;
 									variant.bits.sample_count = 1;
 									variant.bits.mesh_shader = mesh_shader;
-									variant.bits.nodepthwrite = gg_nodepthwrite; // GGMAX 2.08
+									variant.bits.ggdepthmode = gg_depthmode; // GGMAX 2.09
 
 									switch (renderPass)
 									{
@@ -2381,7 +2507,7 @@ void LoadShaders()
 											PipelineState pso;
 											device->CreatePipelineState(&desc, &pso, gg_pso_lazy_object ? nullptr : &renderpass_info);
 											wi::eventhandler::Subscribe_Once(wi::eventhandler::EVENT_THREAD_SAFE_POINT, [=](uint64_t userdata) {
-												*GetObjectPSO(variant) = pso;
+												SetObjectPSO(variant, pso);
 												});
 										}
 									}
@@ -2401,7 +2527,7 @@ void LoadShaders()
 											PipelineState pso;
 											device->CreatePipelineState(&desc, &pso, gg_pso_lazy_object ? nullptr : &renderpass_info);
 											wi::eventhandler::Subscribe_Once(wi::eventhandler::EVENT_THREAD_SAFE_POINT, [=](uint64_t userdata) {
-												*GetObjectPSO(variant) = pso;
+												SetObjectPSO(variant, pso);
 												});
 										}
 									}
@@ -2423,7 +2549,7 @@ void LoadShaders()
 										PipelineState pso;
 										device->CreatePipelineState(&desc, &pso, gg_pso_lazy_object ? nullptr : &renderpass_info);
 										wi::eventhandler::Subscribe_Once(wi::eventhandler::EVENT_THREAD_SAFE_POINT, [=](uint64_t userdata) {
-											*GetObjectPSO(variant) = pso;
+											SetObjectPSO(variant, pso);
 											});
 									}
 									break;
@@ -2436,7 +2562,7 @@ void LoadShaders()
 										PipelineState pso;
 										device->CreatePipelineState(&desc, &pso, gg_pso_lazy_object ? nullptr : &renderpass_info);
 										wi::eventhandler::Subscribe_Once(wi::eventhandler::EVENT_THREAD_SAFE_POINT, [=](uint64_t userdata) {
-											*GetObjectPSO(variant) = pso;
+											SetObjectPSO(variant, pso);
 											});
 									}
 									break;
@@ -2445,12 +2571,12 @@ void LoadShaders()
 										PipelineState pso;
 										device->CreatePipelineState(&desc, &pso);
 										wi::eventhandler::Subscribe_Once(wi::eventhandler::EVENT_THREAD_SAFE_POINT, [=](uint64_t userdata) {
-											*GetObjectPSO(variant) = pso;
+											SetObjectPSO(variant, pso);
 											});
 										break;
 									}
 
-									} // GGMAX 2.08: end gg_nodepthwrite permutation loop
+									} // GGMAX 2.09: end gg_depthmode permutation loop
 								}
 							}
 						}
@@ -2722,8 +2848,13 @@ void SetUpStates()
 	// difference is that a half-transparent hair texel no longer occludes the strands behind it.
 	dsd.depth_write_mask = DepthWriteMask::ZERO;
 	depthStencils[DSSTYPE_TRANSPARENT_NODEPTHWRITE] = dsd;
-	dsd.depth_write_mask = DepthWriteMask::ALL;
 
+	// GGMAX 2.09 note: the weapon carve's back-face colour fill needs depth READ, no write,
+	// GREATER_EQUAL, stencil off — which is DSSTYPE_DEPTHREAD, already defined below. A dedicated
+	// ALWAYS-compare state was tried and reverted: it painted the gun's back faces straight over the
+	// glove, the same ordering fault as the earlier per-subset depth stamp.
+
+	dsd.depth_write_mask = DepthWriteMask::ALL;
 	dsd.depth_func = ComparisonFunc::GREATER;
 
 	dsd.depth_write_mask = DepthWriteMask::ZERO;
@@ -3489,6 +3620,12 @@ void Workaround(const int bug , CommandList cmd)
 		variant.bits.blendmode = BLENDMODE_OPAQUE;
 		variant.bits.sample_count = 1;
 		const PipelineState* pso = GetObjectPSO(variant);
+		// GGMAX 2.09: GetObjectPSO is find-only now and returns nullptr for a variant LoadShaders did
+		// not build — this was the one read site with no null check, and it fed BindPipelineState
+		// directly. (RENDERPASS_VOXELIZE object pipelines are skipped entirely when VXGI is off, which
+		// gg_pso_trim does by default, so nullptr here is reachable rather than theoretical.)
+		if (pso == nullptr || !pso->IsValid())
+			return;
 
 		device->EventBegin("Workaround 1", cmd);
 		device->RenderPassBegin(nullptr, 0, cmd);
@@ -3511,6 +3648,12 @@ std::atomic<uint64_t> gg_dbg_total_draws[RENDERPASS_COUNT] = {};
 // double-sided, or not transparent, and the fix would be aimed at the wrong thing.
 std::atomic<uint64_t> gg_dbg_nodepthwrite_draws{ 0 };
 uint64_t GG_GetNoDepthWriteDrawCount() { return gg_dbg_nodepthwrite_draws.load(std::memory_order_relaxed); }
+
+// GGMAX 2.09: subsets that took the weapon depth-carve path. Zero here while a weapon is on screen
+// means the GG_FORCEDEPTH material flag never reached the renderer — check the game side, not the
+// pipeline state.
+std::atomic<uint64_t> gg_dbg_forcedepth_draws{ 0 };
+uint64_t GG_GetForceDepthDrawCount() { return gg_dbg_forcedepth_draws.load(std::memory_order_relaxed); }
 
 void RenderMeshes(
 	const Visibility& vis,
@@ -3650,6 +3793,16 @@ void RenderMeshes(
 				continue;
 			}
 
+			// GGMAX 2.09: the transparent Z-prepass DrawScene that RenderPath3D adds exists solely for
+			// the SOLID carve materials (the first-person weapon and the other DisableObjectZDepth
+			// objects). Every other transparent must stay out of the prepass, or glass, water, smoke
+			// and foliage would start writing depth there and occlude the world behind them.
+			if (renderPass == RENDERPASS_PREPASS && (material.GetFilterMask() & FILTER_TRANSPARENT)
+				&& !material.IsForceDepth())
+			{
+				continue;
+			}
+
 			const PipelineState* pso = nullptr;
 			const PipelineState* pso_backside = nullptr; // only when separate backside rendering is required (transparent doublesided)
 			{
@@ -3692,8 +3845,94 @@ void RenderMeshes(
 					variant.bits.mesh_shader = meshShaderRequested;
 
 					pso = GetObjectPSO(variant);
+					// GGMAX 2.09: remember the cull mode as a VALUE, never the PipelineState* .
+					// wi::unordered_map is ska::flat_hash_map (open addressing, wiUnorderedMap.h), so a
+					// later GetObjectPSO whose operator[] rehashes INVALIDATES every element pointer —
+					// caching `pso` across the lookups below would dangle. Re-look-up in the fallbacks.
+					const uint32_t gg_cullmode_stock = variant.bits.cullmode;
 
-					if ((filterMask & FILTER_TRANSPARENT) && variant.bits.cullmode == (uint32_t)CullMode::NONE)
+					// GGMAX 2.09: FIRST-PERSON WEAPON DEPTH CARVE — the DX11 fork's BLENDMODE_FORCEDEPTH.
+					//
+					// Checked BEFORE the 2.08 hair rule on purpose: a weapon material is transparent AND
+					// double-sided, so it satisfies both, and a subset can only be in one depth mode.
+					//
+					// The carve is split across two passes, which is NOT how DX11 did it — see the
+					// RENDERPASS_MAIN branch below for why the split is necessary rather than incidental:
+					//   Z-PREPASS  back faces, DSSTYPE_WRITEONLY (depth write, compare ALWAYS) — stamps
+					//              the weapon's own far surface over whatever the world wrote.
+					//   MAIN       back faces, DSSTYPE_FORCEDEPTH_FILL (colour only, no depth write) to
+					//              shade what the stamp uncovered, then front faces with the ordinary
+					//              transparent state, testing against the stamp rather than against the
+					//              wall the player is standing in.
+					// Net effect: world geometry can never clip the weapon, but the weapon still
+					// self-occludes correctly. This is why the material has to be in the TRANSPARENT pass —
+					// the carve must land after the world's opaque depth, or the opaque main pass would
+					// simply overwrite it.
+					const bool gg_carve_material =
+						gg_weapon_forcedepth &&
+						(filterMask & FILTER_TRANSPARENT) &&
+						variant.bits.blendmode != BLENDMODE_OPAQUE &&
+						material.IsForceDepth();
+					if (gg_carve_material && renderPass == RENDERPASS_PREPASS)
+					{
+						// The Z-prepass half: one draw, back faces, same ALWAYS stamp. This is what puts
+						// the weapon back in front of GPU occlusion queries, the light-shaft sun cutout,
+						// velocity reconstruction and SSAO — all of which read the prepass and would
+						// otherwise behave as though the weapon did not exist. DX11 used its FORCEDEPTH
+						// BACKSIDE pipeline here for the same reason.
+						variant.bits.ggdepthmode = GGDEPTHMODE_FORCEDEPTH;
+						variant.bits.cullmode = (uint32_t)CullMode::FRONT;
+						pso = GetObjectPSO(variant);
+						pso_backside = nullptr;
+					}
+					else if (gg_carve_material && renderPass == RENDERPASS_MAIN)
+					{
+						// TWO draws, but NEITHER of them writes depth here — the depth stamp happens in
+						// the Z-prepass above, and that separation is load-bearing.
+						//
+						// DX11 stamped in this pass, but its two halves were two FULL LOOPS over the
+						// batch list (iDoubleRender), so every FORCEDEPTH mesh stamped before ANY of them
+						// drew. Mapping the pair onto (pso_backside, pso) makes the two draws adjacent
+						// PER SUBSET instead, which breaks mutual occlusion between the several
+						// FORCEDEPTH meshes: the gun's ALWAYS stamp wiped the depth the glove had already
+						// written and the grip rendered on top of the hand holding it. Measured in an
+						// A/B, not theorised. Moving the stamp to the prepass restores "all stamps before
+						// all draws" structurally, for free, because a pass boundary enforces it.
+						//
+						// pso_backside is the back-face COLOUR fill (compare ALWAYS, depth write OFF).
+						// DX11 got this for free — its stamp pass wrote colour as well as depth. It is
+						// needed because the opaque main pass runs DSSTYPE_DEPTHREADEQUAL: any world
+						// pixel whose depth the prepass stamp overwrote fails the EQUAL test and is
+						// never shaded, so wherever back-face coverage exceeds front-face coverage
+						// (barrel bores, open cuffs, single-sided sights) the pixel would keep the clear
+						// value — a black hole. Depth write OFF is what keeps it from re-introducing the
+						// grip-over-glove wipe.
+						variant.bits.ggdepthmode = GGDEPTHMODE_FORCEDEPTH_FILL;
+						variant.bits.cullmode = (uint32_t)CullMode::FRONT;	// back faces
+						pso_backside = GetObjectPSO(variant);
+						variant.bits.ggdepthmode = GGDEPTHMODE_STOCK;
+						variant.bits.cullmode = (uint32_t)CullMode::BACK;	// front faces: the visible weapon
+						pso = GetObjectPSO(variant);
+						if (pso == nullptr || !pso->IsValid())
+						{
+							// Lazy object PSOs may not have compiled this permutation yet.
+							variant.bits.cullmode = gg_cullmode_stock;
+							pso = GetObjectPSO(variant);
+							pso_backside = nullptr;
+						}
+						else
+						{
+							if (pso_backside != nullptr && !pso_backside->IsValid()) pso_backside = nullptr;
+							gg_dbg_forcedepth_draws.fetch_add(1, std::memory_order_relaxed);
+						}
+					}
+					// GGMAX 2.09: `!material.IsForceDepth()` is deliberately part of the CONDITION, not
+					// just an else-of-the-carve. A weapon material is transparent and double-sided, so
+					// with the carve knob OFF it would otherwise fall into the hair rule and render with
+					// NO depth write at all — which is neither the DX11 behaviour nor the DX12 one, so
+					// `SET_WEAPONDEPTH 0` would not actually revert to anything real.
+					else if ((filterMask & FILTER_TRANSPARENT) && variant.bits.cullmode == (uint32_t)CullMode::NONE
+						&& !material.IsForceDepth())
 					{
 						// GGMAX 2.08: DX11 parity for double-sided transparent geometry (hair, leaves).
 						// See gg_transparent_doublesided_nodepthwrite for why depth write has to go.
@@ -3709,7 +3948,7 @@ void RenderMeshes(
 							variant.bits.blendmode != BLENDMODE_OPAQUE)
 						{
 							gg_dbg_nodepthwrite_draws.fetch_add(1, std::memory_order_relaxed);
-							variant.bits.nodepthwrite = 1;
+							variant.bits.ggdepthmode = GGDEPTHMODE_NODEPTHWRITE;
 							variant.bits.cullmode = (uint32_t)CullMode::BACK;	// front faces
 							pso = GetObjectPSO(variant);
 							variant.bits.cullmode = (uint32_t)CullMode::FRONT;	// back faces
@@ -3718,8 +3957,8 @@ void RenderMeshes(
 							// back to the upstream pair for this frame rather than dropping the draw.
 							if (pso == nullptr || !pso->IsValid() || pso_backside == nullptr || !pso_backside->IsValid())
 							{
-								variant.bits.nodepthwrite = 0;
-								variant.bits.cullmode = (uint32_t)CullMode::NONE;
+								variant.bits.ggdepthmode = GGDEPTHMODE_STOCK;
+								variant.bits.cullmode = gg_cullmode_stock;
 								pso = GetObjectPSO(variant);
 								variant.bits.cullmode = (uint32_t)CullMode::FRONT;
 								pso_backside = GetObjectPSO(variant);

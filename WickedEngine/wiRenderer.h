@@ -50,6 +50,11 @@ namespace wi::renderer
 	// Draws that took the parity path, cumulative. Proves the rule fired instead of assuming it.
 	uint64_t GG_GetNoDepthWriteDrawCount();
 
+	// GGMAX 2.09: first-person weapon depth carve (DX11 BLENDMODE_FORCEDEPTH). Same selection-time
+	// nature as the flag above — live-toggleable via the harness SET_WEAPONDEPTH, no reload.
+	extern bool gg_weapon_forcedepth;
+	uint64_t GG_GetForceDepthDrawCount();
+
 	constexpr uint8_t raytracing_inclusion_mask_shadow = 1 << 0;
 	constexpr uint8_t raytracing_inclusion_mask_reflection = 1 << 1;
 

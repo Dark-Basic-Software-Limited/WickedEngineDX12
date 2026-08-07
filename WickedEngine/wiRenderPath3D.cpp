@@ -1162,6 +1162,29 @@ namespace wi
 				drawscene_flags
 			);
 
+			// GGMAX 2.09: a second Z-prepass pass for the FEW transparent-pass materials that are
+			// actually solid — the DX11 fork did exactly this, and its comment names the case:
+			//   "write depth for transparent objects that are solid (opaque=100%) like guns and
+			//    solid doors with windows in"  (WickedRepo/WickedEngine/RenderPath3D.cpp:1056)
+			// The first-person weapon has to live in the transparent pass so its depth carve lands
+			// after the world's opaque depth, but it IS a solid object, and everything downstream that
+			// reads the prepass — GPU occlusion queries, the light-shaft sun cutout, velocity
+			// reconstruction from the primitive-ID buffer, SSAO — would otherwise behave as if the
+			// weapon were not there. Worst case without it: the occlusion query sees the weapon as
+			// fully hidden behind the very crate it is supposed to carve through, and culls it.
+			// RenderMeshes admits ONLY materials carrying GG_FORCEDEPTH to this pass, so the cost is
+			// one DrawScene over a handful of subsets, not over the whole transparent set.
+			if (wi::renderer::gg_weapon_forcedepth)
+			{
+				wi::renderer::DrawScene(
+					visibility_main,
+					RENDERPASS_PREPASS,
+					cmd,
+					wi::renderer::DRAWSCENE_TRANSPARENT |
+					wi::renderer::DRAWSCENE_MAINCAMERA
+				);
+			}
+
 			// Custom scene draw (terrain/trees/grass depth prepass):
 			if (customDraw_Prepass) customDraw_Prepass(&camera->frustum, cmd);
 

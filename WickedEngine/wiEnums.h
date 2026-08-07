@@ -486,6 +486,10 @@ namespace wi::enums
 		// the end on purpose: upstream grows this enum by insertion, and a GGMAX value in a
 		// sequential slot would silently renumber everything after it on the next pull.
 		DSSTYPE_TRANSPARENT_NODEPTHWRITE,
+		// GGMAX 2.09 note: the weapon depth-carve STAMP wants depth write ALL + compare ALWAYS +
+		// stencil off. That is DSSTYPE_WRITEONLY above, byte for byte, and it is the same state
+		// the DX11 fork's BLENDMODE_FORCEDEPTH used. Reused rather than duplicated.
+
 		DSSTYPE_COUNT
 	};
 	// blend states

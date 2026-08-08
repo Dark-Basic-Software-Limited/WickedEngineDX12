@@ -2019,6 +2019,11 @@ namespace dx12_internal
 }
 using namespace dx12_internal;
 
+// GGMAX 2026-08-08: descriptor-ring forensics counters (gpup white-out hunt) — defined early
+// because the binder flush and submit paths below bump them; reported by GG_DumpBinderStats.
+std::atomic<uint64_t> gg_desc_ring_waits{ 0 };
+std::atomic<uint64_t> gg_desc_frames_signaled{ 0 };
+
 #ifdef PLATFORM_XBOX
 std::mutex queue_locker;
 #endif // PLATFORM_XBOX
@@ -2309,6 +2314,7 @@ std::mutex queue_locker;
 						if ((wrapped_offset < wrapped_gpu_offset) && (wrapped_gpu_offset < wrapped_offset_end))
 						{
 							// Third step is actual wait until GPU updates fence so that requested descriptors are free:
+							gg_desc_ring_waits.fetch_add(1, std::memory_order_relaxed); // GGMAX ring forensics
 							dx12_check(heap.fence->SetEventOnCompletion(heap.fenceValue, nullptr));
 						}
 					}
@@ -6167,6 +6173,7 @@ std::mutex queue_locker;
 
 		descriptorheap_res.SignalGPU(queues[QUEUE_GRAPHICS].queue.Get());
 		descriptorheap_sam.SignalGPU(queues[QUEUE_GRAPHICS].queue.Get());
+		gg_desc_frames_signaled.fetch_add(1, std::memory_order_relaxed); // GGMAX ring forensics
 		{
 			double now = gg_phase_timer.elapsed_milliseconds();
 			gg_submit_ms_sync = (float)(now - gg_phase_prev); gg_phase_prev = now;
@@ -7533,6 +7540,37 @@ std::mutex queue_locker;
 			binder.dirty_compute = internal_state->rootsig_optimizer.root_mask; // invalidates all root bindings
 		}
 	}
+	// GGMAX 2026-08-08: descriptor-ring forensics (gpup white-out hunt); counters defined at
+	// file top (the hot paths above bump them).
+	void GraphicsDevice_DX12::GG_DumpBinderStats(char* buf, int bufsize)
+	{
+		if (buf == nullptr || bufsize <= 0) return;
+		static constexpr uint32_t wrap_reservation_cbv_srv_uav = DESCRIPTORBINDER_CBV_COUNT + DESCRIPTORBINDER_SRV_COUNT + DESCRIPTORBINDER_UAV_COUNT;
+		static constexpr uint32_t wrap_reservation_sampler = DESCRIPTORBINDER_SAMPLER_COUNT;
+		const uint64_t res_ring = descriptorheap_res.heapDesc.NumDescriptors - BINDLESS_RESOURCE_CAPACITY - wrap_reservation_cbv_srv_uav;
+		const uint64_t sam_ring = descriptorheap_sam.heapDesc.NumDescriptors - BINDLESS_SAMPLER_CAPACITY - wrap_reservation_sampler;
+		const uint64_t res_off = descriptorheap_res.allocationOffset.load(std::memory_order_relaxed);
+		const uint64_t sam_off = descriptorheap_sam.allocationOffset.load(std::memory_order_relaxed);
+		const uint64_t res_done = descriptorheap_res.fence != nullptr ? descriptorheap_res.fence->GetCompletedValue() : 0;
+		const uint64_t sam_done = descriptorheap_sam.fence != nullptr ? descriptorheap_sam.fence->GetCompletedValue() : 0;
+		snprintf(buf, (size_t)bufsize,
+			"descriptor-rings: res off=%llu done=%llu gap=%lld ring=%llu laps=%llu | sam off=%llu done=%llu gap=%lld ring=%llu laps=%llu | waits=%llu frames=%llu",
+			(unsigned long long)res_off, (unsigned long long)res_done, (long long)(res_off - res_done),
+			(unsigned long long)res_ring, (unsigned long long)(res_ring ? res_off / res_ring : 0),
+			(unsigned long long)sam_off, (unsigned long long)sam_done, (long long)(sam_off - sam_done),
+			(unsigned long long)sam_ring, (unsigned long long)(sam_ring ? sam_off / sam_ring : 0),
+			(unsigned long long)gg_desc_ring_waits.load(std::memory_order_relaxed),
+			(unsigned long long)gg_desc_frames_signaled.load(std::memory_order_relaxed));
+		buf[bufsize - 1] = 0;
+	}
+	// free bridge for the game harness (GPUP_DUMP appends the ring stats line)
+	void GG_GetDescriptorRingStats(char* buf, int bufsize)
+	{
+		GraphicsDevice* dev = wi::graphics::GetDevice();
+		if (dev != nullptr) static_cast<GraphicsDevice_DX12*>(dev)->GG_DumpBinderStats(buf, bufsize);
+		else if (buf != nullptr && bufsize > 0) buf[0] = 0;
+	}
+
 	void GraphicsDevice_DX12::BindDepthBounds(float min_bounds, float max_bounds, CommandList cmd)
 	{
 		if (CheckCapability(GraphicsDeviceCapability::DEPTH_BOUNDS_TEST))

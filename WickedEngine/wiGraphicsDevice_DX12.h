@@ -490,6 +490,11 @@ namespace wi::graphics
 		DescriptorHeapGPU descriptorheap_res;
 		DescriptorHeapGPU descriptorheap_sam;
 
+		// GGMAX 2026-08-08: descriptor-ring forensics for the gpup white-out hunt — one-line
+		// stats string (alloc offsets, completed values, gaps, ring sizes, laps) for both
+		// shader-visible heaps. Reached from the game via ::GG_GetDescriptorRingStats.
+		void GG_DumpBinderStats(char* buf, int bufsize);
+
 		struct AllocationHandler
 		{
 			Microsoft::WRL::ComPtr<D3D12MA::Allocator> allocator;

@@ -125,6 +125,17 @@ namespace wi::graphics
 		// Default no-op for backends that do not implement it.
 		virtual uint64_t FlushDeferredDestroys() { return 0; }
 
+		// GGMAX 2.13 (game task #120 — the steam white-out): invalidate every cached
+		// command-list state tracker (active PSO/rootsig/topology/pipeline-hash) so the next
+		// engine draw fully re-establishes its GPU state. Called after the game's customDraw_*
+		// hooks return: GG-shader draws recorded inside engine passes leave the trackers
+		// describing GG state, and the first engine draw after the hook could execute with
+		// mismatched root bindings — observed as the sun lens flare rasterizing FULLSCREEN
+		// with the white 1x1 helper texture (a uniform ~88%-opacity veil over the frame)
+		// whenever the legacy gpup particle draws immediately preceded it in the transparent
+		// pass. Default no-op for backends that do not implement it.
+		virtual void GG_InvalidateCommandListState(CommandList cmd) {}
+
 		// The current PipelineState cache will be cleared. It is useful to clear this when reloading shaders, to avoid accumulating unused pipeline states
 		virtual void ClearPipelineStateCache() = 0;
 

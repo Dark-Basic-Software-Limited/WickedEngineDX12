@@ -7540,6 +7540,25 @@ std::mutex queue_locker;
 			binder.dirty_compute = internal_state->rootsig_optimizer.root_mask; // invalidates all root bindings
 		}
 	}
+	// GGMAX 2.13 (game task #120 — the steam white-out): see wiGraphicsDevice.h. Clears every
+	// cached command-list state tracker so the next engine draw re-establishes PSO, root
+	// signature (which also re-arms the binder's dirty mask + optimizer at 7500-7508 above)
+	// and primitive topology from scratch. prev_stencilref / prev_shadingrate are left
+	// alone deliberately: the GG hooks never set them, and zeroing a tracker whose GPU-side
+	// value is unchanged would create the same stale-tracking class this call exists to fix.
+	void GraphicsDevice_DX12::GG_InvalidateCommandListState(CommandList cmd)
+	{
+		CommandList_DX12& commandlist = GetCommandList(cmd);
+		commandlist.prev_pt = D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
+		commandlist.prev_pipeline_hash = {};
+		commandlist.active_pso = nullptr;
+		commandlist.active_cs = nullptr;
+		commandlist.active_rt = nullptr;
+		commandlist.active_rootsig_graphics = nullptr;
+		commandlist.active_rootsig_compute = nullptr;
+		commandlist.dirty_pso = false;
+	}
+
 	// GGMAX 2026-08-08: descriptor-ring forensics (gpup white-out hunt); counters defined at
 	// file top (the hot paths above bump them).
 	void GraphicsDevice_DX12::GG_DumpBinderStats(char* buf, int bufsize)

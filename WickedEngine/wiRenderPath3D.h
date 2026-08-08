@@ -325,6 +325,9 @@ namespace wi
 		void setBloomEnabled(bool value);
 		void setVolumeLightsEnabled(bool value);
 		void setLightShaftsEnabled(bool value);
+		// GGMAX 2026-08-08 (task #120): per-stage readback stats of the light-shaft chain
+		// (rtSun[0] mask -> rtSun[2] downsample -> rtSun[1] blur) + fade/strength/sunDot.
+		int GG_DumpSunChain(char* out, int outSize) const;
 		void setOutlineEnabled(bool value);
 		constexpr void setShadowsEnabled(bool value) { shadowsEnabled = value; }
 		constexpr void setFXAAEnabled(bool value) { fxaaEnabled = value; }

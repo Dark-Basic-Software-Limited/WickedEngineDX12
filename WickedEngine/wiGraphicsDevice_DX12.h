@@ -494,6 +494,7 @@ namespace wi::graphics
 		// stats string (alloc offsets, completed values, gaps, ring sizes, laps) for both
 		// shader-visible heaps. Reached from the game via ::GG_GetDescriptorRingStats.
 		void GG_DumpBinderStats(char* buf, int bufsize);
+		void GG_InvalidateCommandListState(CommandList cmd) override;
 
 		struct AllocationHandler
 		{

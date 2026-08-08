@@ -1186,7 +1186,14 @@ namespace wi
 			}
 
 			// Custom scene draw (terrain/trees/grass depth prepass):
-			if (customDraw_Prepass) customDraw_Prepass(&camera->frustum, cmd);
+			// GGMAX 2.13: state-safe hook boundary (see the transparent hook / game task #120)
+			if (customDraw_Prepass)
+			{
+				customDraw_Prepass(&camera->frustum, cmd);
+				device->GG_InvalidateCommandListState(cmd);
+				wi::renderer::BindCameraCB(*camera, camera_previous, camera_reflection, cmd);
+				wi::renderer::BindCommonResources(cmd);
+			}
 
 			wi::profiler::EndRange(range);
 			device->EventEnd(cmd);
@@ -1194,7 +1201,12 @@ namespace wi
 			device->RenderPassEnd(cmd);
 
 			// After prepass render pass: virtual texture readback (compute + copy, must be outside render pass)
-			if (customDraw_AfterPrepass) customDraw_AfterPrepass(rtPrimitiveID_render, getMSAASampleCount(), cmd);
+			// GGMAX 2.13: state-safe hook boundary (see the transparent hook / game task #120)
+			if (customDraw_AfterPrepass)
+			{
+				customDraw_AfterPrepass(rtPrimitiveID_render, getMSAASampleCount(), cmd);
+				wi::graphics::GetDevice()->GG_InvalidateCommandListState(cmd);
+			}
 
 			// GGMAX 1.40 (a): record the occlusion pass at the tail of this list instead of its own
 			if (gg_merge_occlusion)
@@ -1471,7 +1483,14 @@ namespace wi
 				);
 
 				// Custom scene draw (terrain/trees reflection depth prepass):
-				if (customDraw_Prepass_Reflections) customDraw_Prepass_Reflections(&camera_reflection.frustum, cmd);
+				// GGMAX 2.13: state-safe hook boundary (see the transparent hook / game task #120)
+				if (customDraw_Prepass_Reflections)
+				{
+					customDraw_Prepass_Reflections(&camera_reflection.frustum, cmd);
+					wi::graphics::GetDevice()->GG_InvalidateCommandListState(cmd);
+					wi::renderer::BindCameraCB(camera_reflection, camera_reflection_previous, camera_reflection, cmd);
+					wi::renderer::BindCommonResources(cmd);
+				}
 
 				device->RenderPassEnd(cmd);
 
@@ -1563,7 +1582,14 @@ namespace wi
 					wi::renderer::DRAWSCENE_SKIP_PLANAR_REFLECTION_OBJECTS
 				);
 				// Custom scene draw (terrain/trees reflection opaque):
-				if (customDraw_Opaque) customDraw_Opaque(&camera_reflection.frustum, 1, cmd);
+				// GGMAX 2.13: state-safe hook boundary (see the transparent hook / game task #120)
+				if (customDraw_Opaque)
+				{
+					customDraw_Opaque(&camera_reflection.frustum, 1, cmd);
+					wi::graphics::GetDevice()->GG_InvalidateCommandListState(cmd);
+					wi::renderer::BindCameraCB(camera_reflection, camera_reflection_previous, camera_reflection, cmd);
+					wi::renderer::BindCommonResources(cmd);
+				}
 				wi::renderer::DrawSky(*scene, cmd);
 				wi::renderer::DrawScene(
 					visibility_reflection,
@@ -1790,7 +1816,14 @@ namespace wi
 					drawscene_flags
 				);
 				// Custom scene draw (terrain/trees/grass main opaque):
-				if (customDraw_Opaque) customDraw_Opaque(&camera->frustum, 0, cmd);
+				// GGMAX 2.13: state-safe hook boundary (see the transparent hook / game task #120)
+				if (customDraw_Opaque)
+				{
+					customDraw_Opaque(&camera->frustum, 0, cmd);
+					wi::graphics::GetDevice()->GG_InvalidateCommandListState(cmd);
+					wi::renderer::BindCameraCB(*camera, camera_previous, camera_reflection, cmd);
+					wi::renderer::BindCommonResources(cmd);
+				}
 				wi::renderer::DrawSky(*scene, cmd);
 				wi::profiler::EndRange(range); // Opaque Scene
 			}
@@ -1964,7 +1997,12 @@ namespace wi
 			wi::image::Draw(&debugUAV, fx, cmd);
 		}
 
-		if (customDraw_Compose) customDraw_Compose(cmd);
+		// GGMAX 2.13: state-safe hook boundary (see the transparent hook / game task #120)
+		if (customDraw_Compose)
+		{
+			customDraw_Compose(cmd);
+			wi::graphics::GetDevice()->GG_InvalidateCommandListState(cmd);
+		}
 
 		device->EventEnd(cmd);
 
@@ -2432,7 +2470,21 @@ namespace wi
 		}
 
 		// Custom scene draw (terrain transparent overlays):
-		if (customDraw_Transparent) customDraw_Transparent(&camera->frustum, cmd);
+		// GGMAX 2.13 (game task #120 — the steam-scene fullscreen white-out): the hook
+		// records GG-shader draws (legacy gpup steam, GG terrain) whose constant buffers
+		// bind on slots b0/b1 of the shared binder — b1 is CBSLOT_RENDERER_CAMERA. The
+		// draws below that read GetCamera() without rebinding it (LENS FLARES: canvas_size_rcp
+		// scales the quad) then execute against gpup's particle constants misread as the
+		// camera — the sun flare rasterized FULLSCREEN sampling the bright flare-texture
+		// center: a uniform ~88%-opacity white veil ("whole screen washed out"). Restore the
+		// pass's CB contract + invalidate the state trackers after the hook returns.
+		if (customDraw_Transparent)
+		{
+			customDraw_Transparent(&camera->frustum, cmd);
+			device->GG_InvalidateCommandListState(cmd);
+			wi::renderer::BindCameraCB(*camera, camera_previous, camera_reflection, cmd);
+			wi::renderer::BindCommonResources(cmd);
+		}
 
 		wi::renderer::DrawDebugWorld(*scene, *camera, *this, cmd);
 
@@ -3396,6 +3448,71 @@ namespace wi
 			rtSun_resolved = {};
 		}
 	}
+	// GGMAX 2026-08-08 (game task #120): sun-chain forensics. The steam white-out proved to
+	// be the light-shafts fullscreen additive contribution washing the frame; every gpup
+	// input was exonerated byte-for-byte, so the poison enters between DrawSun and the
+	// radial blur. This dumps per-stage readback stats to name the stage that goes white.
+	int RenderPath3D::GG_DumpSunChain(char* out, int outSize) const
+	{
+		if (out == nullptr || outSize <= 0) return -1;
+		int off = 0;
+		const XMVECTOR sunDirection = XMLoadFloat3(&scene->weather.sunDirection);
+		const float sunDotCamera = XMVectorGetX(XMVector3Dot(sunDirection, camera->GetAt()));
+		off += snprintf(out + off, outSize - off, "shafts=%d fade=%.3f strength=%.3f sunDot=%.3f | ",
+			getLightShaftsEnabled() ? 1 : 0, lightShaftsFadeFactor, getLightShaftsStrength(), sunDotCamera);
+		// The sun flare's push constants, recomputed exactly as DrawLensFlares does
+		// (wiRenderer.cpp:7707-7742). xLensFlarePos.z <= 0 makes the VS's occlusion loop run
+		// zero iterations -> visibility = 0/0 = NaN opacity; wild xy = off-screen projection.
+		{
+			for (uint32_t lightIndex : visibility_main.visibleLights)
+			{
+				const wi::scene::LightComponent& light = scene->lights[lightIndex];
+				if (light.lensFlareRimTextures.empty()) continue;
+				XMVECTOR POS;
+				if (light.GetType() == wi::scene::LightComponent::DIRECTIONAL)
+				{
+					XMVECTOR D = XMVector3Normalize(-XMVector3Transform(XMVectorSet(0, 1, 0, 1), XMMatrixRotationQuaternion(XMLoadFloat4(&light.rotation))));
+					POS = camera->GetEye() + D * -camera->zFarP;
+				}
+				else
+				{
+					POS = XMLoadFloat3(&light.position);
+				}
+				const float facing = XMVectorGetX(XMVector3Dot(XMVectorSubtract(POS, camera->GetEye()), camera->GetAt()));
+				XMFLOAT3 fp;
+				XMStoreFloat3(&fp, XMVector3Project(POS, 0, 0, 1, 1, 1, 0, camera->GetProjection(), camera->GetView(), XMMatrixIdentity()));
+				off += snprintf(out + off, outSize - off, "flare[L%u t%d n%d] facing=%.2f pos=(%.3f,%.3f,%.4f) | ",
+					lightIndex, (int)light.GetType(), (int)light.lensFlareRimTextures.size(), facing, fp.x, fp.y, fp.z);
+				if (off >= outSize - 8) break;
+			}
+		}
+		const Texture* stages[4] = { &rtSun[0], &rtSun[1], &rtSun[2], &rtSun_resolved };
+		const char* names[4] = { "sun0", "sun1", "sun2", "sunR" };
+		for (int s = 0; s < 4 && off < outSize - 8; ++s)
+		{
+			if (!stages[s]->IsValid()) { off += snprintf(out + off, outSize - off, "%s=n/a ", names[s]); continue; }
+			wi::vector<uint8_t> data;
+			if (!wi::helper::saveTextureToMemory(*stages[s], data) || data.empty())
+			{
+				off += snprintf(out + off, outSize - off, "%s=FAIL ", names[s]);
+				continue;
+			}
+			uint64_t sum = 0, nz = 0, hi = 0;
+			for (size_t i = 0; i < data.size(); i++)
+			{
+				sum += data[i];
+				if (data[i] != 0) nz++;
+				if (data[i] >= 200) hi++;
+			}
+			off += snprintf(out + off, outSize - off, "%s[%ux%u]=mean %.1f nz %.1f%% hi %.1f%% ",
+				names[s], stages[s]->desc.width, stages[s]->desc.height,
+				(double)sum / (double)data.size(),
+				100.0 * nz / (double)data.size(), 100.0 * hi / (double)data.size());
+		}
+		out[outSize - 1] = 0;
+		return 0;
+	}
+
 	void RenderPath3D::setOutlineEnabled(bool value)
 	{
 		outlineEnabled = value;

@@ -7553,14 +7553,27 @@ std::mutex queue_locker;
 		const uint64_t sam_off = descriptorheap_sam.allocationOffset.load(std::memory_order_relaxed);
 		const uint64_t res_done = descriptorheap_res.fence != nullptr ? descriptorheap_res.fence->GetCompletedValue() : 0;
 		const uint64_t sam_done = descriptorheap_sam.fence != nullptr ? descriptorheap_sam.fence->GetCompletedValue() : 0;
+		// Bindless pool occupancy: the SAMPLER pool is only BINDLESS_SAMPLER_CAPACITY (256)
+		// entries process-wide — exhaustion (used -> capacity) corrupts every slot-bound
+		// sampler table copy and is the last suspect standing for the gpup white-out.
+		size_t free_res = 0, free_sam = 0, pend_res = 0, pend_sam = 0;
+		{
+			std::scoped_lock lck(allocationhandler->destroylocker);
+			free_res = allocationhandler->free_bindless_res.size();
+			free_sam = allocationhandler->free_bindless_sam.size();
+			pend_res = allocationhandler->destroyer_bindless_res.size();
+			pend_sam = allocationhandler->destroyer_bindless_sam.size();
+		}
 		snprintf(buf, (size_t)bufsize,
-			"descriptor-rings: res off=%llu done=%llu gap=%lld ring=%llu laps=%llu | sam off=%llu done=%llu gap=%lld ring=%llu laps=%llu | waits=%llu frames=%llu",
+			"descriptor-rings: res off=%llu done=%llu gap=%lld ring=%llu laps=%llu | sam off=%llu done=%llu gap=%lld ring=%llu laps=%llu | waits=%llu frames=%llu | bindless res used=%lld/%d pend=%llu sam used=%lld/%d pend=%llu",
 			(unsigned long long)res_off, (unsigned long long)res_done, (long long)(res_off - res_done),
 			(unsigned long long)res_ring, (unsigned long long)(res_ring ? res_off / res_ring : 0),
 			(unsigned long long)sam_off, (unsigned long long)sam_done, (long long)(sam_off - sam_done),
 			(unsigned long long)sam_ring, (unsigned long long)(sam_ring ? sam_off / sam_ring : 0),
 			(unsigned long long)gg_desc_ring_waits.load(std::memory_order_relaxed),
-			(unsigned long long)gg_desc_frames_signaled.load(std::memory_order_relaxed));
+			(unsigned long long)gg_desc_frames_signaled.load(std::memory_order_relaxed),
+			(long long)((long long)BINDLESS_RESOURCE_CAPACITY - (long long)free_res), BINDLESS_RESOURCE_CAPACITY, (unsigned long long)pend_res,
+			(long long)((long long)BINDLESS_SAMPLER_CAPACITY - (long long)free_sam), BINDLESS_SAMPLER_CAPACITY, (unsigned long long)pend_sam);
 		buf[bufsize - 1] = 0;
 	}
 	// free bridge for the game harness (GPUP_DUMP appends the ring stats line)

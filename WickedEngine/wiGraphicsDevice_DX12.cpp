@@ -426,6 +426,26 @@ namespace wi::graphics
 	uint32_t gg_submit_deps = 0;     // command lists carrying cross-queue waits/signals
 	static uint32_t gg_submit_batches_accum = 0;
 
+	// GGMAX 2.16 (2026-08-09): the values above are LAST-FRAME snapshots, and reading a
+	// single snapshot of a variable quantity nearly cost a whole investigation — on Switch
+	// Escape `stall` read 0.00 in three captures and 0.38 in a fourth, and the 0.00 was used
+	// to (wrongly) exonerate the GPU fence as the thing absorbing CPU slack. So also keep a
+	// rolling window: every frame's stall is accumulated, and GET_PERF_DATA reports mean/max
+	// plus the share of frames that stalled at all. Reset the window with SET_SUBMITSTATS 1
+	// so each A/B arm gets a clean sample.
+	double   gg_stall_sum_ms = 0;    // sum of per-frame stall since last reset
+	float    gg_stall_max_ms = 0;    // worst single frame since last reset
+	uint32_t gg_stall_frames = 0;    // frames sampled since last reset
+	uint32_t gg_stall_nonzero = 0;   // of those, how many stalled measurably (>0.05 ms)
+
+	void GG_ResetSubmitStats()
+	{
+		gg_stall_sum_ms = 0;
+		gg_stall_max_ms = 0;
+		gg_stall_frames = 0;
+		gg_stall_nonzero = 0;
+	}
+
 	// GGMAX 1.48b: single-queue experiment. When true, COMPUTE/COPY command lists are
 	// begun on the GRAPHICS queue instead, and same-queue WaitCommandList dependencies
 	// are dropped (in-order submission already guarantees them: WaitCommandList asserts
@@ -6206,6 +6226,13 @@ std::mutex queue_locker;
 			gg_submit_ms_stall = (float)(now - gg_phase_prev);
 			gg_submit_batches = gg_submit_batches_accum;
 			gg_submit_deps = gg_deps_accum;
+
+			// GGMAX 2.16: feed the rolling window (see the declarations for why a single
+			// snapshot is not enough to convict or exonerate the fence stall).
+			gg_stall_sum_ms += gg_submit_ms_stall;
+			if (gg_submit_ms_stall > gg_stall_max_ms) gg_stall_max_ms = gg_submit_ms_stall;
+			gg_stall_frames++;
+			if (gg_submit_ms_stall > 0.05f) gg_stall_nonzero++;
 		}
 	}
 

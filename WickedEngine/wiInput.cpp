@@ -146,9 +146,20 @@ namespace wi::input
 
 		auto range = wi::profiler::BeginRangeCPU("Input");
 
+		// GGMAX 2.15: attribute the three backends separately. "Input" read 0.29 ms on a
+		// gamepad-less machine and the whole of it turned out to be xinput probing empty
+		// slots; without these sub-ranges that is invisible. Free when the profiler is off.
+		auto range_xi = wi::profiler::BeginRangeCPU("Input-XInput");
 		wi::input::xinput::Update();
+		wi::profiler::EndRange(range_xi);
+
+		auto range_ri = wi::profiler::BeginRangeCPU("Input-RawInput");
 		wi::input::rawinput::Update();
+		wi::profiler::EndRange(range_ri);
+
+		auto range_sdl = wi::profiler::BeginRangeCPU("Input-SDL");
 		wi::input::sdlinput::Update();
+		wi::profiler::EndRange(range_sdl);
 
 #ifdef PLATFORM_PS5
 		wi::input::ps5::Update();

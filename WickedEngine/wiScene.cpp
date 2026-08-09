@@ -40,6 +40,36 @@ namespace wi::scene
 	// "Global Probe Brightness" slider; consumed in lightingHF EnvironmentReflection_Global.
 	float gg_envprobe_brightness = 1.0f;
 
+	// GGMAX 2.15 (2026-08-09): per-system attribution inside Scene::Update.
+	//
+	// WHY THIS EXISTS: the stage ranges (Scene-S1/S2/S4) are the finest attribution normally
+	// possible here, because every RunXUpdateSystem(ctx) only DISPATCHES jobs and returns —
+	// the whole cost then lands in the single jobsystem::Wait(ctx) that closes the stage. So
+	// wrapping the calls in profiler ranges the ordinary way measures ~0 for all of them.
+	// That is exactly why Switch Escape showed "Scene-S1 0.91 ms" with only 0.03 ms of named
+	// children and no way to tell whether it was transforms, physics or animation.
+	//
+	// With gg_scene_serial_profile set, each instrumented system gets its OWN Wait + range.
+	// The frame gets slower (systems can no longer overlap across workers), so the TOTAL is
+	// inflated and must not be compared against a normal frame — but the SHARES are real,
+	// which is what naming a pole requires. Pure diagnostic: never ship it enabled.
+	// Harness: SET_SCENESERIAL 0|1.
+	int gg_scene_serial_profile = 0;
+
+	// Run a Scene::Update system, optionally serialised + timed. Variadic so call expressions
+	// containing commas (RunPhysicsUpdateSystem(ctx, *this, dt)) pass through intact.
+	#define GG_SCENE_SYS(label, ...)                                              \
+		do {                                                                      \
+			if (gg_scene_serial_profile) {                                        \
+				auto gg_sys_range_ = wi::profiler::BeginRangeCPU("SU-" label);    \
+				__VA_ARGS__;                                                      \
+				wi::jobsystem::Wait(ctx);                                         \
+				wi::profiler::EndRange(gg_sys_range_);                            \
+			} else {                                                              \
+				__VA_ARGS__;                                                      \
+			}                                                                     \
+		} while (0)
+
 	// GGMAX 1.81: Scene::Update caller tracer.
 	//
 	// The performance panel shows every Scene::Update-internal range ("Scene-S1 Anim+Transform",
@@ -312,18 +342,18 @@ namespace wi::scene
 
 		RunCharacterUpdateSystem(ctx);
 
-		RunAnimationUpdateSystem(ctx);
+		GG_SCENE_SYS("Animation",  RunAnimationUpdateSystem(ctx));
 
-		wi::physics::RunPhysicsUpdateSystem(ctx, *this, dt);
+		GG_SCENE_SYS("Physics",    wi::physics::RunPhysicsUpdateSystem(ctx, *this, dt));
 
-		RunTransformUpdateSystem(ctx);
+		GG_SCENE_SYS("Transform",  RunTransformUpdateSystem(ctx));
 
 		wi::jobsystem::Wait(ctx); // dependencies
 
 		wi::profiler::EndRange(gg_range_s1); // GGMAX 1.32
 		auto gg_range_s2 = wi::profiler::BeginRangeCPU("Scene-S2 Hier+Mesh+Mat");
 
-		RunHierarchyUpdateSystem(ctx);
+		GG_SCENE_SYS("Hierarchy", RunHierarchyUpdateSystem(ctx));
 
 		// Lightmap requests are determined at this point, so we know if we need TLAS or not:
 		if (lightmap_request_allocator.load() > 0)
@@ -428,11 +458,11 @@ namespace wi::scene
 
 		RunExpressionUpdateSystem(ctx);
 
-		RunMeshUpdateSystem(ctx);
+		GG_SCENE_SYS("Mesh", RunMeshUpdateSystem(ctx));
 
 		RunVideoUpdateSystem(ctx);
 
-		RunMaterialUpdateSystem(ctx);
+		GG_SCENE_SYS("Material", RunMaterialUpdateSystem(ctx));
 
 		wi::jobsystem::Wait(ctx); // dependencies
 
@@ -454,7 +484,7 @@ namespace wi::scene
 		wi::profiler::EndRange(gg_range_s3); // GGMAX 1.32
 		auto gg_range_s4 = wi::profiler::BeginRangeCPU("Scene-S4 Object+Light");
 
-		RunObjectUpdateSystem(ctx);
+		GG_SCENE_SYS("Object", RunObjectUpdateSystem(ctx));
 
 		RunCameraUpdateSystem(ctx);
 

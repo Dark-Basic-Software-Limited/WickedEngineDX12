@@ -452,7 +452,25 @@ namespace wi::graphics
 	// the awaited list has a LOWER id, and SubmitCommandLists submits in id order).
 	// Purpose: measure/eliminate GPU fence-hop bubbles from the 7 async lists per frame.
 	// Runtime-safe to toggle between frames (harness SET_SINGLEQUEUE).
-	bool gg_single_queue = false;
+	// GGMAX 2.17 (2026-08-09): DEFAULT ON. Routes COMPUTE/COPY command lists onto the GRAPHICS
+	// queue and drops the same-queue fences that then become redundant, removing the cross-queue
+	// dependency bubble the frame stalls on (the editor frame waits on the GPU fence in 99.4% of
+	// frames — engine 2.16's SUBMIT_STALL_WINDOW).
+	//
+	// Flipped on a FULL 19-demo hub sweep, three arms each (0/1/0), 40 s arms, settle-gated,
+	// against criteria fixed BEFORE the data existed: 18/19 positive, mean +5.07%, worst case
+	// −0.5% (Horseshoe Bend, inside drift), POLYS bit-identical on all 19, and no demo's
+	// over-16.7 ms frame count rose. Best: Trapped +16.7%, Switch Escape +15.8%, Zombie
+	// Cellar +11.9%, RPG Template +9.5%. Gain scales inversely with GPU load, as the mechanism
+	// predicts — the bubble is a fixed per-frame cost.
+	//
+	// ⚠ This REVERSES the 1.48b verdict (−4.7 FPS on TESTPRO1, 2026-07-26, "submission overhead
+	// is a dead end, do NOT re-chase"). That measurement was on a much older engine; re-measured
+	// today it does not reproduce anywhere in the hub. Queue-structure verdicts have a shelf life.
+	//
+	// Revert: `setup.ini singlequeue=0` (persistent) or harness `SET_SINGLEQUEUE 0` (live).
+	// Full data: GameGuru Core/SWITCHESCAPE_PERF.md §8, tools/singlequeue_sweep_0809_full.txt
+	bool gg_single_queue = true;
 
 	// GGMAX 1.48c: lean-async. Keeps the two BIG compute lists async (prepare-async with the
 	// hair sim + main compute effects — the overlap that measurably wins ~1ms GPU wall) but

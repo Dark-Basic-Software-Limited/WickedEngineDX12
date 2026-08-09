@@ -80,6 +80,15 @@ enum SHADERMATERIAL_OPTIONS
 	SHADERMATERIAL_OPTION_BIT_ADDITIVE = 1 << 9,
 	SHADERMATERIAL_OPTION_BIT_USE_VERTEXAO = 1 << 10,
 	SHADERMATERIAL_OPTION_BIT_CAPSULE_SHADOW_DISABLED = 1 << 11,
+
+	// GGMAX 2.14: first-person weapon shadow-position pull (DX11 SHADERTYPE_WEAPON parity).
+	// ⚠ BIT CHOICE: this field is options_stencilref — bits 24-31 are the STENCIL REF
+	// (GetStencilRef() = options_stencilref >> 24u), so the usual GGMAX "reserved range 24-31"
+	// convention CANNOT be used here; taking bit 24 would corrupt the stencil ref of every
+	// weapon material. Upstream appends option bits sequentially from 0 (currently up to 11),
+	// so GGMAX takes bit 23 — the top of the free window 12-23, furthest from the next
+	// upstream slot.
+	SHADERMATERIAL_OPTION_BIT_GG_WEAPON_SHADOW = 1 << 23,
 };
 
 #ifndef __cplusplus
@@ -498,6 +507,7 @@ struct alignas(32) ShaderMaterial
 	inline bool IsAdditive() { return GetOptions() & SHADERMATERIAL_OPTION_BIT_ADDITIVE; }
 	inline bool IsDoubleSided() { return GetOptions() & SHADERMATERIAL_OPTION_BIT_DOUBLE_SIDED; }
 	inline bool IsCapsuleShadowDisabled() { return GetOptions() & SHADERMATERIAL_OPTION_BIT_CAPSULE_SHADOW_DISABLED; }
+	inline bool IsWeaponShadow() { return GetOptions() & SHADERMATERIAL_OPTION_BIT_GG_WEAPON_SHADOW; } // GGMAX 2.14
 	inline bool IsUnlit() { return GetShaderType() == SHADERTYPE_UNLIT; }
 
 #endif // __cplusplus
@@ -1257,6 +1267,11 @@ enum FRAME_OPTIONS
 	// GGMAX 2.10: punctual lights use the DX11 product falloff — energy*(1-d2/r2)^2, no
 	// inverse-square term; intensity is then in DX11 energy units (see lightingHF.hlsli).
 	OPTION_BIT_GG_DX11_LIGHT_FALLOFF = 1 << 30,
+	// GGMAX 2.14: live A/B lever for the first-person weapon shadow pull. The MATERIAL bit
+	// (SHADERMATERIAL_OPTION_BIT_GG_WEAPON_SHADOW) only says "this is a weapon" and is written
+	// once when the gun loads; this frame bit is what makes SET_WEAPONSHADOW take effect within
+	// a frame without re-uploading any material (same split as the 2.10 falloff knob).
+	OPTION_BIT_GG_WEAPON_SHADOW = 1 << 29,
 };
 
 // ---------- Common Constant buffers: -----------------

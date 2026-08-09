@@ -101,6 +101,12 @@ struct Surface
 	bool is_backface;
 	bool gi_applied;
 	bool capsuleshadow_disabled;
+	// GGMAX 2.14: first-person weapon (DX11 SHADERTYPE_WEAPON parity). Carried as a Surface bool
+	// rather than read from surface.material in the light loops ON PURPOSE: init() does NOT
+	// initialise `material`, and hairparticlePS / emittedparticlePS_soft / impostorPS /
+	// oceanSurfacePS / objectPS_voxelizer / the raytracers all init() a Surface and then light it,
+	// so testing material bits there would be reading uninitialised memory.
+	bool gg_weapon_shadow;
 
 	// These will be computed when calling Update():
 	half NdotV;				// cos(angle between normal and view vector)
@@ -156,6 +162,7 @@ struct Surface
 		is_backface = false;
 		gi_applied = false;
 		capsuleshadow_disabled = true;
+		gg_weapon_shadow = false; // GGMAX 2.14 — must default OFF for every init()-only path
 
 		uid_validate = 0;
 		hit_depth = 0;
@@ -188,6 +195,9 @@ struct Surface
 		sss_inv = material.GetSSSInverse();
 		SetReceiveShadow(material.IsReceiveShadow());
 		SetCapsuleShadowDisabled(material.IsCapsuleShadowDisabled());
+		// GGMAX 2.14: fold the live knob in HERE, once per pixel, rather than testing the FrameCB
+		// bit again inside every light function — the light loops then cost a single SGPR bool.
+		SetWeaponShadow(material.IsWeaponShadow() && (GetFrame().options & OPTION_BIT_GG_WEAPON_SHADOW));
 	}
 
 	inline void create(
@@ -318,6 +328,8 @@ struct Surface
 	inline void SetBackface(bool value) { is_backface = value; }
 	inline void SetGIApplied(bool value) { gi_applied = value; }
 	inline void SetCapsuleShadowDisabled(bool value) { capsuleshadow_disabled = value; }
+	inline bool IsWeaponShadow() { return gg_weapon_shadow; }                  // GGMAX 2.14
+	inline void SetWeaponShadow(bool value) { gg_weapon_shadow = value; }      // GGMAX 2.14
 
 
 	ShaderMeshInstance inst;

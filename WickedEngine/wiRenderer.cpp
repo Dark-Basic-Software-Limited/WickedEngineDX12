@@ -270,6 +270,15 @@ bool gg_transparent_doublesided_nodepthwrite = true;
 // Revert with setup.ini `weaponforcedepth=0`, or live with the harness `SET_WEAPONDEPTH 0`.
 bool gg_weapon_forcedepth = true;
 
+// GGMAX 2.14: the SECOND half of the DX11 weapon look — SHADERTYPE_WEAPON / WEAPON_SHADOW.
+// DX11 pulled the shading position to 1/3 camera distance inside DirectionalLight/PointLight/
+// SpotLight so a gun clipping into a wall is not shadowed BY that wall. 2.09 restored the depth
+// carve; without this the gun still goes dark when the player presses against geometry.
+// DX11 tagged the set on the same line as FORCEDEPTH (wickedcalls.cpp:3336-3337), so the existing
+// GG_FORCEDEPTH material flag is the faithful selector — see wiScene_Components.cpp.
+// Revert with setup.ini `weaponshadow=0`, or live with the harness `SET_WEAPONSHADOW 0`.
+bool gg_weapon_shadow = true;
+
 // GGMAX 2.10: punctual lights use the DX11 product falloff (OPTION_BIT_GG_DX11_LIGHT_FALLOFF).
 // The DX11 product shaded every point/spot light as energy * (1 - d2/r2)^2 — no inverse-square
 // term — with a constant energy of 30 set once at light creation (DX11 wickedcalls.cpp:6655);
@@ -5219,6 +5228,10 @@ void UpdatePerFrameData(
 	if (gg_dx11_light_falloff)
 	{
 		frameCB.options |= OPTION_BIT_GG_DX11_LIGHT_FALLOFF; // GGMAX 2.10
+	}
+	if (gg_weapon_shadow)
+	{
+		frameCB.options |= OPTION_BIT_GG_WEAPON_SHADOW; // GGMAX 2.14
 	}
 	if (GetTemporalAAEnabled())
 	{

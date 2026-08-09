@@ -56,6 +56,9 @@ namespace wi::renderer
 	// GGMAX 2.10: DX11 product light falloff for punctual lights (energy*(1-d2/r2)^2, no 1/d2);
 	// game passes intensity in DX11 energy units (30) when this is on. setup.ini `lightfalloff=0`.
 	extern bool gg_dx11_light_falloff;
+	// GGMAX 2.14: first-person weapon shadow-position pull (DX11 SHADERTYPE_WEAPON parity).
+	// setup.ini `weaponshadow=0`, harness `SET_WEAPONSHADOW 0|1` (fully live).
+	extern bool gg_weapon_shadow;
 	uint64_t GG_GetForceDepthDrawCount();
 
 	constexpr uint8_t raytracing_inclusion_mask_shadow = 1 << 0;

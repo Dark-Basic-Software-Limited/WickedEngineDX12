@@ -48,13 +48,44 @@ inline void ApplyLighting(in Surface surface, in Lighting lighting, inout half4 
 }
 
 //#define CASCADE_DITHERING
+// GGMAX 2.14: DX11 SHADERTYPE_WEAPON / WEAPON_SHADOW parity.
+//
+// DX11 (WickedRepo lightingHF.hlsli:451/569/635, under #ifdef WEAPON_SHADOW) pulled the shading
+// position to a THIRD of the camera distance at the top of DirectionalLight/PointLight/SpotLight:
+//     diffxytz = surface.P - camPos;  diffxytz /= 3;  surface.P = camPos + diffxytz;
+// Its own comment: "ensure geometry not STUCK INSIDE a wall that would cast a shadow on it". The
+// first-person weapon sits within ~1 unit of the eye, so the pull barely moves it in world space,
+// but it lands the shadow lookup back on the PLAYER'S side of any wall the gun is clipping into —
+// otherwise the gun goes dark whenever the player presses against geometry.
+//
+// DX11 achieved this with a whole shader permutation (objectPS_weapon.hlsl + SHADERTYPE_WEAPON).
+// Here it is a wave-uniform bool on Surface instead: no new SHADERTYPE (that enum is upstream-owned
+// AND serialized into materials), no SHADERTYPE_BIN_COUNT bump, no extra permutation.
+//
+// `surface` is an `in` parameter — the mutation is on the callee's local copy, exactly as in DX11,
+// so it affects only this light's shadow lookup and attenuation, never the caller's surface.
+// NOT applied to light_rect: DX11 had no rect equivalent, so leaving it out is the parity choice.
+// surface.IsWeaponShadow() already has OPTION_BIT_GG_WEAPON_SHADOW folded into it by
+// Surface::create(), so this is one wave-uniform SGPR bool per light — no FrameCB re-read.
+inline float3 gg_weapon_shadow_P(in Surface surface)
+{
+	if (surface.IsWeaponShadow())
+	{
+		const float3 camPos = GetCamera().position;
+		return camPos + (surface.P - camPos) / 3.0f;
+	}
+	return surface.P;
+}
+
 inline void light_directional(in ShaderEntity light, in Surface surface, inout Lighting lighting, in half shadow_mask = 1)
 {
 	if (shadow_mask <= 0.001)
 		return; // shadow mask zero
 	if ((light.layerMask & surface.layerMask) == 0)
 		return; // layer mismatch
-		
+
+	surface.P = gg_weapon_shadow_P(surface); // GGMAX 2.14 — before gg_camera_distance and the cascade lookups
+
 	half3 L = light.GetDirection();
 	SurfaceToLight surface_to_light;
 	surface_to_light.create(surface, L);
@@ -231,7 +262,9 @@ inline void light_point(in ShaderEntity light, in Surface surface, inout Lightin
 		return; // shadow mask zero
 	if ((light.layerMask & surface.layerMask) == 0)
 		return; // layer mismatch
-	
+
+	surface.P = gg_weapon_shadow_P(surface); // GGMAX 2.14 — before Lunnormalized / shadow_cube
+
 	float3 Lunnormalized = light.position - surface.P;
 	const float3 LunnormalizedShadow = Lunnormalized;
 
@@ -360,7 +393,9 @@ inline void light_spot(in ShaderEntity light, in Surface surface, inout Lighting
 		return; // shadow mask zero
 	if ((light.layerMask & surface.layerMask) == 0)
 		return; // layer mismatch
-	
+
+	surface.P = gg_weapon_shadow_P(surface); // GGMAX 2.14 — before Lunnormalized / the spot shadow lookup
+
 	float3 Lunnormalized = light.position - surface.P;
 	const float dist2 = dot(Lunnormalized, Lunnormalized); // GGMAX 2.07g: float — fp16 overflows past 255.9u
 	const float range = light.GetRange();

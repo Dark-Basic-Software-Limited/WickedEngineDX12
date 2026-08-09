@@ -476,6 +476,16 @@ namespace wi::scene
 		{
 			material.options_stencilref |= SHADERMATERIAL_OPTION_BIT_CAPSULE_SHADOW_DISABLED;
 		}
+		// GGMAX 2.14: mark the first-person weapon set for the shadow-position pull. DX11 tagged
+		// exactly this set — WickedCall_SetMeshDisableDepth set userBlendMode=BLENDMODE_FORCEDEPTH
+		// and shaderType=SHADERTYPE_WEAPON on the SAME line (DX11 wickedcalls.cpp:3336-3337) — so
+		// GG_FORCEDEPTH is the faithful selector and needs no new game-side tagging. Deliberately
+		// NOT gated on the gg_weapon_shadow knob: this bit means "is a weapon", and gating it here
+		// would need every material re-uploaded on a toggle. The live lever is the FRAME bit.
+		if (IsForceDepth())
+		{
+			material.options_stencilref |= SHADERMATERIAL_OPTION_BIT_GG_WEAPON_SHADOW;
+		}
 
 		material.options_stencilref |= wi::renderer::CombineStencilrefs(engineStencilRef, userStencilRef) << 24u;
 

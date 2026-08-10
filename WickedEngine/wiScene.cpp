@@ -2178,6 +2178,28 @@ namespace wi::scene
 	// GGMAX delta 1.36: level-order hierarchy update master switch (false = stock chain walk).
 	bool gg_hierarchy_levelorder = true;
 
+	// GGMAX 2.20 (2026-08-10): SU-Hierarchy load-balance instrument.
+	//
+	// SU-Hierarchy is the last unexplained pole in Scene::Update (~0.6 ms after the 2.18 sparse
+	// ECS fix, against SU-Transform's 0.04 ms over a comparable N with zero lookups). The live
+	// hypothesis is LOAD IMBALANCE, not per-entity cost: the fast path Dispatches one job per
+	// subtree ROOT at groupsize 8, so the system's wall clock is set by the LARGEST SINGLE
+	// SUBTREE — every other worker finishes early and idles at the stage's Wait. A scene with a
+	// few deep armature subtrees among many trivial ones would show exactly the measured shape.
+	//
+	// These three numbers decide it, and they cost nothing: the DFS already maintains
+	// `processed` as a cycle guard, so the per-job work is one relaxed CAS loop and one
+	// fetch_add at the END of each root's walk — nothing inside the hot loop.
+	//	roots      : how many jobs the Dispatch actually creates
+	//	maxSubtree : nodes walked by the single biggest job = the critical path
+	//	visited    : total nodes walked across all jobs
+	// If maxSubtree is a large fraction of visited, the system is imbalanced and the fix is to
+	// split big subtrees across jobs. If maxSubtree is small and visited is large, it is genuine
+	// aggregate per-entity work and the Dispatch shape is already right.
+	std::atomic<uint32_t> gg_hier_max_subtree{ 0 };
+	std::atomic<uint32_t> gg_hier_visited{ 0 };
+	uint32_t              gg_hier_root_count = 0;
+
 	// GGMAX delta 1.41: ShaderMaterial recompose cache master switch (false = stock every-frame
 	// full recompose). See RunMaterialUpdateSystem.
 	bool gg_material_cache = true;
@@ -3460,6 +3482,11 @@ namespace wi::scene
 			if (gg_hier_snapshot_mutation == gg_hier_mutation_counter.load(std::memory_order_acquire) &&
 				gg_hier_snapshot_count == hierarchy.GetCount() && !gg_hier_roots.empty())
 			{
+				// GGMAX 2.20 instrument: reset before the fan-out; each job contributes once at its end.
+				gg_hier_root_count = (uint32_t)gg_hier_roots.size();
+				gg_hier_max_subtree.store(0, std::memory_order_relaxed);
+				gg_hier_visited.store(0, std::memory_order_relaxed);
+
 				wi::jobsystem::Dispatch(ctx, (uint32_t)gg_hier_roots.size(), 8, [this](wi::jobsystem::JobArgs args) {
 
 					const GGHierRoot& root = gg_hier_roots[args.jobIndex];
@@ -3528,6 +3555,16 @@ namespace wi::scene
 							}
 						}
 					}
+
+					// GGMAX 2.20: harvest this root's walk length. `processed` is the cycle guard the
+					// loop already maintained, so this adds nothing to the hot path — one relaxed CAS
+					// loop and one fetch_add per ROOT (not per node).
+					uint32_t prev = gg_hier_max_subtree.load(std::memory_order_relaxed);
+					while (processed > prev &&
+						!gg_hier_max_subtree.compare_exchange_weak(prev, processed, std::memory_order_relaxed))
+					{
+					}
+					gg_hier_visited.fetch_add(processed, std::memory_order_relaxed);
 
 				});
 				return;

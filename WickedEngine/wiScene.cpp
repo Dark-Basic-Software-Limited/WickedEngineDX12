@@ -56,6 +56,13 @@ namespace wi::scene
 	// Harness: SET_SCENESERIAL 0|1.
 	int gg_scene_serial_profile = 0;
 
+	// GGMAX 2.18 (2026-08-10): parallelise the per-frame "blank every instance slot" pass in
+	// Scene::Update (see the comment at its use site). Stock Wicked does it on ONE worker;
+	// this spreads the identical writes across the pool. Behaviour-neutral by construction —
+	// same bytes, same slots, only the scheduling differs. Default 0 while it is being A/B'd.
+	// Harness: SET_INSTINIT 0|1.
+	bool gg_instinit_parallel = false;
+
 	// Run a Scene::Update system, optionally serialised + timed. Variadic so call expressions
 	// containing commas (RunPhysicsUpdateSystem(ctx, *this, dt)) pass through intact.
 	#define GG_SCENE_SYS(label, ...)                                              \
@@ -329,15 +336,45 @@ namespace wi::scene
 				skinningAllocator.fetch_add(uint32_t(armature.boneCollection.size() * sizeof(ShaderTransform)));
 			});
 
-			wi::jobsystem::Execute(ctx, [&](wi::jobsystem::JobArgs args) {
-				// Must not keep inactive instances, so init them for safety:
-				ShaderMeshInstance inst;
-				inst.init();
-				for (uint32_t i = 0; i < instanceArraySize; ++i)
-				{
-					std::memcpy(instanceArrayMapped + i, &inst, sizeof(inst));
-				}
-			});
+			// GGMAX 2.18: this blanket "init every instance slot for safety" pass is the largest
+			// unnamed cost in Scene-S1. It writes sizeof(ShaderMeshInstance)=256 B x
+			// instanceArraySize (objects + hairs + emitters) into UPLOAD memory EVERY frame —
+			// ~1.87 MB on Switch Escape — and stock Wicked does it in a single jobsystem::Execute,
+			// i.e. on ONE worker. UPLOAD heaps are write-combined, so this is a long serial run of
+			// uncached stores. Measured context: Scene-S1 is 1.02 ms but its named systems
+			// (SU-Animation 0.03 + SU-Physics 0.00 + SU-Transform 0.04) account for only 0.07 ms.
+			//
+			// The parallel path writes the SAME bytes to the SAME slots — it only spreads them
+			// over the worker pool, so it cannot change behaviour, only wall clock. The blank
+			// instance is hoisted to a function-local static (built once, thread-safe by C++11
+			// magic statics) so no per-item construction is added; capturing it by reference into
+			// the job would be a lifetime bug, because the enclosing `if (dt > 0)` scope ends
+			// before the stage's jobsystem::Wait.
+			//
+			// Default OFF so this ships as an opt-in A/B first. Live knob: SET_INSTINIT 0|1.
+			if (gg_instinit_parallel)
+			{
+				static const ShaderMeshInstance gg_inst_blank = []() {
+					ShaderMeshInstance i;
+					i.init();
+					return i;
+				}();
+				wi::jobsystem::Dispatch(ctx, instanceArraySize, 1024, [this](wi::jobsystem::JobArgs args) {
+					std::memcpy(instanceArrayMapped + args.jobIndex, &gg_inst_blank, sizeof(gg_inst_blank));
+				});
+			}
+			else
+			{
+				wi::jobsystem::Execute(ctx, [&](wi::jobsystem::JobArgs args) {
+					// Must not keep inactive instances, so init them for safety:
+					ShaderMeshInstance inst;
+					inst.init();
+					for (uint32_t i = 0; i < instanceArraySize; ++i)
+					{
+						std::memcpy(instanceArrayMapped + i, &inst, sizeof(inst));
+					}
+				});
+			}
 		}
 
 		RunCharacterUpdateSystem(ctx);

@@ -441,9 +441,38 @@ namespace wi::ecs
 		// This is a linear array of entities corresponding to each alive component
 		wi::vector<Entity> entities;
 
+// GGMAX 2.18 (2026-08-10): entity->index lookup switched BUCKET_HASH -> SPARSE.
+//
+// WHY. This is a DX11-parity restoration, not a new experiment. The DX11 fork replaced stock
+// Wicked's hash lookup with a flat sparse array years ago (WickedRepo/WickedEngine/wiECS.h:413,
+// `std::vector<size_t> sparse`, commit b40f00a "way faster for larger games ... no more
+// lookup.find(entity)") and the DX12 port silently reverted to upstream stock. Every
+// Contains()/GetComponent()/GetIndex() in every Scene::Update system pays the difference, on
+// every entity, every frame — which is a large part of why Scene::Update measures 2.39 ms here
+// against DX11's <=0.21 for a strict superset of the same work (SWITCHESCAPE_PERF.md §10).
+//
+// WHY *SPARSE* AND NOT *STRAIGHT*. LOOKUP_STRAIGHT is the literal equivalent of DX11's flat
+// vector and is the fastest possible, but it allocates one size_t per entity id ever seen, in
+// EVERY component manager — and entity ids come from a monotonic global counter
+// (wiECS.h CreateEntity), so a long editing session with heavy create/destroy churn grows every
+// table forever. LOOKUP_SPARSE keeps the direct-mapping property but pages it in 64-entry
+// blocks that are freed when they empty, so the memory tracks live entities, not peak id.
+// Cost is one extra dependent load vs STRAIGHT; still far cheaper than an FNV-1a hash plus a
+// fibonacci-mapped bucket probe.
+//
+// SAFETY AUDITED BEFORE ENABLING (this code path shipped upstream but was unused here):
+//  - BlockData::Item defaults to INVALID_INDEX and wi::allocator::BlockAllocator::allocate()
+//    placement-news T(), i.e. value-initialises, so get() on an un-inserted slot inside a
+//    partially-filled block correctly returns INVALID_INDEX rather than garbage.
+//  - erase() dereferences block_data without a null test, but its only callers (Remove :303,
+//    Remove_KeepSorted :326) first check GetIndex() != INVALID_INDEX, so the block provably
+//    exists. get() is separately guarded by the per-block `status` bitmask.
+//
+// REVERT: put the comment back on LOOKUP_SPARSE and uncomment LOOKUP_BUCKET_HASH, rebuild the
+// engine. Or `git checkout baseline-sceneupdate-20260810`.
 //#define LOOKUP_STRAIGHT
-//#define LOOKUP_SPARSE
-#define LOOKUP_BUCKET_HASH
+#define LOOKUP_SPARSE
+//#define LOOKUP_BUCKET_HASH
 //#define LOOKUP_HASH
 
 		// This is a lookup table for entity -> index resolving

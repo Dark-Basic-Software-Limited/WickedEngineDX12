@@ -59,6 +59,15 @@ namespace wi::renderer
 	// GGMAX 2.14: first-person weapon shadow-position pull (DX11 SHADERTYPE_WEAPON parity).
 	// setup.ini `weaponshadow=0`, harness `SET_WEAPONSHADOW 0|1` (fully live).
 	extern bool gg_weapon_shadow;
+	// GGMAX 2.28: directional shadow-caster culling extrusion in WORLD UNITS (inches).
+	// Stock Wicked's floor is a metres-scale 1000 units = 25 m, which culled casters whose
+	// shadows were still on screen. 0 restores stock. Harness SET_SHADOWEXTRUDE <units>.
+	// ⚠ Raising this pulls more casters into the NEAR cascades — measure before trusting it.
+	extern float gg_shadow_caster_extrude;
+	// GGMAX 2.28: per-frame count of objects the DIRECTIONAL cascade cull selected as casters.
+	// The executed-check for gg_shadow_caster_extrude — VISIBLE_OBJECTS cannot see the effect,
+	// so without this an A/B cannot distinguish "no cost" from "the knob did nothing".
+	extern std::atomic<unsigned int> gg_dbg_shadow_casters;
 	uint64_t GG_GetForceDepthDrawCount();
 
 	constexpr uint8_t raytracing_inclusion_mask_shadow = 1 << 0;

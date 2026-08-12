@@ -204,6 +204,25 @@ bool MESHLET_OCCLUSION_CULLING = false;
 // Revert switch only — there is no reason to turn this off outside of a bisect.
 bool gg_pso_trim = true;
 
+// GGMAX 2.28: shadow-caster culling extrusion, in WORLD UNITS, used by CreateDirLightShadowCams.
+//
+// Stock Wicked extrudes the directional cascade's CULLING frustum along the light axis by
+// `min(2000, farPlane) * 0.5` so that off-screen casters still shadow into view. That 2000 is a
+// METRES-scale constant; GameGuru is INCHES (1 unit = 1 inch), so the allowance was 1000 units =
+// **25 metres**, and any caster displaced further than that along the sun ray was culled — its
+// shadow popping out of existence as it left view. In light-view space Z IS the light axis, and a
+// caster shares X/Y with its own shadow, so this extrusion is the ONLY thing that can reject a
+// caster whose shadow is still on screen.
+// ★ The same metres-vs-inches rescale was already done for this function's INPUTS — see
+// wickedcalls_part3.cpp:1460 on cascade_distances "whose stock default {8,80,800} is ~20 metres".
+// This constant was missed.
+// ⚠ Widening the cull is the sanctioned fix, not a hack: depth clip is off for shadows, so
+// out-of-projection casters clamp correctly (see the stock comment at the use site).
+// ⚠ COST: a wider cull selects more casters in the NEAR cascades, which are the most expensive.
+// Raise it only with the shadow-pass ms and a hub sweep in hand. Set to 0 to restore stock.
+// Harness: SET_SHADOWEXTRUDE <units>. See NIGHT_INVESTIGATIONS_2026-08-12.md section C.
+float gg_shadow_caster_extrude = 4000.0f; // ~101 m; stock behaviour is 1000 u (25 m)
+
 // GGMAX 1.79 (low-VRAM preset, batch 3): build object PSOs LAZILY.
 // GGMAX 1.82: DEFAULT ON for everybody. Revert with setup.ini `lazypso=0`.
 //
@@ -313,6 +332,15 @@ Texture shadowMapAtlas_Transparent;
 // So count the batches that reach the transparent shadow queue rather than assume. Reported on
 // the harness SHADOWT line; a level that never populates it can drop the format for free.
 std::atomic<unsigned long long> gg_dbg_transparent_shadow_batches{ 0 };
+
+// GGMAX 2.28: how many objects the DIRECTIONAL cascade cull actually selected as shadow casters,
+// for the frame just gathered. This is the EXECUTED-CHECK for gg_shadow_caster_extrude: the
+// extrusion is invisible to VISIBLE_OBJECTS (it culls casters, not camera visibility), so without
+// this counter an A/B on the knob cannot tell "no cost" from "the knob did nothing".
+// ⚠ That exact failure already happened once tonight on the decal pool (SWITCHESCAPE_PERF §24.2):
+// every timing number looked healthy while the mechanism under test never ran.
+// Reset each gather so the value is per-frame, not cumulative.
+std::atomic<unsigned int> gg_dbg_shadow_casters{ 0 };
 std::atomic<unsigned long long> gg_dbg_transparent_shadow_frames{ 0 };
 
 // GGMAX: skip the transparent shadow DRAWS (harness SET_TRANSPARENTSHADOWS 0). The atlas is
@@ -3550,7 +3578,15 @@ inline void CreateDirLightShadowCams(const LightComponent& light, CameraComponen
 			XMStoreFloat3(&_min, vMin);
 			XMStoreFloat3(&_max, vMax);
 			float ext = abs(_center.z - _min.z);
-			ext = std::max(ext, std::min(2000.0f, farPlane) * 0.5f);
+			// GGMAX 2.28: the stock floor here was `min(2000, farPlane) * 0.5` = 1000 units, a
+			// metres-scale constant in an inch-scale world (25 m of caster allowance), which made
+			// shadows pop as their casters left view. gg_shadow_caster_extrude replaces it; 0
+			// restores stock exactly. Note `ext` still wins when the cascade is naturally larger,
+			// so this only lifts the NEAR cascades where the floor governs.
+			const float ggExtrudeFloor = (gg_shadow_caster_extrude > 0.0f)
+				? std::min(gg_shadow_caster_extrude, farPlane)
+				: std::min(2000.0f, farPlane) * 0.5f;
+			ext = std::max(ext, ggExtrudeFloor);
 			_min.z = _center.z - ext;
 			_max.z = _center.z + ext;
 
@@ -8013,6 +8049,9 @@ void DrawShadowmaps(
 			const bool ggCullFarCascades = shadowFarCascadeCull;
 			const uint32_t ggDedicatedCount = (uint32_t)vis.scene->character_dedicated_shadows.size();
 
+			// GGMAX 2.28: per-frame caster count — the executed-check for gg_shadow_caster_extrude.
+			gg_dbg_shadow_casters.store(0, std::memory_order_relaxed);
+
 			for (size_t i = 0; i < vis.scene->aabb_objects.size(); ++i)
 			{
 				const AABB& aabb = vis.scene->aabb_objects[i];
@@ -8062,6 +8101,11 @@ void DrawShadowmaps(
 						}
 						if (camera_mask == 0)
 							continue;
+
+						// GGMAX 2.28: this object survived the cascade cull and WILL be drawn as a shadow
+						// caster. Counted HERE (not at the loop top) so the number responds to
+						// gg_shadow_caster_extrude — that is the whole point of the counter.
+						gg_dbg_shadow_casters.fetch_add(1, std::memory_order_relaxed);
 
 						RenderBatch batch;
 						batch.Create(object.mesh_index, uint32_t(i), 0, object.sort_bits, camera_mask, shadow_lod);

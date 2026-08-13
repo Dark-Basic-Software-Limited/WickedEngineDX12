@@ -480,7 +480,25 @@ struct alignas(16) RenderBatch
 	{
 		this->meshIndex = meshIndex;
 		this->instanceIndex = instanceIndex;
-		this->distance = XMConvertFloatToHalf(distance);
+		// ★★ GGMAX 2.32: CLAMP BEFORE THE HALF. A half-float's largest finite value is 65504;
+		// XMConvertFloatToHalf of anything larger yields +INF, and GetDistance() then returns INF
+		// to the distance-fade in RenderMeshes:
+		//     dither = max(transparency, max(0, GetDistance() - fadeDistance) / radius)
+		// INF - FLT_MAX is still INF, so dither becomes INF, `dither > 0.99f` fires, and the
+		// instance is skipped — leaving instancedBatch.instanceCount at 0 so batch_flush returns
+		// immediately. The object vanishes from the CAMERA passes with no error anywhere, while
+		// the SHADOW pass (which passes distance 0) keeps drawing it perfectly.
+		// That is the invisible collectable pistol on spotshadowtest: its AABB is corrupted to
+		// span from the table to the parked library master at (100000,100000,100000), putting the
+		// centre 86,730 units from the camera — 1.32x over the half limit.
+		// ⚠ GameGuru is an INCH-scale world (1 unit = 1 inch), so 65504 units is only ~1.66 km;
+		// upstream Wicked is metres, where the same limit is 65 km and effectively unreachable.
+		// This is the second fp16-range bug on this project — see the 2.07g light-attenuation
+		// range^2 overflow. When porting a metres-scale engine to an inch-scale game, EVERY
+		// half-precision distance is a range bug waiting to happen.
+		// Clamping (rather than widening the field) keeps RenderBatch at 16 bytes and its
+		// static_assert intact; a distant object sorting as "65504 away" is harmless.
+		this->distance = XMConvertFloatToHalf(std::min(distance, 65504.0f));
 		this->sort_bits = sort_bits;
 		this->camera_mask = camera_mask;
 		this->lod_override = lod_override;
@@ -3716,6 +3734,10 @@ std::atomic<uint32_t> gg_dbg_watch_subsets[RENDERPASS_COUNT] = {};   // subsets 
 std::atomic<uint32_t> gg_dbg_watch_nofilter[RENDERPASS_COUNT] = {};  // subset rejected by filter mask
 std::atomic<uint32_t> gg_dbg_watch_nopso[RENDERPASS_COUNT] = {};     // skipped: PSO null/invalid
 std::atomic<uint32_t> gg_dbg_watch_draws[RENDERPASS_COUNT] = {};     // draws actually issued
+// GGMAX 2.32: the queue-build half of the tracer — every reject between visibleObjects and the
+// renderQueue, attributed. GG_Q_SEEN counts encounters; the rest are mutually exclusive outcomes,
+// so SEEN == sum(the others) always holds and a violated identity means the tracer itself is wrong.
+std::atomic<uint32_t> gg_dbg_watch_q[RENDERPASS_COUNT][GG_Q_COUNT] = {};
 
 // GGMAX 2.08: subsets that took the hair/leaf no-depth-write parity path in the MAIN pass.
 // Cumulative. A zero here with the knob on means the rule never matched — the material is not
@@ -8689,25 +8711,59 @@ void DrawScene(
 		renderQueue.init();
 		for (uint32_t instanceIndex : vis.visibleObjects)
 		{
-			if (occlusion && vis.scene->occlusion_results_objects[instanceIndex].IsOccluded())
-				continue;
-
+			// GGMAX 2.32: fully-attributed queue-build tracer for the watched mesh. The 2.31
+			// tracer proved the invisible pistol is in visibleObjects yet never reaches
+			// batch_flush; this counts EVERY reject in the gap between the two, so the answer is
+			// one row rather than a bisect. Zero cost when gg_dbg_watch_mesh is -1.
 			const ObjectComponent& object = vis.scene->objects[instanceIndex];
+			const bool ggQ = (gg_dbg_watch_mesh >= 0)
+				&& ((int)object.mesh_index == gg_dbg_watch_mesh)
+				&& (renderPass < RENDERPASS_COUNT);
+			if (ggQ) gg_dbg_watch_q[renderPass][GG_Q_SEEN].fetch_add(1, std::memory_order_relaxed);
+
+			if (occlusion && vis.scene->occlusion_results_objects[instanceIndex].IsOccluded())
+			{
+				if (ggQ) gg_dbg_watch_q[renderPass][GG_Q_OCCLUDED].fetch_add(1, std::memory_order_relaxed);
+				continue;
+			}
+
 			if (!object.IsRenderable())
+			{
+				if (ggQ) gg_dbg_watch_q[renderPass][GG_Q_NOTRENDERABLE].fetch_add(1, std::memory_order_relaxed);
 				continue;
+			}
 			if (foreground != object.IsForeground())
+			{
+				if (ggQ) gg_dbg_watch_q[renderPass][GG_Q_FOREGROUND].fetch_add(1, std::memory_order_relaxed);
 				continue;
+			}
 			if (maincamera && object.IsNotVisibleInMainCamera())
+			{
+				if (ggQ) gg_dbg_watch_q[renderPass][GG_Q_NOTMAINCAM].fetch_add(1, std::memory_order_relaxed);
 				continue;
+			}
 			if (skip_planar_reflection_objects && object.IsNotVisibleInReflections())
+			{
+				if (ggQ) gg_dbg_watch_q[renderPass][GG_Q_NOREFLECT].fetch_add(1, std::memory_order_relaxed);
 				continue;
+			}
 			if ((object.GetFilterMask() & filterMask) == 0)
+			{
+				// ⚠ Per-PASS filter: the object's mask is tested against the mask the CALLER asked
+				// for, which differs per DrawScene call. An object can be FILTER_OPAQUE and still
+				// be rejected here by a pass that asked for something else.
+				if (ggQ) gg_dbg_watch_q[renderPass][GG_Q_FILTER].fetch_add(1, std::memory_order_relaxed);
 				continue;
+			}
 
 			const float distance = wi::math::Distance(vis.camera->Eye, object.center);
 			if (distance > object.fadeDistance + object.radius)
+			{
+				if (ggQ) gg_dbg_watch_q[renderPass][GG_Q_FADE].fetch_add(1, std::memory_order_relaxed);
 				continue;
+			}
 
+			if (ggQ) gg_dbg_watch_q[renderPass][GG_Q_ADDED].fetch_add(1, std::memory_order_relaxed);
 			renderQueue.add(object.mesh_index, instanceIndex, distance, object.sort_bits);
 		}
 		if (!renderQueue.empty())

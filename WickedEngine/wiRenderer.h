@@ -74,6 +74,11 @@ namespace wi::renderer
 	// glance. `nofilter` is the per-SUBSET material reject and `nopso` the silent missing-variant
 	// skip; neither is observable from any per-object instrument.
 	extern int gg_dbg_watch_mesh;
+	// GGMAX 2.32: queue-build reject attribution for the watched mesh (DrawScene, per pass).
+	// SEEN must equal the sum of the other seven — if it does not, distrust the tracer, not the bug.
+	enum GG_QSTAGE { GG_Q_SEEN = 0, GG_Q_OCCLUDED, GG_Q_NOTRENDERABLE, GG_Q_FOREGROUND,
+		GG_Q_NOTMAINCAM, GG_Q_NOREFLECT, GG_Q_FILTER, GG_Q_FADE, GG_Q_ADDED, GG_Q_COUNT };
+	extern std::atomic<uint32_t> gg_dbg_watch_q[wi::enums::RENDERPASS_COUNT][GG_Q_COUNT];
 	extern std::atomic<uint32_t> gg_dbg_watch_batches[wi::enums::RENDERPASS_COUNT];
 	extern std::atomic<uint32_t> gg_dbg_watch_instances[wi::enums::RENDERPASS_COUNT];
 	extern std::atomic<uint32_t> gg_dbg_watch_nobuffer[wi::enums::RENDERPASS_COUNT];

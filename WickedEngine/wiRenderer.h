@@ -68,6 +68,19 @@ namespace wi::renderer
 	// The executed-check for gg_shadow_caster_extrude — VISIBLE_OBJECTS cannot see the effect,
 	// so without this an A/B cannot distinguish "no cost" from "the knob did nothing".
 	extern std::atomic<unsigned int> gg_dbg_shadow_casters;
+	// GGMAX 2.31: per-MESH draw tracer for the harness WHYNOTDRAWN command. Set gg_dbg_watch_mesh
+	// to a mesh index to arm it (-1 = off, zero cost). Counters are per RENDERPASS, so a mesh that
+	// draws in SHADOW but not in MAIN — the "no mesh, perfect shadow" signature — is visible at a
+	// glance. `nofilter` is the per-SUBSET material reject and `nopso` the silent missing-variant
+	// skip; neither is observable from any per-object instrument.
+	extern int gg_dbg_watch_mesh;
+	extern std::atomic<uint32_t> gg_dbg_watch_batches[wi::enums::RENDERPASS_COUNT];
+	extern std::atomic<uint32_t> gg_dbg_watch_instances[wi::enums::RENDERPASS_COUNT];
+	extern std::atomic<uint32_t> gg_dbg_watch_nobuffer[wi::enums::RENDERPASS_COUNT];
+	extern std::atomic<uint32_t> gg_dbg_watch_subsets[wi::enums::RENDERPASS_COUNT];
+	extern std::atomic<uint32_t> gg_dbg_watch_nofilter[wi::enums::RENDERPASS_COUNT];
+	extern std::atomic<uint32_t> gg_dbg_watch_nopso[wi::enums::RENDERPASS_COUNT];
+	extern std::atomic<uint32_t> gg_dbg_watch_draws[wi::enums::RENDERPASS_COUNT];
 	uint64_t GG_GetForceDepthDrawCount();
 
 	constexpr uint8_t raytracing_inclusion_mask_shadow = 1 << 0;

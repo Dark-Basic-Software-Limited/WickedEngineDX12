@@ -3701,6 +3701,22 @@ void Workaround(const int bug , CommandList cmd)
 std::atomic<uint64_t> gg_dbg_userstencil_draws[RENDERPASS_COUNT] = {};
 std::atomic<uint64_t> gg_dbg_total_draws[RENDERPASS_COUNT] = {};
 
+// GGMAX 2.31: per-MESH draw tracer, read back by the harness WHYNOTDRAWN command.
+// Built because a per-object visibility instrument proved insufficient: on the invisible
+// collectable pistol it reported "passes every gate, in the visible set" while nothing reached
+// the screen, so the loss had to be per-SUBSET or per-PSO-VARIANT — both of which live inside
+// batch_flush and are invisible from outside it. Keyed on mesh index because batch_flush IS the
+// instancing unit, so `instances` doubles as the answer to "who is this batched with".
+// Set gg_dbg_watch_mesh = -1 (the default) to disable; every counter is then untouched.
+int gg_dbg_watch_mesh = -1;
+std::atomic<uint32_t> gg_dbg_watch_batches[RENDERPASS_COUNT] = {};   // batch_flush reached for this mesh
+std::atomic<uint32_t> gg_dbg_watch_instances[RENDERPASS_COUNT] = {}; // instances in those batches
+std::atomic<uint32_t> gg_dbg_watch_nobuffer[RENDERPASS_COUNT] = {};  // bailed: mesh generalBuffer invalid
+std::atomic<uint32_t> gg_dbg_watch_subsets[RENDERPASS_COUNT] = {};   // subsets considered
+std::atomic<uint32_t> gg_dbg_watch_nofilter[RENDERPASS_COUNT] = {};  // subset rejected by filter mask
+std::atomic<uint32_t> gg_dbg_watch_nopso[RENDERPASS_COUNT] = {};     // skipped: PSO null/invalid
+std::atomic<uint32_t> gg_dbg_watch_draws[RENDERPASS_COUNT] = {};     // draws actually issued
+
 // GGMAX 2.08: subsets that took the hair/leaf no-depth-write parity path in the MAIN pass.
 // Cumulative. A zero here with the knob on means the rule never matched — the material is not
 // double-sided, or not transparent, and the fix would be aimed at the wrong thing.
@@ -3777,9 +3793,25 @@ void RenderMeshes(
 	{
 		if (instancedBatch.instanceCount == 0)
 			return;
+		// GGMAX 2.31: per-mesh DRAW TRACER. Answers "is the draw actually issued?" from inside the
+		// only place that knows — replicating the PSO cache key harness-side would be guesswork.
+		// Watching by MESH index (not object) because batch_flush IS the instancing unit, so the
+		// same counters also report how many instances shared the batch.
+		// Zero cost when gg_dbg_watch_mesh is -1, which is its default.
+		const bool ggWatch = (gg_dbg_watch_mesh >= 0)
+			&& ((int)instancedBatch.meshIndex == gg_dbg_watch_mesh)
+			&& (renderPass < RENDERPASS_COUNT);
+		if (ggWatch)
+		{
+			gg_dbg_watch_batches[renderPass].fetch_add(1, std::memory_order_relaxed);
+			gg_dbg_watch_instances[renderPass].fetch_add(instancedBatch.instanceCount, std::memory_order_relaxed);
+		}
 		const MeshComponent& mesh = vis.scene->meshes[instancedBatch.meshIndex];
 		if (!mesh.generalBuffer.IsValid())
+		{
+			if (ggWatch) gg_dbg_watch_nobuffer[renderPass].fetch_add(1, std::memory_order_relaxed);
 			return;
+		}
 
 		const bool forceAlphaTestForDithering = instancedBatch.forceAlphatestForDithering != 0;
 		const uint8_t userStencilRefOverride = instancedBatch.userStencilRefOverride;
@@ -3846,8 +3878,14 @@ void RenderMeshes(
 				}
 			}
 
+			if (ggWatch) gg_dbg_watch_subsets[renderPass].fetch_add(1, std::memory_order_relaxed);
+
 			if (!subsetRenderable)
 			{
+				// GGMAX 2.31: the per-SUBSET reject — a material whose filter mask does not
+				// intersect this pass's. Distinct from every per-OBJECT cull, and the reason a
+				// per-object instrument can report "DRAWN" while nothing reaches the screen.
+				if (ggWatch) gg_dbg_watch_nofilter[renderPass].fetch_add(1, std::memory_order_relaxed);
 				continue;
 			}
 
@@ -4032,7 +4070,14 @@ void RenderMeshes(
 			}
 
 			if (pso == nullptr || !pso->IsValid())
+			{
+				// GGMAX 2.31: the SILENT draw skip. A missing or not-yet-valid PSO variant drops
+				// the draw with no error anywhere, and it is per-RENDERPASS — MAIN can be missing
+				// while SHADOW is resident, which renders as "no mesh, perfect shadow".
+				if (ggWatch) gg_dbg_watch_nopso[renderPass].fetch_add(1, std::memory_order_relaxed);
 				continue; // This can happen if the pipeline compilation was not completed for this draw yet
+			}
+			if (ggWatch) gg_dbg_watch_draws[renderPass].fetch_add(1, std::memory_order_relaxed);
 
 			const bool meshShaderPSO = pso->desc.ms != nullptr;
 			STENCILREF engineStencilRef = material.engineStencilRef;

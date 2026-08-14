@@ -140,5 +140,31 @@ float4 main(VertextoPixel input) : SV_TARGET
 
 	color.rgb = mul(saturationMatrix(material.GetSaturation()), color.rgb);
 
+#ifdef EMITTEDPARTICLE_DISTORTION
+	// GGMAX 2.47: restore the fork's positive-only distortion.
+	//
+	// The fork's version of this shader ended with `return max(color, 0)`. That matters only on
+	// the distortion path: above, `color.rgb = color.rgb - 0.5` deliberately makes the distortion
+	// vector signed, and the fork then clamped the negative half away - so a fork distortion
+	// particle could only ever push the scene one way in UV. The current shader returns the
+	// signed value into an R16G16_FLOAT target (wiRenderPath3D.cpp:195), where negatives survive,
+	// and tonemapCS.hlsl does an unscaled `uv += distortion.rg`. Net effect: roughly double the
+	// range, and bidirectional where the fork was one-directional.
+	//
+	// Scoped two ways rather than copying the fork's blanket clamp:
+	//   * DISTORTION permutation only. Outside it every term feeding `color` is already >= 0, so
+	//     the clamp is a no-op there - confining it keeps the soft / soft_lighting paths provably
+	//     untouched instead of merely believed-unchanged.
+	//   * Legacy .PE emitters only (xEmitterFadeinTime >= 0, same discriminator as GGMAX 2.46).
+	//     wi::renderer draws the RAIN emitter with a SOFT_DISTORTION override
+	//     (wiRenderer.cpp:7289), and rain is engine-created with fadein_time -1, so it keeps
+	//     upstream's signed distortion.
+	[branch]
+	if (xEmitterFadeinTime >= 0)
+	{
+		color = max(color, 0);
+	}
+#endif // EMITTEDPARTICLE_DISTORTION
+
 	return color;
 }

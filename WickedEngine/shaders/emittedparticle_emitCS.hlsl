@@ -208,7 +208,15 @@ void main(uint3 DTid : SV_DispatchThreadID)
 		sin((float)DTid.x) * xParticleBurstFactor.x,
 		(rng.next_float() - 0.5f) * xParticleBurstFactor.y,
 		cos((float)DTid.x) * xParticleBurstFactor.z);
-	particle.rotation_rotationVelocity = pack_half2(float2(xParticleStartRotation, xParticleRotation + (rng.next_float() - 0.5f) * xParticleRotationRandom));
+	// GGMAX 2.46: start_rotation means two different things. Upstream treats it as a constant
+	// initial angle (the .x seeded here); the DX11 fork used it as a SCALE on a per-particle
+	// velocity-aligned rotation applied at billboard time - see emittedparticle_simulateCS.hlsl.
+	// For a legacy .PE emitter, seeding an initial angle here would apply the value twice, so
+	// start at 0 and let the simulate pass supply the fork's term. Gate is the established
+	// legacy-.PE discriminator: fadein_time defaults to -1 and only the .PE reader sets it >= 0
+	// (wiEmittedParticle.h:156), the same test GGMAX 2.00 uses for the opacity curve.
+	const float ggStartAngle = (xEmitterFadeinTime >= 0) ? 0 : xParticleStartRotation;
+	particle.rotation_rotationVelocity = pack_half2(float2(ggStartAngle, xParticleRotation + (rng.next_float() - 0.5f) * xParticleRotationRandom));
 	particle.maxLife = xParticleLifeSpan + xParticleLifeSpan * (rng.next_float() - 0.5f) * xParticleLifeSpanRandomness;
 	particle.life = particle.maxLife;
 	particle.sizeBeginEnd = float2(particleStartingSize, particleStartingSize * xParticleScaling + (rng.next_float() - 0.5f) * xParticleScalingRandom);

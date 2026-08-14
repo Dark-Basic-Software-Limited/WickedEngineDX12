@@ -319,6 +319,41 @@ void main(uint3 DTid : SV_DispatchThreadID, uint Gid : SV_GroupIndex)
 		}
 		
 		float rotation = rotation_rotationVel.x;
+
+		// GGMAX 2.46: restore the fork's velocity-aligned particle rotation.
+		//
+		// The DX11 fork did this in the vertex shader (emittedparticleVS.hlsl:52-58, commented
+		// "Rotate to fit direction if top up view"):
+		//
+		//     float3 velocity = mul((float3x3) g_xCamera_View, particle.velocity);
+		//     if (particle.velocity.x != 0 || particle.velocity.z != 0)
+		//         rotation += (tan(normalize(velocity)) * xParticleStartRotation);
+		//
+		// so start_rotation was a SCALE on a per-particle rotation derived from the direction of
+		// travel - which is what gives smoke plumes their tumble and makes birds face where they
+		// fly. New Wicked reinterpreted the same field as a constant initial angle, so all eight
+		// emitters that set it (the six explosion smoke plumes plus birds) render every particle
+		// at one identical angle. The initial-angle seeding is skipped for legacy .PE emitters in
+		// emittedparticle_emitCS.hlsl so the value is not applied twice.
+		//
+		// Two faithfulness notes, both deliberate - do NOT "clean up":
+		//   * `tan(normalize(velocity))` is a float3 while `rotation` is a float, so the fork was
+		//     silently truncating to .x. Written explicitly here; the term is bounded to about
+		//     +/-1.557 * start_rotation because |normalize().x| <= 1.
+		//   * `mul(M, v)` is the COLUMN-vector form, the transpose of the row-vector convention
+		//     Wicked uses everywhere else (see the `mul(quadPos, view)` below). That is what the
+		//     fork computed, and the fork's output is the parity target, so it is reproduced
+		//     exactly rather than corrected.
+		// The guard is safe: a non-zero world x or z means non-zero length, and the view transform
+		// is a rotation, so normalize() never sees a zero vector.
+		[branch]
+		if (xEmitterFadeinTime >= 0 && xParticleStartRotation != 0 &&
+			(particle.velocity.x != 0 || particle.velocity.z != 0))
+		{
+			const float3 gg_view_velocity = mul((float3x3)GetCamera().view, particle.velocity);
+			rotation += tan(normalize(gg_view_velocity).x) * xParticleStartRotation;
+		}
+
 		float2x2 rot = float2x2(
 			cos(rotation), -sin(rotation),
 			sin(rotation), cos(rotation)

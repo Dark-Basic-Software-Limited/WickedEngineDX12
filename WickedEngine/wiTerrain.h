@@ -10,6 +10,7 @@
 
 #include <memory>
 #include <functional>
+#include <atomic> // GGMAX 2.58: genprof accumulators
 
 namespace wi::terrain
 {
@@ -42,6 +43,19 @@ namespace wi::terrain
 	extern float gg_generation_center_override_x;
 	extern float gg_generation_center_override_z;
 	extern bool  gg_generation_center_override_enabled;
+	extern bool gg_generation_skip_bvh; // GGMAX 2.58: generator-only, see wiTerrain.cpp
+
+	// GGMAX 2.58 diagnostic: per-phase chunk-generation cost accumulators (us, cumulative).
+	extern std::atomic<uint64_t> gg_genprof_heights_us;
+	extern std::atomic<uint64_t> gg_genprof_vertex_us;
+	extern std::atomic<uint64_t> gg_genprof_renderdata_us;
+	extern std::atomic<uint64_t> gg_genprof_bvh_us;
+	extern std::atomic<uint64_t> gg_genprof_grass_us;
+	extern std::atomic<uint64_t> gg_genprof_blendcb_us;
+	extern std::atomic<uint64_t> gg_genprof_regiontex_us;
+	extern std::atomic<uint64_t> gg_genprof_physics_us;
+	extern std::atomic<uint64_t> gg_genprof_total_us;
+	extern std::atomic<uint64_t> gg_genprof_chunks;
 }
 
 namespace std

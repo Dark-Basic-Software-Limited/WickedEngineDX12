@@ -28,6 +28,28 @@ namespace wi::terrain
 	float gg_generation_center_override_z = 0.0f;
 	bool  gg_generation_center_override_enabled = false;
 
+	// GGMAX 2.58: skip the per-chunk CPU triangle BVH build during generation. Measured at
+	// 8.2 of the 10.9 ms per chunk (75%). The Terrain Generator sets this: its only terrain
+	// picks are the marker-drag rays, which fall back to brute-force triangle tests on the
+	// few AABB-passing chunks. Chunks born without a BVH are wiped on generator exit, so
+	// the editor/test game always regenerate with BVHs.
+	bool gg_generation_skip_bvh = false;
+
+	// GGMAX 2.58 diagnostic: per-phase chunk-generation cost accumulators (microseconds,
+	// cumulative since launch). Answers "what takes the most time when generating a chunk";
+	// dumped by the game's TERRAIN_GENPROF harness command. renderdata is measured inside
+	// its async job so phase sums rank consumers but overlap — wall time is gg_genprof_total.
+	std::atomic<uint64_t> gg_genprof_heights_us{ 0 };
+	std::atomic<uint64_t> gg_genprof_vertex_us{ 0 };
+	std::atomic<uint64_t> gg_genprof_renderdata_us{ 0 };
+	std::atomic<uint64_t> gg_genprof_bvh_us{ 0 };
+	std::atomic<uint64_t> gg_genprof_grass_us{ 0 };
+	std::atomic<uint64_t> gg_genprof_blendcb_us{ 0 };
+	std::atomic<uint64_t> gg_genprof_regiontex_us{ 0 };
+	std::atomic<uint64_t> gg_genprof_physics_us{ 0 };
+	std::atomic<uint64_t> gg_genprof_total_us{ 0 };
+	std::atomic<uint64_t> gg_genprof_chunks{ 0 };
+
 	struct ChunkIndices
 	{
 		wi::vector<uint32_t> indices;
@@ -1116,6 +1138,7 @@ namespace wi::terrain
 					it->second.blendmap_layers[0].pixels.size() == vertexCount;
 				if (it == chunks.end() || it->second.entity == INVALID_ENTITY || it->second.invalidated)
 				{
+					wi::Timer gg_t_total; // GGMAX 2.58: per-chunk generation cost breakdown
 					// Generate a new chunk:
 					ChunkData& chunk_data = chunks[chunk];
 
@@ -1208,6 +1231,7 @@ namespace wi::terrain
 					constexpr uint32_t vertexCount_padded = chunk_width_padded * chunk_width_padded;
 					float heights_padded[chunk_width_padded][chunk_width_padded];
 					const XMVECTOR UP = XMVectorSet(0, 1, 0, 0);
+					wi::Timer gg_t_heights; // GGMAX 2.58
 					wi::jobsystem::Dispatch(ctx, vertexCount_padded, chunk_width_padded * 4, [&](wi::jobsystem::JobArgs args) {
 						const uint32_t index = args.jobIndex;
 						const XMUINT2 coord = XMUINT2(index % chunk_width_padded, index / chunk_width_padded);
@@ -1251,7 +1275,9 @@ namespace wi::terrain
 						heights_padded[coord.x][coord.y] = height;
 					});
 					wi::jobsystem::Wait(ctx);
+					gg_genprof_heights_us.fetch_add(uint64_t(gg_t_heights.elapsed_milliseconds() * 1000.0)); // GGMAX 2.58
 
+					wi::Timer gg_t_vertex; // GGMAX 2.58
 					wi::jobsystem::Dispatch(ctx, vertexCount, chunk_width * 4, [&](wi::jobsystem::JobArgs args) {
 						ChunkData& chunk_data = chunks[chunk];
 						const uint32_t index = args.jobIndex;
@@ -1335,27 +1361,37 @@ namespace wi::terrain
 						chunk_data.heightmap_data[index] = uint16_t(inverse_lerp(bottomLevel, topLevel, height) * 65535);
 					});
 					wi::jobsystem::Wait(ctx); // wait until chunk's vertex buffer is fully generated
+					gg_genprof_vertex_us.fetch_add(uint64_t(gg_t_vertex.elapsed_milliseconds() * 1000.0)); // GGMAX 2.58
 
 					object.SetCastShadow(slope_cast_shadow.load());
 					mesh.SetDoubleSidedShadow(slope_cast_shadow.load());
 
 					wi::jobsystem::Execute(ctx, [&](wi::jobsystem::JobArgs args) {
+						wi::Timer gg_t_rd; // GGMAX 2.58: timed inside the async job (overlaps physics below)
 						mesh.CreateRenderData();
 						chunk_data.sphere.center = mesh.aabb.getCenter();
 						chunk_data.sphere.center.x += chunk_data.position.x;
 						chunk_data.sphere.center.y += chunk_data.position.y;
 						chunk_data.sphere.center.z += chunk_data.position.z;
 						chunk_data.sphere.radius = mesh.aabb.getRadius();
-						mesh.SetBVHEnabled(true);
+						gg_genprof_renderdata_us.fetch_add(uint64_t(gg_t_rd.elapsed_milliseconds() * 1000.0));
+						if (!gg_generation_skip_bvh) // GGMAX 2.58: 8.2 ms/chunk — the generator skips it
+						{
+							wi::Timer gg_t_bvh; // GGMAX 2.58a: SetBVHEnabled BUILDS the CPU triangle BVH synchronously
+							mesh.SetBVHEnabled(true);
+							gg_genprof_bvh_us.fetch_add(uint64_t(gg_t_bvh.elapsed_milliseconds() * 1000.0));
+						}
 					});
 
 					// If there were any vertices in this chunk that could be valid for grass, store the grass particle system:
 					if (grass_valid_vertex_count.load() > 0)
 					{
+						wi::Timer gg_t_grass; // GGMAX 2.58
 						chunk_data.grass = std::move(grass); // the grass will be added to the scene later, only when the chunk is close to the camera (center chunk's neighbors)
 						chunk_data.grass.meshID = chunk_data.entity;
 						chunk_data.grass.strandCount = uint32_t(grass_valid_vertex_count.load() * 3 * chunk_scale * chunk_scale); // chunk_scale * chunk_scale : grass density increases with squared amount with chunk scale (x*z)
 						chunk_data.grass.CreateFromMesh(mesh);
+						gg_genprof_grass_us.fetch_add(uint64_t(gg_t_grass.elapsed_milliseconds() * 1000.0));
 					}
 
 					// GGMAX: let the game fill the blendmap with its own weights (generator
@@ -1364,23 +1400,28 @@ namespace wi::terrain
 					// Preserved (in-place regen) chunks keep their existing layers untouched.
 					if (!gg_preserve_blend)
 					{
+						wi::Timer gg_t_blendcb; // GGMAX 2.58
 						chunk_data.gg_blendmap_generated = false;
 						if (gg_generate_blendmap)
 						{
 							chunk_data.gg_blendmap_generated = gg_generate_blendmap(chunk_data, mesh);
 						}
+						gg_genprof_blendcb_us.fetch_add(uint64_t(gg_t_blendcb.elapsed_milliseconds() * 1000.0));
 					}
 
 					// Create the textures for virtual texture update:
+					wi::Timer gg_t_regiontex; // GGMAX 2.58
 					chunk_data.heightmap = {};
 					if (!gg_preserve_blend) // GGMAX: keep the existing GPU blendmap texture (layers untouched above)
 					{
 						chunk_data.blendmap = {};
 					}
 					CreateChunkRegionTexture(chunk_data);
+					gg_genprof_regiontex_us.fetch_add(uint64_t(gg_t_regiontex.elapsed_milliseconds() * 1000.0));
 
 					if (IsPhysicsEnabled())
 					{
+						wi::Timer gg_t_physics; // GGMAX 2.58
 						// Precompute the physics shape here on separate thread, because computing shape for triangle mesh would be slow on main thread:
 						//	Note that this is mesh.precomputed_rigidbody_physics_shape and not a component in scene.rigidbodies, so this only contains the shape, not the simulated rigid bodies
 						RigidBodyPhysicsComponent& newrigidbody = mesh.precomputed_rigidbody_physics_shape;
@@ -1389,9 +1430,14 @@ namespace wi::terrain
 						newrigidbody.friction = 0.8f;
 						//newrigidbody.mesh_lod = 2;
 						wi::physics::CreateRigidBodyShape(newrigidbody, transform.scale_local, &mesh);
+						gg_genprof_physics_us.fetch_add(uint64_t(gg_t_physics.elapsed_milliseconds() * 1000.0));
 					}
 
 					wi::jobsystem::Wait(ctx); // wait until mesh.CreateRenderData() async task finishes
+
+					// GGMAX 2.58: close the per-chunk breakdown
+					gg_genprof_total_us.fetch_add(uint64_t(gg_t_total.elapsed_milliseconds() * 1000.0));
+					gg_genprof_chunks.fetch_add(1);
 
 					generated_something = true;
 				}

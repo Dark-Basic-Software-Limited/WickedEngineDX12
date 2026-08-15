@@ -43,6 +43,7 @@ namespace wi::terrain
 	std::atomic<uint64_t> gg_genprof_vertex_us{ 0 };
 	std::atomic<uint64_t> gg_genprof_renderdata_us{ 0 };
 	std::atomic<uint64_t> gg_genprof_bvh_us{ 0 };
+	std::atomic<uint64_t> gg_genprof_bvh_events{ 0 };
 	std::atomic<uint64_t> gg_genprof_grass_us{ 0 };
 	std::atomic<uint64_t> gg_genprof_blendcb_us{ 0 };
 	std::atomic<uint64_t> gg_genprof_regiontex_us{ 0 };
@@ -1380,6 +1381,7 @@ namespace wi::terrain
 							wi::Timer gg_t_bvh; // GGMAX 2.58a: SetBVHEnabled BUILDS the CPU triangle BVH synchronously
 							mesh.SetBVHEnabled(true);
 							gg_genprof_bvh_us.fetch_add(uint64_t(gg_t_bvh.elapsed_milliseconds() * 1000.0));
+							gg_genprof_bvh_events.fetch_add(1);
 						}
 					});
 

@@ -50,6 +50,7 @@ namespace wi::terrain
 	extern std::atomic<uint64_t> gg_genprof_vertex_us;
 	extern std::atomic<uint64_t> gg_genprof_renderdata_us;
 	extern std::atomic<uint64_t> gg_genprof_bvh_us;
+	extern std::atomic<uint64_t> gg_genprof_bvh_events;
 	extern std::atomic<uint64_t> gg_genprof_grass_us;
 	extern std::atomic<uint64_t> gg_genprof_blendcb_us;
 	extern std::atomic<uint64_t> gg_genprof_regiontex_us;

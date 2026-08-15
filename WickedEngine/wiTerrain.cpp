@@ -21,6 +21,13 @@ using namespace wi::graphics;
 
 namespace wi::terrain
 {
+	// GGMAX 2.53: generation-center override (see wiTerrain.h) — written by the game's
+	// Terrain Generator each frame it is open; auto-cleared by the GGTerrainWicked bridge
+	// whenever the generator is not the active mode.
+	float gg_generation_center_override_x = 0.0f;
+	float gg_generation_center_override_z = 0.0f;
+	bool  gg_generation_center_override_enabled = false;
+
 	struct ChunkIndices
 	{
 		wi::vector<uint32_t> indices;
@@ -775,8 +782,18 @@ namespace wi::terrain
 
 		if (IsCenterToCamEnabled())
 		{
-			center_chunk.x = (int)std::floor((camera.Eye.x + chunk_half_width) * chunk_width_rcp * chunk_scale_rcp);
-			center_chunk.z = (int)std::floor((camera.Eye.z + chunk_half_width) * chunk_width_rcp * chunk_scale_rcp);
+			// GGMAX 2.53: the Terrain Generator pins the ring to the editable-area marker;
+			// everything downstream (creation ring, removal threshold, priority sorts) keys
+			// off center_chunk, so overriding here covers the whole generation system.
+			float gg_cx = camera.Eye.x;
+			float gg_cz = camera.Eye.z;
+			if (gg_generation_center_override_enabled)
+			{
+				gg_cx = gg_generation_center_override_x;
+				gg_cz = gg_generation_center_override_z;
+			}
+			center_chunk.x = (int)std::floor((gg_cx + chunk_half_width) * chunk_width_rcp * chunk_scale_rcp);
+			center_chunk.z = (int)std::floor((gg_cz + chunk_half_width) * chunk_width_rcp * chunk_scale_rcp);
 		}
 
 		// GGMAX: track how long the camera has stayed within one chunk — VT residency

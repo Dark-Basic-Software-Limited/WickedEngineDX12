@@ -32,6 +32,16 @@ namespace wi::terrain
 			return raw;
 		}
 	};
+
+	// GGMAX 2.53: generation-center override — while enabled, Generation_Update rings the
+	// chunk set around this world-space XZ instead of the camera eye. The Terrain Generator
+	// pins it to the editable-area marker so flying the preview camera cannot drag generated
+	// chunks away from the playable area; every other mode leaves it disabled (camera-centred).
+	// Deliberately namespace globals, NOT Terrain members: transient UI-mode state must not
+	// ride Serialize / Entity_Duplicate. Plain floats to avoid header dependencies.
+	extern float gg_generation_center_override_x;
+	extern float gg_generation_center_override_z;
+	extern bool  gg_generation_center_override_enabled;
 }
 
 namespace std

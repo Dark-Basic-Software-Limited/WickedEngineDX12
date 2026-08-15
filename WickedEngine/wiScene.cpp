@@ -137,6 +137,7 @@ namespace wi::scene
 
 		// GGMAX 1.32: stage-level CPU attribution for Scene::Update (instrumentation only, free when profiler off).
 		//	Stages are the natural jobsystem::Wait barriers of this function.
+		wi::profiler::gg_trace_mark("scn-begin"); // GGMAX 2.61 gap decomposition
 		auto gg_range_s1 = wi::profiler::BeginRangeCPU("Scene-S1 Anim+Transform");
 
 		UpdateHumanoidFacings();
@@ -161,6 +162,7 @@ namespace wi::scene
 				terrain.Generation_Update(camera);
 			}
 		}
+		wi::profiler::gg_trace_mark("scn-terrain"); // GGMAX 2.61 gap decomposition
 
 		// count colliders in background thread before procedural anim system
 		wi::jobsystem::Execute(collider_bvh_workload, [this](wi::jobsystem::JobArgs args) {
@@ -388,6 +390,7 @@ namespace wi::scene
 		wi::jobsystem::Wait(ctx); // dependencies
 
 		wi::profiler::EndRange(gg_range_s1); // GGMAX 1.32
+		wi::profiler::gg_trace_mark("scn-s1"); // GGMAX 2.61
 		auto gg_range_s2 = wi::profiler::BeginRangeCPU("Scene-S2 Hier+Mesh+Mat");
 
 		GG_SCENE_SYS("Hierarchy", RunHierarchyUpdateSystem(ctx));
@@ -504,6 +507,7 @@ namespace wi::scene
 		wi::jobsystem::Wait(ctx); // dependencies
 
 		wi::profiler::EndRange(gg_range_s2); // GGMAX 1.32
+		wi::profiler::gg_trace_mark("scn-s2"); // GGMAX 2.61
 		auto gg_range_s3 = wi::profiler::BeginRangeCPU("Scene-S3 Armature+Proc");
 
 		WaitBuildTopDownHierarchy();
@@ -519,6 +523,7 @@ namespace wi::scene
 		wi::jobsystem::Wait(ctx); // dependencies
 
 		wi::profiler::EndRange(gg_range_s3); // GGMAX 1.32
+		wi::profiler::gg_trace_mark("scn-s3"); // GGMAX 2.61
 		auto gg_range_s4 = wi::profiler::BeginRangeCPU("Scene-S4 Object+Light");
 
 		GG_SCENE_SYS("Object", RunObjectUpdateSystem(ctx));
@@ -546,6 +551,7 @@ namespace wi::scene
 		wi::jobsystem::Wait(ctx); // dependencies
 
 		wi::profiler::EndRange(gg_range_s4); // GGMAX 1.32
+		wi::profiler::gg_trace_mark("scn-s4"); // GGMAX 2.61
 		auto gg_range_s5 = wi::profiler::BeginRangeCPU("Scene-S5 Tail+ShaderScene");
 
 		// Merge parallel bounds computation (depends on object update system):
@@ -1113,6 +1119,7 @@ namespace wi::scene
 		}
 
 		wi::profiler::EndRange(gg_range_s5); // GGMAX 1.32
+		wi::profiler::gg_trace_mark("scn-s5"); // GGMAX 2.61
 	}
 	// GGMAX 1.85: declared here because Scene::Clear precedes the tracer below and needs it.
 	std::atomic<unsigned int> gg_hairkill_clear{ 0 };   // hair components wiped by Scene::Clear

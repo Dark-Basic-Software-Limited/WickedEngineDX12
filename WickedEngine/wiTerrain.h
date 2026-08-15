@@ -58,6 +58,27 @@ namespace wi::terrain
 	extern std::atomic<uint64_t> gg_genprof_physics_us;
 	extern std::atomic<uint64_t> gg_genprof_total_us;
 	extern std::atomic<uint64_t> gg_genprof_chunks;
+
+	// GGMAX 2.61 diagnostic: MAIN-THREAD VT/texture allocation attribution (the generator-fill
+	// wall — 32 gaps >100ms per fill, all in `update`, with texCreates bursts). Cumulative us.
+	// updatecpu = whole UpdateVirtualTexturesCPU (includes wait0 + everything below);
+	// wait0     = the entry Wait(virtual_texture_ctx) on last frame's async VT job;
+	// vtinit    = VirtualTexture::init calls (INCLUDES any nested resinit);
+	// resinit   = Residency::init pool misses (~10 device creates, 4 carry init data = 4
+	//             CPU-BLOCKING copy-queue round trips each — see CopyAllocator::submit);
+	// regionmain= the "last minute" main-thread CreateChunkRegionTexture fallback actually
+	//             creating textures (normally a gen-thread job; nonzero events = a re-create
+	//             vector such as blendmap layer-count changes). Read via harness VT_PROF.
+	extern std::atomic<uint64_t> gg_vtprof_updatecpu_us;
+	extern std::atomic<uint64_t> gg_vtprof_updatecpu_calls;
+	extern std::atomic<uint64_t> gg_vtprof_updatecpu_max_us;
+	extern std::atomic<uint64_t> gg_vtprof_wait0_us;
+	extern std::atomic<uint64_t> gg_vtprof_vtinit_us;
+	extern std::atomic<uint64_t> gg_vtprof_vtinit_events;
+	extern std::atomic<uint64_t> gg_vtprof_resinit_us;
+	extern std::atomic<uint64_t> gg_vtprof_resinit_events;
+	extern std::atomic<uint64_t> gg_vtprof_regionmain_us;
+	extern std::atomic<uint64_t> gg_vtprof_regionmain_events;
 }
 
 namespace std

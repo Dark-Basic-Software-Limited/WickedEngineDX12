@@ -57,6 +57,18 @@ namespace wi::terrain
 	std::atomic<uint64_t> gg_genprof_total_us{ 0 };
 	std::atomic<uint64_t> gg_genprof_chunks{ 0 };
 
+	// GGMAX 2.61: main-thread VT/texture allocation attribution (see wiTerrain.h)
+	std::atomic<uint64_t> gg_vtprof_updatecpu_us{ 0 };
+	std::atomic<uint64_t> gg_vtprof_updatecpu_calls{ 0 };
+	std::atomic<uint64_t> gg_vtprof_updatecpu_max_us{ 0 };
+	std::atomic<uint64_t> gg_vtprof_wait0_us{ 0 };
+	std::atomic<uint64_t> gg_vtprof_vtinit_us{ 0 };
+	std::atomic<uint64_t> gg_vtprof_vtinit_events{ 0 };
+	std::atomic<uint64_t> gg_vtprof_resinit_us{ 0 };
+	std::atomic<uint64_t> gg_vtprof_resinit_events{ 0 };
+	std::atomic<uint64_t> gg_vtprof_regionmain_us{ 0 };
+	std::atomic<uint64_t> gg_vtprof_regionmain_events{ 0 };
+
 	struct ChunkIndices
 	{
 		wi::vector<uint32_t> indices;
@@ -240,6 +252,7 @@ namespace wi::terrain
 
 	void VirtualTextureAtlas::Residency::init(uint32_t resolution)
 	{
+		wi::Timer gg_t_resinit; // GGMAX 2.61: pool-miss cost (~10 device creates, 4 blocking uploads)
 		this->resolution = resolution;
 		GraphicsDevice* device = GetDevice();
 
@@ -348,6 +361,8 @@ namespace wi::terrain
 				}
 			}
 		}
+		gg_vtprof_resinit_us.fetch_add(uint64_t(gg_t_resinit.elapsed_milliseconds() * 1000.0)); // GGMAX 2.61
+		gg_vtprof_resinit_events.fetch_add(1);
 	}
 	void VirtualTextureAtlas::Residency::reset()
 	{
@@ -419,6 +434,7 @@ namespace wi::terrain
 
 	void VirtualTexture::init(VirtualTextureAtlas& atlas, uint resolution)
 	{
+		wi::Timer gg_t_vtinit; // GGMAX 2.61 (includes any nested Residency::init pool miss)
 		this->resolution = resolution;
 		gg_page_dirty = true; // GGMAX 1.33: fresh mapping — must upload on first job run
 
@@ -482,6 +498,8 @@ namespace wi::terrain
 				request.y = 0;
 			}
 		}
+		gg_vtprof_vtinit_us.fetch_add(uint64_t(gg_t_vtinit.elapsed_milliseconds() * 1000.0)); // GGMAX 2.61
+		gg_vtprof_vtinit_events.fetch_add(1);
 	}
 
 	Terrain::Terrain()
@@ -674,6 +692,7 @@ namespace wi::terrain
 	{
 		if (wi::jobsystem::IsBusy(generator->workload))
 			return; // updating can't run while generation is running. Note: we could cancel here, but it could take long until cancel request is fulfilled (happened with physics mesh creations)
+		wi::profiler::gg_trace_mark("tg-begin"); // GGMAX 2.61 gap decomposition
 
 		bool restart_generation = false;
 		if (!IsGenerationStarted())
@@ -799,6 +818,7 @@ namespace wi::terrain
 
 		// What was generated, will be merged in to the main scene
 		scene->MergeFastInternal(generator->scene);
+		wi::profiler::gg_trace_mark("tg-merge"); // GGMAX 2.61 gap decomposition (fires per caller: S1 + bridge)
 
 		// GGMAX: everything the (now idle) generator produced is live in the main scene —
 		// lift the merge_pending flags so mesh-baking consumers may process these chunks
@@ -929,7 +949,14 @@ namespace wi::terrain
 				{
 					chunk_mesh->tessellationFactor = 0;
 				}
-				if (!chunk_mesh->bvh.IsValid())
+				// GGMAX 2.61: this is a HEAL — any chunk born without a BVH gets a SYNCHRONOUS
+				// main-thread build here. It silently defeated the 2.58 generator skip: the 8.2
+				// ms/chunk build didn't disappear, it moved from the generation thread (parallel)
+				// to THIS loop (serialized into frames — the 400-550ms tg-chunkloop gap frames,
+				// ~6s of a generator fill). While the generator owns the screen, chunks are MEANT
+				// to be BVH-less (drag picks brute-force; the exit wipe regenerates WITH BVHs), so
+				// the heal honors the same flag. Every other mode: unchanged.
+				if (!gg_generation_skip_bvh && !chunk_mesh->bvh.IsValid())
 				{
 					chunk_mesh->SetBVHEnabled(true);
 				}
@@ -1051,6 +1078,7 @@ namespace wi::terrain
 
 			it++;
 		}
+		wi::profiler::gg_trace_mark("tg-chunkloop"); // GGMAX 2.61
 
 		if (virtual_texture_any)
 		{
@@ -1060,6 +1088,7 @@ namespace wi::terrain
 		{
 			virtual_textures_in_use.clear();
 		}
+		wi::profiler::gg_trace_mark("tg-vtcpu"); // GGMAX 2.61
 
 		const uint64_t required_chunk_buffer_size = sizeof(ShaderTerrainChunk) * (chunk_buffer_range * 2 + 1) * (chunk_buffer_range * 2 + 1);
 		if (chunk_buffer.desc.size < required_chunk_buffer_size)
@@ -1697,6 +1726,7 @@ namespace wi::terrain
 
 			});
 
+		wi::profiler::gg_trace_mark("tg-kick"); // GGMAX 2.61
 	}
 
 	void Terrain::Generation_Cancel()
@@ -1760,7 +1790,9 @@ namespace wi::terrain
 
 	void Terrain::UpdateVirtualTexturesCPU()
 	{
+		wi::Timer gg_t_updcpu; // GGMAX 2.61: whole main-thread body (schedules the async job at the end)
 		wi::jobsystem::Wait(virtual_texture_ctx);
+		gg_vtprof_wait0_us.fetch_add(uint64_t(gg_t_updcpu.elapsed_milliseconds() * 1000.0)); // GGMAX 2.61: entry wait on last frame's VT job
 		virtual_texture_ctx.priority = wi::jobsystem::Priority::Low;
 
 		GraphicsDevice* device = GetDevice();
@@ -1823,7 +1855,25 @@ namespace wi::terrain
 			material->sampler_descriptor = device->GetDescriptorIndex(&sampler);
 
 			// This should have been created on generation thread, but if not (serialized), create it last minute:
-			CreateChunkRegionTexture(chunk_data);
+			{
+				// GGMAX 2.61: detect + time when this "last minute" path ACTUALLY creates textures on
+				// the main thread (mirror of the function's own guards; a no-op call costs nothing).
+				const uint32_t gg_req_layers = uint32_t(chunk_data.blendmap_layers.size() + chunk_data.spline_blendmap_layers.size());
+				const bool gg_will_create =
+					(!chunk_data.heightmap.IsValid() && !chunk_data.heightmap_data.empty()) ||
+					(!chunk_data.blendmap.IsValid() || chunk_data.blendmap.desc.array_size != gg_req_layers);
+				if (gg_will_create)
+				{
+					wi::Timer gg_t_regionmain;
+					CreateChunkRegionTexture(chunk_data);
+					gg_vtprof_regionmain_us.fetch_add(uint64_t(gg_t_regionmain.elapsed_milliseconds() * 1000.0));
+					gg_vtprof_regionmain_events.fetch_add(1);
+				}
+				else
+				{
+					CreateChunkRegionTexture(chunk_data);
+				}
+			}
 
 			if (!atlas.IsValid())
 			{
@@ -2365,6 +2415,15 @@ namespace wi::terrain
 			wi::profiler::EndRange(gg_range_pagebuf); // GGMAX 1.32
 			wi::profiler::EndRange(gg_range_total); // GGMAX 1.32
 		});
+
+		// GGMAX 2.61: attribution totals for the whole main-thread body
+		{
+			const uint64_t gg_us = uint64_t(gg_t_updcpu.elapsed_milliseconds() * 1000.0);
+			gg_vtprof_updatecpu_us.fetch_add(gg_us);
+			gg_vtprof_updatecpu_calls.fetch_add(1);
+			uint64_t gg_prev = gg_vtprof_updatecpu_max_us.load();
+			while (gg_us > gg_prev && !gg_vtprof_updatecpu_max_us.compare_exchange_weak(gg_prev, gg_us)) {}
+		}
 	}
 
 	void Terrain::UpdateVirtualTexturesGPU(CommandList cmd) const

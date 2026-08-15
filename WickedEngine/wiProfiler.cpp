@@ -27,6 +27,7 @@ using namespace wi::graphics;
 
 // GGMAX wall-gap tracer: creation counters defined in wiGraphicsDevice_DX12.cpp (global namespace)
 extern std::atomic<unsigned long long> gg_dbg_pso_compiles, gg_dbg_pso_compile_us, gg_dbg_tex_creates;
+extern std::atomic<unsigned long long> gg_dbg_copywait_us, gg_dbg_copywait_events; // GGMAX 2.61: blocking copy-queue waits
 // GGMAX wall-gap tracer: pump aggregates (incremented by the game's main.cpp message loop)
 std::atomic<unsigned long long> gg_dbg_pump_dispatches{ 0 };
 std::atomic<unsigned long long> gg_dbg_pump_us{ 0 };
@@ -79,6 +80,7 @@ namespace wi::profiler
 	static unsigned long long gg_trace_prev_begin_us = 0;
 	static unsigned long long gg_trace_pso_snap = 0, gg_trace_pso_us_snap = 0, gg_trace_tex_snap = 0;
 	static unsigned long long gg_trace_pump_snap = 0, gg_trace_pump_us_snap = 0;
+	static unsigned long long gg_trace_copywait_snap = 0, gg_trace_copywait_us_snap = 0; // GGMAX 2.61
 	static int gg_trace_gaps_written = 0;
 	std::atomic<unsigned long long> gg_trace_gap_count{ 0 };   // read by harness GAPS: line
 	std::atomic<unsigned long long> gg_trace_gap_last_ms{ 0 };
@@ -191,10 +193,12 @@ namespace wi::profiler
 							prev = gg_trace_marks[i].us;
 						}
 						fprintf(f, "  %-26s +%9.2f ms\n", "[outside-Run: pump/etc]", (now - prev) / 1000.0);
-						fprintf(f, "  psoCompiles=+%llu psoCompileMs=+%.1f texCreates=+%llu pumpDispatches=+%llu pumpMs=+%.1f\n\n",
+						fprintf(f, "  psoCompiles=+%llu psoCompileMs=+%.1f texCreates=+%llu copyWaits=+%llu copyWaitMs=+%.1f pumpDispatches=+%llu pumpMs=+%.1f\n\n",
 							gg_dbg_pso_compiles.load() - gg_trace_pso_snap,
 							(gg_dbg_pso_compile_us.load() - gg_trace_pso_us_snap) / 1000.0,
 							gg_dbg_tex_creates.load() - gg_trace_tex_snap,
+							gg_dbg_copywait_events.load() - gg_trace_copywait_snap,
+							(gg_dbg_copywait_us.load() - gg_trace_copywait_us_snap) / 1000.0,
 							gg_dbg_pump_dispatches.load() - gg_trace_pump_snap,
 							(gg_dbg_pump_us.load() - gg_trace_pump_us_snap) / 1000.0);
 						fclose(f);
@@ -207,6 +211,8 @@ namespace wi::profiler
 		gg_trace_pso_snap = gg_dbg_pso_compiles.load();
 		gg_trace_pso_us_snap = gg_dbg_pso_compile_us.load();
 		gg_trace_tex_snap = gg_dbg_tex_creates.load();
+		gg_trace_copywait_snap = gg_dbg_copywait_events.load(); // GGMAX 2.61
+		gg_trace_copywait_us_snap = gg_dbg_copywait_us.load();
 		gg_trace_pump_snap = gg_dbg_pump_dispatches.load();
 		gg_trace_pump_us_snap = gg_dbg_pump_us.load();
 	}

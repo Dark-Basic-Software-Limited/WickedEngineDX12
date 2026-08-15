@@ -45,6 +45,12 @@ std::atomic<unsigned long long> gg_dbg_pso_compile_us{ 0 };
 // stall. 57 compiles totalling 400 ms is invisible if they are 7 ms each and fatal if one is 300.
 std::atomic<unsigned long long> gg_dbg_pso_compile_max_us{ 0 };
 std::atomic<unsigned long long> gg_dbg_tex_creates{ 0 };
+// GGMAX 2.61: CopyAllocator::submit ends in a null-event SetEventOnCompletion — a CPU-BLOCKING
+// wait until the copy queue drains that submission. Every CreateTexture/CreateBuffer WITH init
+// data pays one. Bursts of resource creation (VT residency init, chunk region textures) therefore
+// serialize the calling thread against the copy queue — these two name that cost.
+std::atomic<unsigned long long> gg_dbg_copywait_us{ 0 };
+std::atomic<unsigned long long> gg_dbg_copywait_events{ 0 };
 std::atomic<unsigned long long> gg_dbg_pso_creates{ 0 }; // GGMAX 1.70: pipeline states created (each costs driver-side video memory the resource census cannot see)
 
 // GGMAX 1.77: the other two things that consume video memory without ever appearing in the
@@ -2186,7 +2192,14 @@ std::mutex queue_locker;
 			dx12_check(queue->Signal(cmd.fence.Get(), 1));
 		}
 
-		dx12_check(cmd.fence->SetEventOnCompletion(1, nullptr));
+		{
+			// GGMAX 2.61: null event handle = BLOCK this thread until the copy queue reaches the
+			// fence. Measured because bursts of with-initdata resource creates stack these waits.
+			wi::Timer gg_t_copywait;
+			dx12_check(cmd.fence->SetEventOnCompletion(1, nullptr));
+			::gg_dbg_copywait_us.fetch_add((unsigned long long)(gg_t_copywait.elapsed_milliseconds() * 1000.0), std::memory_order_relaxed);
+			::gg_dbg_copywait_events.fetch_add(1, std::memory_order_relaxed);
+		}
 
 		std::scoped_lock lock(locker);
 		cmd.last_used_frame = device->FRAMECOUNT; // GGMAX: stamp for trim()

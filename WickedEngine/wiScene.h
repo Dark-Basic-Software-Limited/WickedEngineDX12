@@ -21,6 +21,15 @@
 
 namespace wi::scene
 {
+
+	// GGMAX 2.60 diagnostic: MergeFastInternal cost attribution (see wiScene.cpp)
+	struct GGMergeProfEntry { char name[48]; uint64_t us; };
+	extern uint64_t gg_mergeprof_total_us;
+	extern uint64_t gg_mergeprof_calls;
+	extern uint64_t gg_mergeprof_max_us;
+	extern GGMergeProfEntry gg_mergeprof_entries[24];
+	extern int gg_mergeprof_entry_count;
+
 	// GGMAX 1.81: Scene::Update caller tracer readout (recorded in wiScene.cpp). Returns how
 	// many records were written, oldest first. Symbolized game-side by harness DUMP_SCENEUPDATE.
 	unsigned int GG_GetSceneUpdateCalls(const void** out_ret, const void** out_scene,

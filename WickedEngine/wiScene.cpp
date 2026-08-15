@@ -1153,14 +1153,45 @@ namespace wi::scene
 		topdown_hierarchy.clear();
 		gg_hier_mutation_counter.fetch_add(1, std::memory_order_relaxed); // GGMAX 1.36b
 	}
+	// GGMAX 2.60 diagnostic: merge cost attribution (main-thread only; the terrain generator's
+	// output merges through here and produced ~490ms Scene-S1 frames). Dumped by MERGE_PROF.
+	uint64_t gg_mergeprof_total_us = 0;
+	uint64_t gg_mergeprof_calls = 0;
+	uint64_t gg_mergeprof_max_us = 0;
+	GGMergeProfEntry gg_mergeprof_entries[24] = {};
+	int gg_mergeprof_entry_count = 0;
+
 	void Scene::MergeFastInternal(Scene& other)
 	{
+		wi::Timer gg_t_merge; // GGMAX 2.60
 		for (auto& entry : componentLibrary.entries)
 		{
 			if (other.componentLibrary.entries.count(entry.first) == 0)
 				continue;
+			wi::Timer gg_t_entry; // GGMAX 2.60: per-manager attribution
 			entry.second.component_manager->Merge(*other.componentLibrary.entries[entry.first].component_manager);
+			const uint64_t gg_us = uint64_t(gg_t_entry.elapsed_milliseconds() * 1000.0);
+			if (gg_us > 0)
+			{
+				int gg_slot = -1;
+				for (int i = 0; i < gg_mergeprof_entry_count; ++i)
+				{
+					if (entry.first == gg_mergeprof_entries[i].name) { gg_slot = i; break; }
+				}
+				if (gg_slot < 0 && gg_mergeprof_entry_count < 24)
+				{
+					gg_slot = gg_mergeprof_entry_count++;
+					size_t gg_n = entry.first.size(); if (gg_n > 47) gg_n = 47;
+					memcpy(gg_mergeprof_entries[gg_slot].name, entry.first.c_str(), gg_n);
+					gg_mergeprof_entries[gg_slot].name[gg_n] = 0;
+				}
+				if (gg_slot >= 0) gg_mergeprof_entries[gg_slot].us += gg_us;
+			}
 		}
+		const uint64_t gg_total = uint64_t(gg_t_merge.elapsed_milliseconds() * 1000.0);
+		gg_mergeprof_total_us += gg_total;
+		gg_mergeprof_calls++;
+		if (gg_total > gg_mergeprof_max_us) gg_mergeprof_max_us = gg_total;
 		gg_hier_mutation_counter.fetch_add(1, std::memory_order_relaxed); // GGMAX 1.36b: bulk hierarchy adds
 	}
 	void Scene::Merge(Scene& other)

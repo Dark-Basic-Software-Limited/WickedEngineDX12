@@ -35,6 +35,12 @@ namespace wi::terrain
 	// the editor/test game always regenerate with BVHs.
 	bool gg_generation_skip_bvh = false;
 
+	// GGMAX 2.60: skip grass seeding/creation at chunk generation. The Terrain Generator
+	// sets it (user request): grass is invisible at generator view distances, it carries a
+	// known bug there, and the seeding costs ~0.3 ms/chunk. Generator chunks are wiped on
+	// exit, so the editor/test game always regenerate WITH grass.
+	bool gg_generation_skip_grass = false;
+
 	// GGMAX 2.58 diagnostic: per-phase chunk-generation cost accumulators (microseconds,
 	// cumulative since launch). Answers "what takes the most time when generating a chunk";
 	// dumped by the game's TERRAIN_GENPROF harness command. renderdata is measured inside
@@ -1348,7 +1354,7 @@ namespace wi::terrain
 						}
 
 						const float grass_noise_frequency = 0.1f;
-						const float grass_noise = perlin_noise.compute(vertex_pos.x * grass_noise_frequency, vertex_pos.y * grass_noise_frequency, vertex_pos.z * grass_noise_frequency) * 0.5f + 0.5f;
+						const float grass_noise = gg_generation_skip_grass ? 0.0f : (perlin_noise.compute(vertex_pos.x * grass_noise_frequency, vertex_pos.y * grass_noise_frequency, vertex_pos.z * grass_noise_frequency) * 0.5f + 0.5f); // GGMAX 2.60
 						const float region_grass = std::pow(materialBlendWeights.x * (1 - materialBlendWeights.w), 8.0f) * grass_noise * (1 - saturate(spline_factor));
 						if (region_grass > 0.1f)
 						{
@@ -1386,7 +1392,7 @@ namespace wi::terrain
 					});
 
 					// If there were any vertices in this chunk that could be valid for grass, store the grass particle system:
-					if (grass_valid_vertex_count.load() > 0)
+					if (!gg_generation_skip_grass && grass_valid_vertex_count.load() > 0) // GGMAX 2.60
 					{
 						wi::Timer gg_t_grass; // GGMAX 2.58
 						chunk_data.grass = std::move(grass); // the grass will be added to the scene later, only when the chunk is close to the camera (center chunk's neighbors)

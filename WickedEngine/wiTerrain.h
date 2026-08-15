@@ -44,6 +44,7 @@ namespace wi::terrain
 	extern float gg_generation_center_override_z;
 	extern bool  gg_generation_center_override_enabled;
 	extern bool gg_generation_skip_bvh; // GGMAX 2.58: generator-only, see wiTerrain.cpp
+	extern bool gg_generation_skip_grass; // GGMAX 2.60: generator-only, see wiTerrain.cpp
 
 	// GGMAX 2.58 diagnostic: per-phase chunk-generation cost accumulators (us, cumulative).
 	extern std::atomic<uint64_t> gg_genprof_heights_us;

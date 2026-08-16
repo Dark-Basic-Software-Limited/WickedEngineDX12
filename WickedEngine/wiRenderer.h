@@ -1219,6 +1219,10 @@ namespace wi::renderer
 	bool GetToDrawDebugPartitionTree();
 	bool GetToDrawDebugEnvProbes();
 	void SetToDrawDebugEnvProbes(bool value);
+	// GGMAX 2.75 (#155): scale for the debug env-probe mirror spheres (default 1 = stock unit
+	// sphere). The game sets this so a picked probe marker shows a LARGE accurate preview of
+	// the captured cube (the legacy %probe marker ball's own PBR shading is misleading).
+	void SetDebugEnvProbeSphereScale(float value);
 	void SetToDrawDebugEmitters(bool param);
 	bool GetToDrawDebugEmitters();
 	void SetToDrawDebugForceFields(bool param);

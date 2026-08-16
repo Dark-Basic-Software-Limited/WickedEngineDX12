@@ -9757,7 +9757,11 @@ void DrawDebugWorld(
 		{
 			const EnvironmentProbeComponent& probe = scene.probes[i];
 
-			XMStoreFloat4x4(&sb.g_xTransform, XMMatrixTranslationFromVector(XMLoadFloat3(&probe.position)));
+			// GGMAX 2.75 (#155): game-adjustable sphere size so a picked probe marker gets a
+			// LARGE accurate mirror preview that fully encloses the legacy %probe marker ball
+			extern float gg_debugprobe_sphere_scale;
+			const float dbgscale = gg_debugprobe_sphere_scale;
+			XMStoreFloat4x4(&sb.g_xTransform, XMMatrixScaling(dbgscale, dbgscale, dbgscale) * XMMatrixTranslationFromVector(XMLoadFloat3(&probe.position)));
 			device->BindDynamicConstantBuffer(sb, CB_GETBINDSLOT(MiscCB), cmd);
 
 			device->BindResource(&probe.texture, 0, cmd);
@@ -20575,6 +20579,9 @@ void SetToDrawDebugPartitionTree(bool param) { debugPartitionTree = param; }
 bool GetToDrawDebugPartitionTree() { return debugPartitionTree; }
 bool GetToDrawDebugEnvProbes() { return debugEnvProbes; }
 void SetToDrawDebugEnvProbes(bool value) { debugEnvProbes = value; }
+// GGMAX 2.75 (#155): see wiRenderer.h — game-set scale for the debug probe mirror spheres
+float gg_debugprobe_sphere_scale = 1.0f;
+void SetDebugEnvProbeSphereScale(float value) { gg_debugprobe_sphere_scale = value; }
 void SetToDrawDebugEmitters(bool param) { debugEmitters = param; }
 bool GetToDrawDebugEmitters() { return debugEmitters; }
 void SetToDrawDebugForceFields(bool param) { debugForceFields = param; }

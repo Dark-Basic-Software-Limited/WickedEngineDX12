@@ -80,6 +80,7 @@ namespace wi::profiler
 	void gg_trace_mark(const char* name); // main thread only
 	void gg_trace_mark_id(const char* prefix, unsigned int id); // formatted "<prefix>_<hex id>" mark
 	unsigned long long gg_trace_now_us(void); // tracer clock, for caller-side gating
+	void gg_trace_file_enable(bool enable); // GGMAX 2.71: false = counters stay live, no gap_trace.txt file
 
 	// GGMAX 1.82: HITCH HISTOGRAM — every frame bucketed, not just the >100ms ones the tracer
 	// above catches. Built to measure the cost of lazy object PSOs (first-use compile stalls),

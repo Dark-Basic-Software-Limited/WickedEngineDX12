@@ -35,6 +35,10 @@ namespace wi::allocator
 	// the loud mode a graceful reject and the silent mode a named log line in alloc_tripwire.txt.
 	inline bool gg_alloc_tripwire = true;              // live-range overlap tracking + logging
 	inline uint32_t gg_deferred_extra_hold = 8;        // extra frames before a freed range is reusable
+	// GGMAX 2.71: gates ONLY the alloc_tripwire.txt file (the per-op ledger below) — overlap
+	// tracking and the graceful reject stay live. Standalone exports run producelogfiles=0
+	// and the game clears this at startup (GGSetDiagTraceFiles) so players' folders stay clean.
+	inline bool gg_alloc_tripwire_file = true;
 #ifdef _WIN32
 	extern "C" __declspec(dllimport) unsigned long __stdcall GetCurrentThreadId(void);
 	inline unsigned long gg_tripwire_tid() { return GetCurrentThreadId(); }
@@ -43,6 +47,7 @@ namespace wi::allocator
 #endif
 	inline void gg_tripwire_log(const char* fmt, ...)
 	{
+		if (!gg_alloc_tripwire_file) return;
 		// GGMAX 1.46c: serialized + persistent-handle logging. The per-call fopen-append version
 		// TORE 982 lines under concurrent multi-thread traffic in organic capture #2 — and the
 		// poisoning op was almost certainly among them. Mutex + one handle + per-line sequence

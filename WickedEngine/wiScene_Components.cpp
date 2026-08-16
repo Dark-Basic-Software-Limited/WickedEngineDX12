@@ -12,6 +12,11 @@
 #include "wiUnorderedMap.h"
 #include "wiLua.h"
 
+// GGMAX 2.71: false = the garbage-decompose guard still heals, but writes no
+// applytransform_garbage.txt (fires on stock content via WickedCall_LoadNode shear;
+// standalones run producelogfiles=0; set via GGSetDiagTraceFiles)
+bool gg_applytransform_garbage_file = true;
+
 #include "Utility/mikktspace.h"
 #include "Utility/meshoptimizer/meshoptimizer.h"
 
@@ -173,7 +178,7 @@ namespace wi::scene
 			const uint32_t evt = gg_garbage_events.fetch_add(1);
 			if (evt == 64)
 			{
-				FILE* fs = fopen("applytransform_garbage.txt", "a");
+				FILE* fs = gg_applytransform_garbage_file ? fopen("applytransform_garbage.txt", "a") : nullptr;
 				if (fs) { fprintf(fs, "SUPPRESSED: further events this session are counted but not logged\n"); fclose(fs); }
 			}
 			if (evt >= 64)
@@ -182,7 +187,7 @@ namespace wi::scene
 			}
 			void* stack[24];
 			unsigned short frames = RtlCaptureStackBackTrace(0, 24, stack, nullptr);
-			FILE* f = fopen("applytransform_garbage.txt", "a");
+			FILE* f = gg_applytransform_garbage_file ? fopen("applytransform_garbage.txt", "a") : nullptr;
 			if (f)
 			{
 				fprintf(f, "GARBAGE this=%p rot=(%g,%g,%g,%g) scl=(%g,%g,%g) trn=(%g,%g,%g)\n  world=[%g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g]\n  stack:",

@@ -166,6 +166,14 @@ namespace wi::profiler
 	{
 		return gg_trace_qpc_us();
 	}
+	// GGMAX 2.71: false = keep every counter and the hitch histogram live (they feed
+	// GET_PERF_DATA), but write no gap_trace.txt — standalones run producelogfiles=0
+	// and must not drop trace files where players see them.
+	static bool gg_trace_file_enabled = true;
+	void gg_trace_file_enable(bool enable)
+	{
+		gg_trace_file_enabled = enable;
+	}
 	static void gg_trace_frame_boundary(void)
 	{
 		const unsigned long long now = gg_trace_qpc_us();
@@ -177,7 +185,7 @@ namespace wi::profiler
 			{
 				gg_trace_gap_count.fetch_add(1, std::memory_order_relaxed);
 				gg_trace_gap_last_ms = dt / 1000;
-				if (gg_trace_gaps_written < 300) // file-size backstop
+				if (gg_trace_file_enabled && gg_trace_gaps_written < 300) // file gate (2.71) + size backstop
 				{
 					gg_trace_gaps_written++;
 					FILE* f = nullptr;

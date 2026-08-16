@@ -14,6 +14,11 @@
 #include "wiAllocator.h"
 #include "wiProfiler.h"
 
+// GGMAX 2.71: false = the anim-rotation sanitizer still HEALS, but writes no
+// anim_garbage.txt (fires on stock content — parrot load-time shear — so standalones
+// with producelogfiles=0 must not drop it in players' folders; set via GGSetDiagTraceFiles)
+bool gg_anim_garbage_file = true;
+
 #include <mutex> // GGMAX DIAG: corrupt-geometry tripwire
 #include <cmath> // GGMAX DIAG: std::isfinite
 #include <algorithm> // GGMAX 1.68: std::sort for front-to-back ray candidates
@@ -3077,7 +3082,7 @@ namespace wi::scene
 											XMFLOAT4 gga, ggb;
 											XMStoreFloat4(&gga, aR);
 											XMStoreFloat4(&ggb, bR);
-											FILE* ggf = fopen("anim_garbage.txt", "a");
+											FILE* ggf = gg_anim_garbage_file ? fopen("anim_garbage.txt", "a") : nullptr;
 											if (ggf)
 											{
 												fprintf(ggf, "ANIMROT tgt=%u out=(%g,%g,%g,%g) aR=(%g,%g,%g,%g) bR=(%g,%g,%g,%g) t=%g keyL=%d keyR=%d "
@@ -3270,7 +3275,7 @@ namespace wi::scene
 										XMFLOAT4 gga2, ggb2;
 										XMStoreFloat4(&gga2, aR);
 										XMStoreFloat4(&ggb2, bR);
-										FILE* ggf2 = fopen("anim_garbage.txt", "a");
+										FILE* ggf2 = gg_anim_garbage_file ? fopen("anim_garbage.txt", "a") : nullptr;
 										if (ggf2)
 										{
 											fprintf(ggf2, "ANIMROT2 tgt=%u path=%d preframe=%d out=(%g,%g,%g,%g) aR=(%g,%g,%g,%g) bR=(%g,%g,%g,%g) t=%g "

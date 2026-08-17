@@ -34,6 +34,14 @@ struct alignas(16) ShaderScene
 	// "Global Probe Brightness" slider (EnvironmentProbeComponent::SetBrightness was removed).
 	float gg_envprobe_brightness;
 
+	// GGMAX 2.79 (#157 debug rig): ENV-ONLY object output. Consumed at the end of
+	// objectHF.hlsli — see the comment there. A FULL 16-byte row on purpose: adding a lone
+	// float here would shift `weather` and rely on C++ and HLSL padding agreeing.
+	float gg_envonly;			// 0 = off (stock shading), >0 = output the global env cube only
+	float gg_envonly_mip;		// cube mip to display when on (0 = sharpest)
+	float gg_envonly_pad0;
+	float gg_envonly_pad1;
+
 	ShaderWeather weather;
 
 	struct alignas(16) DDGI

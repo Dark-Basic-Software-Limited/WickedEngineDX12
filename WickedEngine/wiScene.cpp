@@ -45,6 +45,12 @@ namespace wi::scene
 	// "Global Probe Brightness" slider; consumed in lightingHF EnvironmentReflection_Global.
 	float gg_envprobe_brightness = 1.0f;
 
+	// GGMAX 2.79 (#157 debug rig): when gg_envonly > 0 every opaque object outputs ONLY the
+	// global env-probe cube texel along its mirror reflection vector (objectHF.hlsli tail).
+	// Default 0 = stock. Driven by the SET_ENVONLY harness command.
+	float gg_envonly = 0.0f;
+	float gg_envonly_mip = 0.0f;
+
 	// GGMAX 2.15 (2026-08-09): per-system attribution inside Scene::Update.
 	//
 	// WHY THIS EXISTS: the stage ranges (Scene-S1/S2/S4) are the finest attribution normally
@@ -1018,6 +1024,14 @@ namespace wi::scene
 		// GGMAX 1.55: global env-probe brightness knob (see ShaderInterop ShaderScene)
 		extern float gg_envprobe_brightness;
 		shaderscene.gg_envprobe_brightness = gg_envprobe_brightness;
+
+		// GGMAX 2.79 (#157 debug rig): env-only object output (harness SET_ENVONLY)
+		extern float gg_envonly;
+		extern float gg_envonly_mip;
+		shaderscene.gg_envonly = gg_envonly;
+		shaderscene.gg_envonly_mip = gg_envonly_mip;
+		shaderscene.gg_envonly_pad0 = 0;
+		shaderscene.gg_envonly_pad1 = 0;
 
 		shaderscene.impostorInstanceOffset = impostorInstanceOffset;
 		shaderscene.TLAS = device->GetDescriptorIndex(&TLAS, SubresourceType::SRV);

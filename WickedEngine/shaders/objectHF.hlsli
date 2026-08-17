@@ -1229,6 +1229,27 @@ float4 main(PixelInput input, in bool is_frontface : SV_IsFrontFace APPEND_COVER
 
 	color.rgb = mul(saturationMatrix(material.GetSaturation()), color.rgb);
 
+#ifndef ENVMAPRENDERING
+	// GGMAX 2.79 (#157 debug rig): ENV-ONLY. Throw away EVERYTHING this shader just computed
+	// and output the raw GLOBAL env-probe cube texel along the mirror reflection vector, so
+	// what is on screen IS the cube and nothing else: no basecolor/normal/surface/emissive/
+	// occlusion maps, no lightmap, no lights or shadows, no SSAO/SSR/GI/decals, no fog, no
+	// aerial perspective, no saturation, and NOT multiplied by fresnel (surface.F) or by
+	// gg_envprobe_brightness the way EnvironmentReflection_Global does it (lightingHF:705).
+	// Guarded out of ENVMAPRENDERING so a probe capture never photographs the debug output
+	// back into the cube it is displaying.
+	[branch]
+	if (GetScene().gg_envonly > 0 && GetScene().globalprobe >= 0)
+	{
+		TextureCube<half4> gg_envonly_cube = bindless_cubemaps_half4[descriptor_index(GetScene().globalprobe)];
+		uint2 gg_envonly_dim;
+		uint gg_envonly_mipcount;
+		gg_envonly_cube.GetDimensions(0, gg_envonly_dim.x, gg_envonly_dim.y, gg_envonly_mipcount);
+		const half gg_envonly_lod = (half)clamp(GetScene().gg_envonly_mip, 0.0, (float)gg_envonly_mipcount - 1.0);
+		color = half4(gg_envonly_cube.SampleLevel(sampler_linear_clamp, surface.R, gg_envonly_lod).rgb, 1);
+	}
+#endif // ENVMAPRENDERING
+
 	color = saturateMediump(color);
 
 	half alphatest = material.GetAlphaTest() + meshinstance.GetAlphaTest();

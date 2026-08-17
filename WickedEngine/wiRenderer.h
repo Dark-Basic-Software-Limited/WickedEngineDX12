@@ -1228,6 +1228,10 @@ namespace wi::renderer
 	// grew every probe in the level the moment 2.75 made the spheres marker-sized. radius <= 0
 	// restores the stock all-probes behaviour (used by the SET_DEBUGPROBES harness command).
 	void SetDebugEnvProbeFocus(float x, float y, float z, float radius);
+	// GGMAX 2.77 (#157 instrument): append a line per env-probe CAPTURE to Files/probecapture.txt
+	// naming the near/far used and every object within `radius` with the exact keep/skip reason.
+	// Default OFF (zero cost); the SET_PROBECAPTURETRACE harness command drives it.
+	void SetProbeCaptureTrace(int enable, float radius);
 	void SetToDrawDebugEmitters(bool param);
 	bool GetToDrawDebugEmitters();
 	void SetToDrawDebugForceFields(bool param);

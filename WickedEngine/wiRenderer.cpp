@@ -10516,6 +10516,14 @@ void DrawSun(CommandList cmd)
 }
 
 
+// GGMAX 2.77 (#157 instrument): defined near the bottom of this file with the other
+// debug-probe globals. Declared HERE at file scope on purpose — a block-scope `extern`
+// inside the `render_probe` LAMBDA below mangles into the GLOBAL namespace and fails to
+// link (the 2.53 linkage rule, lambda variant; the 2.75 sphere-scale extern gets away with
+// it only because it sits in a plain function body).
+extern int gg_probecapture_trace;
+extern float gg_probecapture_trace_radius;
+
 void RefreshEnvProbes(const Visibility& vis, CommandList cmd)
 {
 	device->EventBegin("EnvironmentProbe Refresh", cmd);
@@ -10827,6 +10835,50 @@ void RefreshEnvProbes(const Visibility& vis, CommandList cmd)
 
 						renderQueue.add(object.mesh_index, uint32_t(i), 0, object.sort_bits, camera_mask);
 					}
+				}
+			}
+
+			// GGMAX 2.77 (#157 instrument): name EXACTLY what went into this capture. Off by
+			// default; SET_PROBECAPTURETRACE turns it on. Prints the near/far the capture
+			// inherited from the MAIN CAMERA (each cube face clips at zNearP, so the volume
+			// hidden around a probe is a CUBE of half-width zNearP — Lee's "sphere cut by a
+			// cube" reading) and every object within the trace radius with the exact reason
+			// it was kept or skipped.
+			if (gg_probecapture_trace != 0)
+			{
+				static uint64_t s_capture_seq = 0;
+				s_capture_seq++;
+				FILE* tf = nullptr;
+				fopen_s(&tf, "probecapture.txt", "a");
+				if (tf != nullptr)
+				{
+					fprintf(tf, "CAPTURE #%llu pos=(%.1f,%.1f,%.1f) res=%u znear=%.3f zfar=%.1f batches=%u\n",
+						(unsigned long long)s_capture_seq, probe.position.x, probe.position.y, probe.position.z,
+						(unsigned)probe.resolution, zNearP, zFarP, (unsigned)renderQueue.batches.size());
+					for (size_t i = 0; i < vis.scene->aabb_objects.size(); ++i)
+					{
+						const AABB& aabb = vis.scene->aabb_objects[i];
+						const XMFLOAT3 c = aabb.getCenter();
+						const float dx = c.x - probe.position.x;
+						const float dy = c.y - probe.position.y;
+						const float dz = c.z - probe.position.z;
+						const float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+						if (dist > gg_probecapture_trace_radius)
+							continue;
+						const ObjectComponent& object = vis.scene->objects[i];
+						Entity oent = vis.scene->objects.GetEntity(i);
+						const NameComponent* nm = vis.scene->names.GetComponent(oent);
+						const bool layerok = (aabb.layerMask & vis.layerMask) && (aabb.layerMask & probe_aabb.layerMask);
+						const bool inSphere = culler.intersects(aabb);
+						const bool rend = object.IsRenderable();
+						const bool norefl = object.IsNotVisibleInReflections();
+						fprintf(tf, "   d=%8.1f r=%7.1f ent=%llu layer=%d sphere=%d rend=%d norefl=%d %-10s name='%s'\n",
+							dist, aabb.getRadius(), (unsigned long long)oent,
+							layerok ? 1 : 0, inSphere ? 1 : 0, rend ? 1 : 0, norefl ? 1 : 0,
+							(layerok && inSphere && rend && !norefl) ? "RENDERED" : "skipped",
+							(nm != nullptr) ? nm->name.c_str() : "(unnamed)");
+					}
+					fclose(tf);
 				}
 			}
 
@@ -20622,6 +20674,14 @@ float gg_debugprobe_focus_x = 0.0f;
 float gg_debugprobe_focus_y = 0.0f;
 float gg_debugprobe_focus_z = 0.0f;
 float gg_debugprobe_focus_radius = 0.0f;
+// GGMAX 2.77 (#157 instrument): see the RefreshEnvProbes trace block
+int gg_probecapture_trace = 0;
+float gg_probecapture_trace_radius = 400.0f;
+void SetProbeCaptureTrace(int enable, float radius)
+{
+	gg_probecapture_trace = enable;
+	if (radius > 0.0f) gg_probecapture_trace_radius = radius;
+}
 void SetDebugEnvProbeFocus(float x, float y, float z, float radius)
 {
 	gg_debugprobe_focus_x = x;

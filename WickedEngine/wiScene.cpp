@@ -51,6 +51,13 @@ namespace wi::scene
 	float gg_envonly = 0.0f;
 	float gg_envonly_mip = 0.0f;
 
+	// GGMAX 2.80 (#157): when gg_envsolid_on != 0 every read of the GLOBAL env-probe cube
+	// returns this flat colour instead of sampling the texture (lightingHF.hlsli).
+	float gg_envsolid_on = 0.0f;
+	float gg_envsolid_r = 1.0f;
+	float gg_envsolid_g = 0.0f;
+	float gg_envsolid_b = 1.0f;
+
 	// GGMAX 2.15 (2026-08-09): per-system attribution inside Scene::Update.
 	//
 	// WHY THIS EXISTS: the stage ranges (Scene-S1/S2/S4) are the finest attribution normally
@@ -1032,6 +1039,10 @@ namespace wi::scene
 		shaderscene.gg_envonly_mip = gg_envonly_mip;
 		shaderscene.gg_envonly_pad0 = 0;
 		shaderscene.gg_envonly_pad1 = 0;
+
+		// GGMAX 2.80 (#157 debug rig): solid-colour global env cube (harness SET_ENVSOLID)
+		extern float gg_envsolid_on, gg_envsolid_r, gg_envsolid_g, gg_envsolid_b;
+		shaderscene.gg_envsolid = XMFLOAT4(gg_envsolid_r, gg_envsolid_g, gg_envsolid_b, gg_envsolid_on);
 
 		shaderscene.impostorInstanceOffset = impostorInstanceOffset;
 		shaderscene.TLAS = device->GetDescriptorIndex(&TLAS, SubresourceType::SRV);

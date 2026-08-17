@@ -1271,7 +1271,11 @@ float4 main(PixelInput input, in bool is_frontface : SV_IsFrontFace APPEND_COVER
 			gg_envonly_cube.GetDimensions(0, gg_envonly_dim.x, gg_envonly_dim.y, gg_envonly_mipcount);
 			const half gg_envonly_lod = (half)clamp(GetScene().gg_envonly_mip, 0.0, (float)gg_envonly_mipcount - 1.0);
 			const half3 gg_envonly_dir = (gg_envonly_mode == 2) ? gg_envonly_Rgeo : surface.R;
-			half3 gg_envonly_rgb = gg_envonly_cube.SampleLevel(sampler_linear_clamp, gg_envonly_dir, gg_envonly_lod).rgb;
+			// 2.80: if the cube has been replaced by a solid colour, this rig shows that too —
+			// the two debug paths must never disagree about what the cube contains.
+			half3 gg_envonly_rgb = (GetScene().gg_envsolid.w > 0)
+				? (half3)GetScene().gg_envsolid.rgb
+				: gg_envonly_cube.SampleLevel(sampler_linear_clamp, gg_envonly_dir, gg_envonly_lod).rgb;
 
 			// GGMAX 2.79b: the LADDER — cube plus exactly ONE more source at a time, so each
 			// contributor can be added and judged on its own. 9 and 10 show a source ALONE.

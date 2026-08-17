@@ -656,7 +656,13 @@ inline half3 GetAmbient(in float3 N)
 #else
 
 	[branch]
-	if (GetScene().globalprobe >= 0)
+	if (GetScene().gg_envsolid.w > 0)
+	{
+		// GGMAX 2.80 (#157): SOLID-COLOUR global cube. Read #2 of 2 — the ambient term, which
+		// samples the SAME cube at `mipcount` (clamped to the last mip, i.e. one average colour).
+		ambient = (half3)GetScene().gg_envsolid.rgb;
+	}
+	else if (GetScene().globalprobe >= 0)
 	{
 		TextureCube<half4> cubemap = bindless_cubemaps_half4[descriptor_index(GetScene().globalprobe)];
 		uint2 dim;
@@ -709,6 +715,13 @@ inline half3 EnvironmentReflection_Global(in Surface surface)
 	half mipcount16f = half(mipcount);
 
 	half MIP = surface.roughness * mipcount16f;
+	// GGMAX 2.80 (#157): SOLID-COLOUR global cube. Read #1 of 2 — the specular env reflection.
+	// With this on, nothing on screen can be carrying the cube's CONTENT, so any structure that
+	// survives is being produced somewhere after the texture read.
+	[branch]
+	if (GetScene().gg_envsolid.w > 0)
+		envColor = (half3)GetScene().gg_envsolid.rgb * surface.F;
+	else
 	envColor = cubemap.SampleLevel(sampler_linear_clamp, surface.R, MIP).rgb * surface.F;
 
 #ifdef SHEEN
@@ -757,7 +770,14 @@ inline half4 EnvironmentReflection_Local(in TextureCube<half4> cubemap, in Surfa
 
 	// Sample cubemap texture:
 	half MIP = surface.roughness * mipcount16f;
-	half3 envColor = cubemap.SampleLevel(sampler_linear_clamp, R_parallaxCorrected, MIP).rgb * surface.F;
+	// GGMAX 2.80 (#157): SOLID-COLOUR override, read #3. This is the PARALLAX-CORRECTED LOCAL
+	// path — and the global probe reaches it too: probes[0]'s descriptor is written into the
+	// probe entity array (wiRenderer.cpp:5688), and GGTerrain gives it range 50000, so its OBB
+	// covers the whole level and this path wins over the global fallback for most pixels.
+	// Missing it would leave the cube's content on screen and make the whole test meaningless.
+	half3 envColor = (GetScene().gg_envsolid.w > 0)
+		? (half3)GetScene().gg_envsolid.rgb * surface.F
+		: cubemap.SampleLevel(sampler_linear_clamp, R_parallaxCorrected, MIP).rgb * surface.F;
 
 #ifdef SHEEN
 	envColor *= surface.sheen.albedoScaling;

@@ -8805,6 +8805,10 @@ void DrawScene(
 
 }
 
+// GGMAX 2.78 (#157): defined with the other debug-probe globals near the bottom of this file;
+// declared here because the debug env-probe block below uses it (file order, not lambda scope)
+extern int gg_debugprobe_force_global;
+
 void DrawDebugWorld(
 	const Scene& scene,
 	const CameraComponent& camera,
@@ -9787,6 +9791,25 @@ void DrawDebugWorld(
 			}
 		}
 
+		// GGMAX 2.78 (#157 experiment rig): show the GLOBAL probe's cube on the preview sphere
+		// continuously, so the base env map can be studied without sliding Probe Range to catch
+		// it in snatches. Position/size still come from the focused probe; only the SOURCE cube
+		// changes. The global probe is identified by range (GGTerrain gives it 50000+ where
+		// placed probes are hundreds) so this needs no game-side entity plumbing.
+		int globalprobe_index = -1;
+		if (gg_debugprobe_force_global != 0)
+		{
+			float bestrange = 0.0f;
+			for (size_t i = 0; i < scene.probes.GetCount(); ++i)
+			{
+				if (scene.probes[i].range > bestrange)
+				{
+					bestrange = scene.probes[i].range;
+					globalprobe_index = (int)i;
+				}
+			}
+		}
+
 		MiscCB sb;
 		for (size_t i = 0; i < scene.probes.GetCount(); ++i)
 		{
@@ -9798,7 +9821,10 @@ void DrawDebugWorld(
 			XMStoreFloat4x4(&sb.g_xTransform, XMMatrixScaling(dbgscale, dbgscale, dbgscale) * XMMatrixTranslationFromVector(XMLoadFloat3(&probe.position)));
 			device->BindDynamicConstantBuffer(sb, CB_GETBINDSLOT(MiscCB), cmd);
 
-			device->BindResource(&probe.texture, 0, cmd);
+			// 2.78: forced-global shows the base env cube in this probe's place
+			const EnvironmentProbeComponent& srcprobe =
+				(globalprobe_index >= 0) ? scene.probes[globalprobe_index] : probe;
+			device->BindResource(&srcprobe.texture, 0, cmd);
 
 			device->Draw(vertexCount_uvsphere, 0, cmd);
 		}
@@ -20674,6 +20700,10 @@ float gg_debugprobe_focus_x = 0.0f;
 float gg_debugprobe_focus_y = 0.0f;
 float gg_debugprobe_focus_z = 0.0f;
 float gg_debugprobe_focus_radius = 0.0f;
+// GGMAX 2.78 (#157 experiment rig): debug preview spheres bind the GLOBAL (largest-range)
+// probe's cube instead of their own, so the base env map can be studied continuously
+int gg_debugprobe_force_global = 0;
+void SetDebugEnvProbeForceGlobal(int enable) { gg_debugprobe_force_global = enable; }
 // GGMAX 2.77 (#157 instrument): see the RefreshEnvProbes trace block
 int gg_probecapture_trace = 0;
 float gg_probecapture_trace_radius = 400.0f;

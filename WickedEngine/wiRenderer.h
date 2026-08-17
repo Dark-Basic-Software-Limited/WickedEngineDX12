@@ -1232,6 +1232,11 @@ namespace wi::renderer
 	// naming the near/far used and every object within `radius` with the exact keep/skip reason.
 	// Default OFF (zero cost); the SET_PROBECAPTURETRACE harness command drives it.
 	void SetProbeCaptureTrace(int enable, float radius);
+	// GGMAX 2.78 (#157 experiment rig): make the debug preview spheres display the GLOBAL
+	// (largest-range) probe's cube instead of their own, so the base env map can be examined
+	// continuously instead of glimpsed while a Probe Range slider is dragged. Position and
+	// size still come from the focused probe. Default OFF.
+	void SetDebugEnvProbeForceGlobal(int enable);
 	void SetToDrawDebugEmitters(bool param);
 	bool GetToDrawDebugEmitters();
 	void SetToDrawDebugForceFields(bool param);

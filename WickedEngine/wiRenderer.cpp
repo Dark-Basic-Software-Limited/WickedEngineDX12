@@ -9752,15 +9752,49 @@ void DrawDebugWorld(
 
 		device->BindPipelineState(&PSO_debug[DEBUGRENDERING_ENVPROBE], cmd);
 
+		// GGMAX 2.75 (#155): game-adjustable sphere size so a picked probe marker gets an
+		// accurate mirror preview at the size of the legacy %probe marker ball.
+		// GGMAX 2.76 (#158): ...and only for the probe the game asked for. Stock draws one
+		// sphere per probe in the scene; at the stock unit scale those were invisible specks,
+		// but marker-sized they made EVERY probe in the level swell when one was picked.
+		extern float gg_debugprobe_sphere_scale;
+		extern float gg_debugprobe_focus_x;
+		extern float gg_debugprobe_focus_y;
+		extern float gg_debugprobe_focus_z;
+		extern float gg_debugprobe_focus_radius;
+		const float dbgscale = gg_debugprobe_sphere_scale;
+
+		// When focused, exactly ONE sphere draws: the probe NEAREST the focus point (a plain
+		// radius test is not enough — two markers can sit closer to each other than any sane
+		// tolerance; Lee's test level has a pair 63 units apart). Nothing draws if no probe is
+		// inside the radius, which is the honest answer when the marker holds no pool slot.
+		int focusbest = -1;
+		if (gg_debugprobe_focus_radius > 0.0f)
+		{
+			float bestd2 = gg_debugprobe_focus_radius * gg_debugprobe_focus_radius;
+			for (size_t i = 0; i < scene.probes.GetCount(); ++i)
+			{
+				const XMFLOAT3& pp = scene.probes[i].position;
+				const float fdx = pp.x - gg_debugprobe_focus_x;
+				const float fdy = pp.y - gg_debugprobe_focus_y;
+				const float fdz = pp.z - gg_debugprobe_focus_z;
+				const float d2 = fdx * fdx + fdy * fdy + fdz * fdz;
+				if (d2 <= bestd2)
+				{
+					bestd2 = d2;
+					focusbest = (int)i;
+				}
+			}
+		}
+
 		MiscCB sb;
 		for (size_t i = 0; i < scene.probes.GetCount(); ++i)
 		{
 			const EnvironmentProbeComponent& probe = scene.probes[i];
 
-			// GGMAX 2.75 (#155): game-adjustable sphere size so a picked probe marker gets a
-			// LARGE accurate mirror preview that fully encloses the legacy %probe marker ball
-			extern float gg_debugprobe_sphere_scale;
-			const float dbgscale = gg_debugprobe_sphere_scale;
+			if (gg_debugprobe_focus_radius > 0.0f && (int)i != focusbest)
+				continue;
+
 			XMStoreFloat4x4(&sb.g_xTransform, XMMatrixScaling(dbgscale, dbgscale, dbgscale) * XMMatrixTranslationFromVector(XMLoadFloat3(&probe.position)));
 			device->BindDynamicConstantBuffer(sb, CB_GETBINDSLOT(MiscCB), cmd);
 
@@ -20582,6 +20616,19 @@ void SetToDrawDebugEnvProbes(bool value) { debugEnvProbes = value; }
 // GGMAX 2.75 (#155): see wiRenderer.h — game-set scale for the debug probe mirror spheres
 float gg_debugprobe_sphere_scale = 1.0f;
 void SetDebugEnvProbeSphereScale(float value) { gg_debugprobe_sphere_scale = value; }
+// GGMAX 2.76 (#158): see wiRenderer.h — only the probe within gg_debugprobe_focus_radius of
+// the focus point draws a mirror sphere (radius 0 = stock: every probe draws one)
+float gg_debugprobe_focus_x = 0.0f;
+float gg_debugprobe_focus_y = 0.0f;
+float gg_debugprobe_focus_z = 0.0f;
+float gg_debugprobe_focus_radius = 0.0f;
+void SetDebugEnvProbeFocus(float x, float y, float z, float radius)
+{
+	gg_debugprobe_focus_x = x;
+	gg_debugprobe_focus_y = y;
+	gg_debugprobe_focus_z = z;
+	gg_debugprobe_focus_radius = radius;
+}
 void SetToDrawDebugEmitters(bool param) { debugEmitters = param; }
 bool GetToDrawDebugEmitters() { return debugEmitters; }
 void SetToDrawDebugForceFields(bool param) { debugForceFields = param; }

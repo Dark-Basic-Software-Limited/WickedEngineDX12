@@ -1223,6 +1223,11 @@ namespace wi::renderer
 	// sphere). The game sets this so a picked probe marker shows a LARGE accurate preview of
 	// the captured cube (the legacy %probe marker ball's own PBR shading is misleading).
 	void SetDebugEnvProbeSphereScale(float value);
+	// GGMAX 2.76 (#158): restrict the mirror spheres to the ONE probe near this point. Stock
+	// draws a sphere for every probe in the scene, which was harmless at the unit scale but
+	// grew every probe in the level the moment 2.75 made the spheres marker-sized. radius <= 0
+	// restores the stock all-probes behaviour (used by the SET_DEBUGPROBES harness command).
+	void SetDebugEnvProbeFocus(float x, float y, float z, float radius);
 	void SetToDrawDebugEmitters(bool param);
 	bool GetToDrawDebugEmitters();
 	void SetToDrawDebugForceFields(bool param);

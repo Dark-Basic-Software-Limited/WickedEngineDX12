@@ -656,7 +656,11 @@ inline half3 GetAmbient(in float3 N)
 #else
 
 	[branch]
-	if (GetScene().gg_envsolid.w > 0)
+	if (GetScene().gg_envsolid.w >= 2)
+	{
+		ambient = half3(0, 1, 0);	// 2.80a SPLIT mode: the AMBIENT read site is GREEN
+	}
+	else if (GetScene().gg_envsolid.w > 0)
 	{
 		// GGMAX 2.80 (#157): SOLID-COLOUR global cube. Read #2 of 2 — the ambient term, which
 		// samples the SAME cube at `mipcount` (clamped to the last mip, i.e. one average colour).
@@ -718,8 +722,32 @@ inline half3 EnvironmentReflection_Global(in Surface surface)
 	// GGMAX 2.80 (#157): SOLID-COLOUR global cube. Read #1 of 2 — the specular env reflection.
 	// With this on, nothing on screen can be carrying the cube's CONTENT, so any structure that
 	// survives is being produced somewhere after the texture read.
+	// 2.80a SPLIT mode (w >= 2): this read site is MAGENTA, at full strength — the fresnel
+	// weighting is deliberately dropped here so the three sites are comparable on screen
+	// (fresnel crushes specular to 2-5%, which would hide it under the ambient term).
+	// 2.80b MIP rungs, both at THIS site (the one that owns the ball, measured 95.6%):
+	//   w = 3  paint the CHOSEN mip index as a flat colour — red 0, green 1, blue 2, yellow 3,
+	//          white 4+. Note MIP = roughness * mipcount (NOT mipcount-1), so roughness 1 asks
+	//          for mip 4 on a 4-mip cube and relies on the sampler clamping.
+	//   w = 4  FORCE the mip to gg_envsolid.r and sample the real cube with it.
 	[branch]
-	if (GetScene().gg_envsolid.w > 0)
+	if (GetScene().gg_envsolid.w >= 4)
+	{
+		const half forcedMIP = (half)clamp(GetScene().gg_envsolid.r, 0.0, (float)mipcount - 1.0);
+		envColor = cubemap.SampleLevel(sampler_linear_clamp, surface.R, forcedMIP).rgb * surface.F;
+	}
+	else if (GetScene().gg_envsolid.w >= 3)
+	{
+		const int mipIndex = (int)round(MIP);
+		envColor = (mipIndex <= 0) ? half3(1, 0, 0)
+			: (mipIndex == 1) ? half3(0, 1, 0)
+			: (mipIndex == 2) ? half3(0, 0, 1)
+			: (mipIndex == 3) ? half3(1, 1, 0)
+			: half3(1, 1, 1);
+	}
+	else if (GetScene().gg_envsolid.w >= 2)
+		envColor = half3(1, 0, 1);
+	else if (GetScene().gg_envsolid.w > 0)
 		envColor = (half3)GetScene().gg_envsolid.rgb * surface.F;
 	else
 	envColor = cubemap.SampleLevel(sampler_linear_clamp, surface.R, MIP).rgb * surface.F;
@@ -775,9 +803,13 @@ inline half4 EnvironmentReflection_Local(in TextureCube<half4> cubemap, in Surfa
 	// probe entity array (wiRenderer.cpp:5688), and GGTerrain gives it range 50000, so its OBB
 	// covers the whole level and this path wins over the global fallback for most pixels.
 	// Missing it would leave the cube's content on screen and make the whole test meaningless.
-	half3 envColor = (GetScene().gg_envsolid.w > 0)
-		? (half3)GetScene().gg_envsolid.rgb * surface.F
-		: cubemap.SampleLevel(sampler_linear_clamp, R_parallaxCorrected, MIP).rgb * surface.F;
+	// 2.80a SPLIT mode (w >= 2): this read site — the PARALLAX-CORRECTED LOCAL path, which the
+	// global probe also travels — is BLUE, at full strength (fresnel dropped, as above).
+	half3 envColor = (GetScene().gg_envsolid.w >= 2)
+		? half3(0, 0, 1)
+		: (GetScene().gg_envsolid.w > 0)
+			? (half3)GetScene().gg_envsolid.rgb * surface.F
+			: cubemap.SampleLevel(sampler_linear_clamp, R_parallaxCorrected, MIP).rgb * surface.F;
 
 #ifdef SHEEN
 	envColor *= surface.sheen.albedoScaling;

@@ -9742,7 +9742,11 @@ void DrawDebugWorld(
 		device->EventEnd(cmd);
 	}
 
-	if (debugEnvProbes)
+	// GGMAX 2.89 (#157): probeview forces the inspection sphere on by itself, so the mode can be
+	// driven purely from the harness/ini without a probe marker picked in the editor.
+	extern int gg_probeview_mode;
+	extern float gg_probeview_mip;
+	if (debugEnvProbes || gg_probeview_mode > 0)
 	{
 		device->EventBegin("Debug EnvProbes", cmd);
 
@@ -9788,19 +9792,93 @@ void DrawDebugWorld(
 		}
 
 		MiscCB sb;
-		for (size_t i = 0; i < scene.probes.GetCount(); ++i)
+		sb.g_xColor = XMFLOAT4(0, 0, 0, 0); // GGMAX 2.89: .x = the mip cubeMapPS samples (0 = stock)
+
+		if (gg_probeview_mode > 0)
 		{
-			const EnvironmentProbeComponent& probe = scene.probes[i];
+			// GGMAX 2.89 (#157): PROBE INSPECTION MODE — exactly ONE sphere, and the caller
+			// chooses which cube it mirrors. This is the like-for-like rig the circle hunt
+			// never had: same ball, same pose, same camera, same shader; the ONLY thing that
+			// changes between shots is the cube (global vs local) or the mip.
+			const bool haveFocus = (focusbest >= 0);
+			XMFLOAT3 ballpos;
+			if (haveFocus)
+			{
+				ballpos = scene.probes[focusbest].position;
+			}
+			else
+			{
+				// No marker picked: hover the ball in front of the camera so the mode works
+				// from the harness on any scene, probe markers or not. 1.5x the radius keeps it
+				// close enough that scene geometry (a %probe marker sitting a few hundred units
+				// out, for one) does not occlude the thing being inspected.
+				XMVECTOR eye = XMLoadFloat3(&camera.Eye);
+				XMVECTOR at = XMVector3Normalize(XMLoadFloat3(&camera.At));
+				XMStoreFloat3(&ballpos, XMVectorAdd(eye, XMVectorScale(at, dbgscale * 1.5f)));
+			}
 
-			if (gg_debugprobe_focus_radius > 0.0f && (int)i != focusbest)
-				continue;
+			int cubeindex = -1;
+			if (scene.probes.GetCount() > 0)
+			{
+				if (gg_probeview_mode == 1)
+				{
+					// The GLOBAL cube: probes[0].texture is literally what every shader reads
+					// as GetScene().globalprobe (wiScene.cpp:1007).
+					cubeindex = 0;
+				}
+				else if (haveFocus)
+				{
+					cubeindex = focusbest;
+				}
+				else
+				{
+					// Local mode with nothing picked: mirror the pool probe nearest the camera
+					// (never probes[0] — that one is the global cube by definition).
+					float bestd2 = FLT_MAX;
+					for (size_t i = 1; i < scene.probes.GetCount(); ++i)
+					{
+						const XMFLOAT3& pp = scene.probes[i].position;
+						const float ddx = pp.x - camera.Eye.x;
+						const float ddy = pp.y - camera.Eye.y;
+						const float ddz = pp.z - camera.Eye.z;
+						const float d2 = ddx * ddx + ddy * ddy + ddz * ddz;
+						if (d2 < bestd2 && scene.probes[i].texture.IsValid())
+						{
+							bestd2 = d2;
+							cubeindex = (int)i;
+						}
+					}
+					if (cubeindex < 0) cubeindex = 0; // no pool probe has a cube yet
+				}
+			}
 
-			XMStoreFloat4x4(&sb.g_xTransform, XMMatrixScaling(dbgscale, dbgscale, dbgscale) * XMMatrixTranslationFromVector(XMLoadFloat3(&probe.position)));
-			device->BindDynamicConstantBuffer(sb, CB_GETBINDSLOT(MiscCB), cmd);
+			if (cubeindex >= 0 && scene.probes[cubeindex].texture.IsValid())
+			{
+				sb.g_xColor.x = gg_probeview_mip;
+				XMStoreFloat4x4(&sb.g_xTransform, XMMatrixScaling(dbgscale, dbgscale, dbgscale) * XMMatrixTranslationFromVector(XMLoadFloat3(&ballpos)));
+				device->BindDynamicConstantBuffer(sb, CB_GETBINDSLOT(MiscCB), cmd);
 
-			device->BindResource(&probe.texture, 0, cmd);
+				device->BindResource(&scene.probes[cubeindex].texture, 0, cmd);
 
-			device->Draw(vertexCount_uvsphere, 0, cmd);
+				device->Draw(vertexCount_uvsphere, 0, cmd);
+			}
+		}
+		else
+		{
+			for (size_t i = 0; i < scene.probes.GetCount(); ++i)
+			{
+				const EnvironmentProbeComponent& probe = scene.probes[i];
+
+				if (gg_debugprobe_focus_radius > 0.0f && (int)i != focusbest)
+					continue;
+
+				XMStoreFloat4x4(&sb.g_xTransform, XMMatrixScaling(dbgscale, dbgscale, dbgscale) * XMMatrixTranslationFromVector(XMLoadFloat3(&probe.position)));
+				device->BindDynamicConstantBuffer(sb, CB_GETBINDSLOT(MiscCB), cmd);
+
+				device->BindResource(&probe.texture, 0, cmd);
+
+				device->Draw(vertexCount_uvsphere, 0, cmd);
+			}
 		}
 
 
@@ -20629,6 +20707,15 @@ void SetDebugEnvProbeFocus(float x, float y, float z, float radius)
 	gg_debugprobe_focus_z = z;
 	gg_debugprobe_focus_radius = radius;
 }
+// GGMAX 2.89 (#157): PROBE INSPECTION MODE — see wiRenderer.h.
+int gg_probeview_mode = 0;
+float gg_probeview_mip = 0.0f;
+void SetProbeView(int mode, float mip)
+{
+	gg_probeview_mode = mode;
+	gg_probeview_mip = mip;
+}
+int GetProbeViewMode() { return gg_probeview_mode; }
 void SetToDrawDebugEmitters(bool param) { debugEmitters = param; }
 bool GetToDrawDebugEmitters() { return debugEmitters; }
 void SetToDrawDebugForceFields(bool param) { debugForceFields = param; }

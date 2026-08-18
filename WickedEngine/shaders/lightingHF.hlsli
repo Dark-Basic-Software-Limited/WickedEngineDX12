@@ -741,14 +741,75 @@ inline half4 EnvironmentReflection_Local(in TextureCube<half4> cubemap, in Surfa
 {
 	if ((probe.layerMask & surface.layerMask) == 0)
 		return 0; // early exit: layer mismatch
-		
-	// Perform parallax correction of reflection ray (R) into OBB:
-	half3 RayLS = mul((half3x3)probeProjection, surface.R);
-	half3 FirstPlaneIntersect = (1 - clipSpacePos) / RayLS;
-	half3 SecondPlaneIntersect = (-1 - clipSpacePos) / RayLS;
-	half3 FurthestPlane = max(FirstPlaneIntersect, SecondPlaneIntersect);
-	half Distance = min(FurthestPlane.x, min(FurthestPlane.y, FurthestPlane.z));
-	half3 R_parallaxCorrected = surface.P - probe.position + surface.R * Distance;
+
+	// GGMAX 2.89 (#157): ISOLATION — drop local probes so everything falls through to the
+	// global cube. "Local" here means an OBB small enough that its parallax stays inside fp16
+	// (half-extent below 37820); the global probe's 50000 box is deliberately not dropped.
+	// Returning 0 leaves the accumulation alpha untouched, so shadingHF's
+	// "if (envmapAccumulation.a < 0.99)" fallback supplies EnvironmentReflection_Global.
+	if (GetScene().gg_probeonlyglobal != 0 && length(probeProjection[0].xyz) * 37820.0 >= 1.0)
+		return 0;
+
+	// Perform parallax correction of reflection ray (R) into OBB.
+	//
+	// GGMAX 2.89 (#157) — THE CIRCLES. Stock ran this in half (min16float = real fp16 on this
+	// hardware, max 65504). "Distance" is the ray's exit distance in WORLD units, so a probe
+	// whose OBB half-extent exceeds 65504/sqrt(3) ~= 37,820 units overflows to +INF over most
+	// of the direction sphere and the sampled direction becomes garbage.
+	// GG's globalEnvProbe box is 50,000 units (GGTerrain_part0: globalrange), which leaves
+	// exactly six ~40 degree caps around +-X/+-Y/+-Z finite and everything between them INF —
+	// six discs of correct reflection separated by bands of rubbish. That is the "circles on
+	// every reflective surface" defect, and it is why LOCAL probes always looked clean: their
+	// boxes are a couple of units to a few hundred, nowhere near the fp16 ceiling.
+	// Same bug class as 2.07g (half range2 overflowed past range 255.9), same file, same fix.
+	float3 R_parallaxCorrected;
+	const int gg_pp = GetScene().gg_probeparallax;
+	[branch]
+	if (gg_pp == 0)
+	{
+		// Stock half math, kept so the defect can be reproduced for a same-session A/B.
+		half3 RayLS = mul((half3x3)probeProjection, surface.R);
+		half3 FirstPlaneIntersect = (1 - clipSpacePos) / RayLS;
+		half3 SecondPlaneIntersect = (-1 - clipSpacePos) / RayLS;
+		half3 FurthestPlane = max(FirstPlaneIntersect, SecondPlaneIntersect);
+		half Distance = min(FurthestPlane.x, min(FurthestPlane.y, FurthestPlane.z));
+		R_parallaxCorrected = surface.P - probe.position + surface.R * Distance;
+	}
+	else if (gg_pp == 3 && length(probeProjection[0].xyz) * 37820.0 < 1.0)
+	{
+		// Mode 3 (design alternative, NOT the bug fix): a box this size is not a room, it is
+		// "the whole level" — GG's globalEnvProbe. Parallax-correcting against it skews the
+		// reflection by the surface's offset from the probe centre for no physical gain, and
+		// DX11 never did it. Read the raw reflection vector instead, which is what
+		// EnvironmentReflection_Global would do. Offered so the two can be compared side by
+		// side; mode 1 (the plain precision fix) is the conservative default.
+		// The half-extent is derived from the inverse matrix (its row length is 1/half-extent)
+		// rather than from probe.GetRange(): GetRange() is ALSO fp16 (SetRange packs through
+		// XMConvertFloatToHalf), so the global probe's authored range of 100000 comes back as
+		// +INF. Same overflow class as the parallax bug — worth knowing before trusting a
+		// probe range in any shader comparison.
+		R_parallaxCorrected = (float3)surface.R;
+	}
+	else
+	{
+		float3 RayLS_f = mul((float3x3)probeProjection, (float3)surface.R);
+		float3 csp_f = (float3)clipSpacePos;
+		float3 FirstPlaneIntersect_f = (1 - csp_f) / RayLS_f;
+		float3 SecondPlaneIntersect_f = (-1 - csp_f) / RayLS_f;
+		float3 FurthestPlane_f = max(FirstPlaneIntersect_f, SecondPlaneIntersect_f);
+		float Distance_f = min(FurthestPlane_f.x, min(FurthestPlane_f.y, FurthestPlane_f.z));
+		R_parallaxCorrected = surface.P - probe.position + (float3)surface.R * Distance_f;
+
+		[branch]
+		if (gg_pp == 2)
+		{
+			// DIAGNOSTIC: would the stock fp16 path have overflowed at this pixel? Paint it.
+			// The magenta this produces IS the predicted overflow map — if it lands exactly on
+			// the bands between the circles, the root cause is proven visually, not argued.
+			if (Distance_f >= 65504.0 || !isfinite(Distance_f))
+				return half4(6, 0, 6, 1); // magenta, alpha 1 so it fully replaces the probe result
+		}
+	}
 
 	uint2 dim;
 	uint mipcount;
@@ -766,12 +827,16 @@ inline half4 EnvironmentReflection_Local(in TextureCube<half4> cubemap, in Surfa
 #endif // SHEEN
 
 #ifdef CLEARCOAT
-	RayLS = mul((half3x3)probeProjection, surface.clearcoat.R);
-	FirstPlaneIntersect = (1 - clipSpacePos) / RayLS;
-	SecondPlaneIntersect = (-1 - clipSpacePos) / RayLS;
-	FurthestPlane = max(FirstPlaneIntersect, SecondPlaneIntersect);
-	Distance = min(FurthestPlane.x, min(FurthestPlane.y, FurthestPlane.z));
-	R_parallaxCorrected = surface.P - probe.position + surface.clearcoat.R * Distance;
+	// GGMAX 2.89 (#157): float precision here too — same overflow, same reason (see above).
+	{
+		float3 RayLS_cc = mul((float3x3)probeProjection, (float3)surface.clearcoat.R);
+		float3 csp_cc = (float3)clipSpacePos;
+		float3 FirstPlaneIntersect_cc = (1 - csp_cc) / RayLS_cc;
+		float3 SecondPlaneIntersect_cc = (-1 - csp_cc) / RayLS_cc;
+		float3 FurthestPlane_cc = max(FirstPlaneIntersect_cc, SecondPlaneIntersect_cc);
+		float Distance_cc = min(FurthestPlane_cc.x, min(FurthestPlane_cc.y, FurthestPlane_cc.z));
+		R_parallaxCorrected = surface.P - probe.position + (float3)surface.clearcoat.R * Distance_cc;
+	}
 
 	envColor *= 1 - surface.clearcoat.F;
 	MIP = surface.clearcoat.roughness * mipcount16f;

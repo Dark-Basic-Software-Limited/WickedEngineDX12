@@ -1228,6 +1228,22 @@ namespace wi::renderer
 	// grew every probe in the level the moment 2.75 made the spheres marker-sized. radius <= 0
 	// restores the stock all-probes behaviour (used by the SET_DEBUGPROBES harness command).
 	void SetDebugEnvProbeFocus(float x, float y, float z, float radius);
+	// GGMAX 2.89 (#157): PROBE INSPECTION MODE. The debug env-probe sphere (cubeMapPS) is a RAW
+	// MIRROR of a cube at a chosen mip — no Fresnel, no roughness, no parallax, no brightness
+	// scaling. That is why a picked probe always previews clean while the %probe marker ball
+	// (a dielectric PBR surface reading roughness*mipcount) looks black and shows circles.
+	// This mode re-points that same trustworthy sphere so the two cubes can be compared like
+	// for like, in one pose, on one ball:
+	//   mode 0 = OFF, stock behaviour (sphere per probe / focused probe, always mip 0)
+	//   mode 1 = draw ONE sphere showing the GLOBAL cube — probes[0].texture, which is exactly
+	//            what the shaders read as GetScene().globalprobe (wiScene.cpp:1007)
+	//   mode 2 = draw ONE sphere showing the LOCAL cube of the probe at that same spot
+	// mip = the level cubeMapPS samples (0 = the unfiltered capture; >0 walks the filtered
+	// chain, which is where the BRDF prefilter's artifacts live).
+	// Placement: the focused probe if the game has focused one (a picked marker), otherwise
+	// hovering in front of the camera so the mode works with no marker picked at all.
+	void SetProbeView(int mode, float mip);
+	int GetProbeViewMode();
 	void SetToDrawDebugEmitters(bool param);
 	bool GetToDrawDebugEmitters();
 	void SetToDrawDebugForceFields(bool param);

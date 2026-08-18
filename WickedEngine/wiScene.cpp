@@ -44,6 +44,13 @@ namespace wi::scene
 	// GGMAX 1.55: global env-probe brightness multiplier (1 = stock), set by the game's
 	// "Global Probe Brightness" slider; consumed in lightingHF EnvironmentReflection_Global.
 	float gg_envprobe_brightness = 1.0f;
+	// GGMAX 2.89 (#157): env-probe parallax precision — 0 = stock half (reproduces the fp16
+	// overflow defect), 1 = float (the fix, DEFAULT), 2 = float + magenta overflow map.
+	// See EnvironmentReflection_Local in lightingHF.hlsli for the full explanation.
+	int gg_probeparallax = 1;
+	// GGMAX 2.89 (#157): 1 = ignore local probes, everything reads the global cube (isolation
+	// lever; reproduces the marker ball's circles without needing a mouse drag).
+	int gg_probeonlyglobal = 0;
 
 	// GGMAX 2.15 (2026-08-09): per-system attribution inside Scene::Update.
 	//
@@ -1018,6 +1025,14 @@ namespace wi::scene
 		// GGMAX 1.55: global env-probe brightness knob (see ShaderInterop ShaderScene)
 		extern float gg_envprobe_brightness;
 		shaderscene.gg_envprobe_brightness = gg_envprobe_brightness;
+
+		// GGMAX 2.89 (#157): env-probe parallax precision mode (see lightingHF.hlsli)
+		extern int gg_probeparallax;
+		extern int gg_probeonlyglobal;
+		shaderscene.gg_probeparallax = gg_probeparallax;
+		shaderscene.gg_probeonlyglobal = gg_probeonlyglobal;
+		shaderscene.gg_probeparallax_pad1 = 0;
+		shaderscene.gg_probeparallax_pad2 = 0;
 
 		shaderscene.impostorInstanceOffset = impostorInstanceOffset;
 		shaderscene.TLAS = device->GetDescriptorIndex(&TLAS, SubresourceType::SRV);

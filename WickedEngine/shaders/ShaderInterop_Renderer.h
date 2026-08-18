@@ -34,6 +34,21 @@ struct alignas(16) ShaderScene
 	// "Global Probe Brightness" slider (EnvironmentProbeComponent::SetBrightness was removed).
 	float gg_envprobe_brightness;
 
+	// GGMAX 2.89 (#157): env-probe parallax precision mode — see EnvironmentReflection_Local.
+	//   0 = stock half (min16float) math: reproduces the fp16 overflow defect on demand
+	//   1 = float math (DEFAULT, the fix)
+	//   2 = float math + paint MAGENTA wherever the stock half math would have overflowed
+	// Padded to a full float4 so the C++ and HLSL views of this cbuffer cannot disagree.
+	int gg_probeparallax;
+	// GGMAX 2.89 (#157): 1 = ignore LOCAL probes so every surface falls through to the global
+	// cube. This is the shader-side version of "park the local pool" — it cannot be undone by
+	// GGTerrain's per-frame pool tracking, and it is what reproduces the marker ball's circles
+	// on demand (the ball normally sits inside its own local probe, which is why it looks clean
+	// until a drag releases the slot).
+	int gg_probeonlyglobal;
+	int gg_probeparallax_pad1;
+	int gg_probeparallax_pad2;
+
 	ShaderWeather weather;
 
 	struct alignas(16) DDGI

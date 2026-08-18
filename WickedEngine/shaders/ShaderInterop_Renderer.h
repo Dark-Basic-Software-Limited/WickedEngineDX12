@@ -34,24 +34,6 @@ struct alignas(16) ShaderScene
 	// "Global Probe Brightness" slider (EnvironmentProbeComponent::SetBrightness was removed).
 	float gg_envprobe_brightness;
 
-	// GGMAX 2.79 (#157 debug rig): ENV-ONLY object output. Consumed at the end of
-	// objectHF.hlsli — see the comment there. A FULL 16-byte row on purpose: adding a lone
-	// float here would shift `weather` and rely on C++ and HLSL padding agreeing.
-	float gg_envonly;			// 0 = off (stock shading), >0 = output the global env cube only
-	float gg_envonly_mip;		// cube mip to display when on (0 = sharpest)
-	float gg_envonly_pad0;
-	float gg_envonly_pad1;
-
-	// GGMAX 2.80 (#157): replace EVERY read of the GLOBAL env-probe cube with a solid colour,
-	// so anything still showing structure afterwards cannot be coming from the cube. One full
-	// 16-byte row (rgb + enable) for the same alignment reason as the row above.
-	float4 gg_envsolid;
-	// GGMAX 2.82 (#157, Lee-directed): DIRECTION-PEEL rungs. xyz = the fixed direction for
-	// mode 4, w = mode: 0 stock chain; 1 box projection OFF (local path uses raw R);
-	// 2 + normal map OFF (R from facenormal); 3 + camera OFF (sample facenormal, no reflect);
-	// 4 FIXED direction xyz at every read site — no direction left.
-	float4 gg_envdir;			// rgb = the colour, w = 0 off / 1 on
-
 	ShaderWeather weather;
 
 	struct alignas(16) DDGI
@@ -1671,9 +1653,7 @@ struct FilterEnvmapPushConstants
 
 	float filterRoughness;
 	uint filterRayCount;
-	// GGMAX 2.84 (#157 fix 3): clamp each HDR sample inside FilterEnvMap to this value
-	// (0 = off). Kills the 10-20x blown horizon band flooding the filtered mips flat.
-	float filterHDRClamp;
+	uint padding_filterCB;
 	int texture_input;
 
 	int texture_output;

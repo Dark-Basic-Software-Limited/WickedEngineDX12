@@ -1228,23 +1228,6 @@ namespace wi::renderer
 	// grew every probe in the level the moment 2.75 made the spheres marker-sized. radius <= 0
 	// restores the stock all-probes behaviour (used by the SET_DEBUGPROBES harness command).
 	void SetDebugEnvProbeFocus(float x, float y, float z, float radius);
-	// GGMAX 2.77 (#157 instrument): append a line per env-probe CAPTURE to Files/probecapture.txt
-	// naming the near/far used and every object within `radius` with the exact keep/skip reason.
-	// Default OFF (zero cost); the SET_PROBECAPTURETRACE harness command drives it.
-	void SetProbeCaptureTrace(int enable, float radius);
-	// GGMAX 2.78 (#157 experiment rig): make the debug preview spheres display the GLOBAL
-	// (largest-range) probe's cube instead of their own, so the base env map can be examined
-	// continuously instead of glimpsed while a Probe Range slider is dragged. Position and
-	// size still come from the focused probe. Default OFF.
-	void SetDebugEnvProbeForceGlobal(int enable);
-	// GGMAX 2.84 (#157 fix 3): clamp HDR samples inside the env-probe BRDF prefilter
-	// (FilterEnvMap). Default 2.0 — kills the blown horizon band flooding the filtered mips.
-	// 0 = off. Applies on the next capture (use REFRESH_ENVPROBE to re-bake).
-	void SetEnvProbeFilterHDRClamp(float value);
-	// GGMAX 2.85 (#157, Lee-directed): 1 = PLAIN MIPS — skip the BRDF prefilter, ship the
-	// ordinary 2x2 box-reduction chain (DX11-style). 0 = BRDF filter (with the 2.84 fixes).
-	// Applies on the next capture (REFRESH_ENVPROBE to re-bake). Default 1.
-	void SetEnvProbePlainMips(int enable);
 	void SetToDrawDebugEmitters(bool param);
 	bool GetToDrawDebugEmitters();
 	void SetToDrawDebugForceFields(bool param);

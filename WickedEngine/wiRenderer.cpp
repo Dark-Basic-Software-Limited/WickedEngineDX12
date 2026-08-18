@@ -8805,10 +8805,6 @@ void DrawScene(
 
 }
 
-// GGMAX 2.78 (#157): defined with the other debug-probe globals near the bottom of this file;
-// declared here because the debug env-probe block below uses it (file order, not lambda scope)
-extern int gg_debugprobe_force_global;
-
 void DrawDebugWorld(
 	const Scene& scene,
 	const CameraComponent& camera,
@@ -9791,25 +9787,6 @@ void DrawDebugWorld(
 			}
 		}
 
-		// GGMAX 2.78 (#157 experiment rig): show the GLOBAL probe's cube on the preview sphere
-		// continuously, so the base env map can be studied without sliding Probe Range to catch
-		// it in snatches. Position/size still come from the focused probe; only the SOURCE cube
-		// changes. The global probe is identified by range (GGTerrain gives it 50000+ where
-		// placed probes are hundreds) so this needs no game-side entity plumbing.
-		int globalprobe_index = -1;
-		if (gg_debugprobe_force_global != 0)
-		{
-			float bestrange = 0.0f;
-			for (size_t i = 0; i < scene.probes.GetCount(); ++i)
-			{
-				if (scene.probes[i].range > bestrange)
-				{
-					bestrange = scene.probes[i].range;
-					globalprobe_index = (int)i;
-				}
-			}
-		}
-
 		MiscCB sb;
 		for (size_t i = 0; i < scene.probes.GetCount(); ++i)
 		{
@@ -9821,10 +9798,7 @@ void DrawDebugWorld(
 			XMStoreFloat4x4(&sb.g_xTransform, XMMatrixScaling(dbgscale, dbgscale, dbgscale) * XMMatrixTranslationFromVector(XMLoadFloat3(&probe.position)));
 			device->BindDynamicConstantBuffer(sb, CB_GETBINDSLOT(MiscCB), cmd);
 
-			// 2.78: forced-global shows the base env cube in this probe's place
-			const EnvironmentProbeComponent& srcprobe =
-				(globalprobe_index >= 0) ? scene.probes[globalprobe_index] : probe;
-			device->BindResource(&srcprobe.texture, 0, cmd);
+			device->BindResource(&probe.texture, 0, cmd);
 
 			device->Draw(vertexCount_uvsphere, 0, cmd);
 		}
@@ -10542,16 +10516,6 @@ void DrawSun(CommandList cmd)
 }
 
 
-// GGMAX 2.77 (#157 instrument): defined near the bottom of this file with the other
-// debug-probe globals. Declared HERE at file scope on purpose — a block-scope `extern`
-// inside the `render_probe` LAMBDA below mangles into the GLOBAL namespace and fails to
-// link (the 2.53 linkage rule, lambda variant; the 2.75 sphere-scale extern gets away with
-// it only because it sits in a plain function body).
-extern int gg_probecapture_trace;
-extern float gg_envprobe_filter_hdrclamp;
-extern int gg_envprobe_plainmips;
-extern float gg_probecapture_trace_radius;
-
 void RefreshEnvProbes(const Visibility& vis, CommandList cmd)
 {
 	device->EventBegin("EnvironmentProbe Refresh", cmd);
@@ -10689,11 +10653,7 @@ void RefreshEnvProbes(const Visibility& vis, CommandList cmd)
 
 			if (!envrenderingColorBuffer.IsValid())
 			{
-				// GGMAX 2.84 (#157 fix 1): FULL mip chain on the filter SOURCE (was probe's 4).
-				// filterEnvMapCS's computeLod requests source lods up to ~8 for rough levels;
-				// with only 4 mips every wide ray clamped to the 16px level, collapsing the
-				// filtered mips toward one value per face (the "single rogue pixel" gaps).
-				desc.mip_levels = GetMipCount(desc.width, desc.height, 1, 1);
+				desc.mip_levels = probe.texture.desc.mip_levels;
 				desc.bind_flags = BindFlag::RENDER_TARGET | BindFlag::SHADER_RESOURCE | BindFlag::UNORDERED_ACCESS;
 				desc.format = format_rendertarget_envprobe;
 				desc.layout = ResourceState::SHADER_RESOURCE;
@@ -10726,11 +10686,7 @@ void RefreshEnvProbes(const Visibility& vis, CommandList cmd)
 
 			if (!envrenderingColorBuffer_Filtered.IsValid())
 			{
-				// GGMAX 2.84: full chain here too so the whole-resource CopyResource from the
-				// source buffer stays legal (identical desc). Only the first probe-mip-count
-				// levels are filtered and shipped; the rest are never read (BlockCompress
-				// loops the DST's mip count).
-				desc.mip_levels = GetMipCount(desc.width, desc.height, 1, 1);
+				desc.mip_levels = probe.texture.desc.mip_levels;
 				desc.bind_flags = BindFlag::SHADER_RESOURCE | BindFlag::UNORDERED_ACCESS;
 				desc.format = format_rendertarget_envprobe;
 				desc.layout = ResourceState::SHADER_RESOURCE;
@@ -10871,50 +10827,6 @@ void RefreshEnvProbes(const Visibility& vis, CommandList cmd)
 
 						renderQueue.add(object.mesh_index, uint32_t(i), 0, object.sort_bits, camera_mask);
 					}
-				}
-			}
-
-			// GGMAX 2.77 (#157 instrument): name EXACTLY what went into this capture. Off by
-			// default; SET_PROBECAPTURETRACE turns it on. Prints the near/far the capture
-			// inherited from the MAIN CAMERA (each cube face clips at zNearP, so the volume
-			// hidden around a probe is a CUBE of half-width zNearP — Lee's "sphere cut by a
-			// cube" reading) and every object within the trace radius with the exact reason
-			// it was kept or skipped.
-			if (gg_probecapture_trace != 0)
-			{
-				static uint64_t s_capture_seq = 0;
-				s_capture_seq++;
-				FILE* tf = nullptr;
-				fopen_s(&tf, "probecapture.txt", "a");
-				if (tf != nullptr)
-				{
-					fprintf(tf, "CAPTURE #%llu pos=(%.1f,%.1f,%.1f) res=%u znear=%.3f zfar=%.1f batches=%u\n",
-						(unsigned long long)s_capture_seq, probe.position.x, probe.position.y, probe.position.z,
-						(unsigned)probe.resolution, zNearP, zFarP, (unsigned)renderQueue.batches.size());
-					for (size_t i = 0; i < vis.scene->aabb_objects.size(); ++i)
-					{
-						const AABB& aabb = vis.scene->aabb_objects[i];
-						const XMFLOAT3 c = aabb.getCenter();
-						const float dx = c.x - probe.position.x;
-						const float dy = c.y - probe.position.y;
-						const float dz = c.z - probe.position.z;
-						const float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
-						if (dist > gg_probecapture_trace_radius)
-							continue;
-						const ObjectComponent& object = vis.scene->objects[i];
-						Entity oent = vis.scene->objects.GetEntity(i);
-						const NameComponent* nm = vis.scene->names.GetComponent(oent);
-						const bool layerok = (aabb.layerMask & vis.layerMask) && (aabb.layerMask & probe_aabb.layerMask);
-						const bool inSphere = culler.intersects(aabb);
-						const bool rend = object.IsRenderable();
-						const bool norefl = object.IsNotVisibleInReflections();
-						fprintf(tf, "   d=%8.1f r=%7.1f ent=%llu layer=%d sphere=%d rend=%d norefl=%d %-10s name='%s'\n",
-							dist, aabb.getRadius(), (unsigned long long)oent,
-							layerok ? 1 : 0, inSphere ? 1 : 0, rend ? 1 : 0, norefl ? 1 : 0,
-							(layerok && inSphere && rend && !norefl) ? "RENDERED" : "skipped",
-							(nm != nullptr) ? nm->name.c_str() : "(unnamed)");
-					}
-					fclose(tf);
 				}
 			}
 
@@ -11120,25 +11032,9 @@ void RefreshEnvProbes(const Visibility& vis, CommandList cmd)
 
 			TextureDesc desc = envrenderingColorBuffer_Filtered.GetDesc();
 
-			// GGMAX 2.85 (#157, Lee-directed): PLAIN MIPS mode — skip the BRDF prefilter
-			// entirely and ship the ordinary 2x2 box-reduction chain that GenerateMipChain
-			// already built (the CopyResource above carried it into the Filtered buffer).
-			// This is the DX11-style mip chain: a mip texel is only ever a local average of
-			// its own face patch, roughness plays no part in authoring the levels. Default ON
-			// per Lee's test; SET_PROBEMIPS 0 restores the BRDF filter (with the 2.84 fixes).
-			if (gg_envprobe_plainmips == 0)
-			{
-
 			device->BindComputeShader(&shaders[CSTYPE_FILTERENVMAP], cmd);
 
-			// GGMAX 2.84 (#157 fix 2): only the SHIPPED mip levels are filtered (the buffers now
-			// carry a full chain for the source lods; probe.texture still ships 4), and the
-			// roughness ladder is aligned to the READ side's mapping (lightingHF samples at
-			// MIP = roughness * mipcount, so shipped mip i corresponds to roughness i/mipcount).
-			// The old ladder i/(mips-1) filtered mip1 at 0.33/mip3 at 1.0 — every level ~33%
-			// blurrier than the reader assumed, on top of the 4-level coarseness.
-			const int gg_shipped_mips = (int)std::min(probe.texture.desc.mip_levels, desc.mip_levels);
-			int mip_start = gg_shipped_mips - 1;
+			int mip_start = desc.mip_levels - 1;
 			desc.width = std::max(1u, desc.width >> mip_start);
 			desc.height = std::max(1u, desc.height >> mip_start);
 			for (int i = mip_start; i > 0; --i)
@@ -11148,8 +11044,7 @@ void RefreshEnvProbes(const Visibility& vis, CommandList cmd)
 				push.filterResolution.y = desc.height;
 				push.filterResolution_rcp.x = 1.0f / push.filterResolution.x;
 				push.filterResolution_rcp.y = 1.0f / push.filterResolution.y;
-				push.filterRoughness = (float)i / (float)gg_shipped_mips;
-				push.filterHDRClamp = gg_envprobe_filter_hdrclamp; // 2.84 fix 3 (0 = off)
+				push.filterRoughness = (float)i / (float)(desc.mip_levels - 1);
 				if (probe_aabb.layerMask & vis.layerMask)
 				{
 					// real probe:
@@ -11181,8 +11076,6 @@ void RefreshEnvProbes(const Visibility& vis, CommandList cmd)
 				desc.width *= 2;
 				desc.height *= 2;
 			}
-
-			} // 2.85: end of the BRDF-filter block skipped in PLAIN MIPS mode
 
 			{
 				GPUBarrier barriers[] = {
@@ -20729,33 +20622,6 @@ float gg_debugprobe_focus_x = 0.0f;
 float gg_debugprobe_focus_y = 0.0f;
 float gg_debugprobe_focus_z = 0.0f;
 float gg_debugprobe_focus_radius = 0.0f;
-// GGMAX 2.78 (#157 experiment rig): debug preview spheres bind the GLOBAL (largest-range)
-// probe's cube instead of their own, so the base env map can be studied continuously
-int gg_debugprobe_force_global = 0;
-void SetDebugEnvProbeForceGlobal(int enable) { gg_debugprobe_force_global = enable; }
-
-// GGMAX 2.84 (#157 fix 3): FilterEnvMap HDR sample clamp. The GG capture carries a 10-20x
-// blown horizon band; DX11 captured LDR so its band clamped at 1.0 by construction. The GGX
-// prefilter spreads that band's energy across every wide cone, flooding the filtered mips
-// flat (the disc-bug "gaps"). Default 2.0 keeps legitimate sky, kills the band. 0 = off.
-// Takes effect on the NEXT capture (REFRESH_ENVPROBE to re-bake).
-float gg_envprobe_filter_hdrclamp = 2.0f;
-void SetEnvProbeFilterHDRClamp(float value) { gg_envprobe_filter_hdrclamp = value; }
-
-// GGMAX 2.85 (#157, Lee-directed): PLAIN MIPS — skip the BRDF prefilter entirely, ship the
-// ordinary 2x2 box-reduction chain (DX11-style: a mip texel is only ever a local average of
-// its own face patch; roughness plays no part). Default ON per Lee's directive.
-// SET_PROBEMIPS 0 restores the BRDF filter. Applies on the NEXT capture (REFRESH_ENVPROBE).
-int gg_envprobe_plainmips = 1;
-void SetEnvProbePlainMips(int enable) { gg_envprobe_plainmips = enable; }
-// GGMAX 2.77 (#157 instrument): see the RefreshEnvProbes trace block
-int gg_probecapture_trace = 0;
-float gg_probecapture_trace_radius = 400.0f;
-void SetProbeCaptureTrace(int enable, float radius)
-{
-	gg_probecapture_trace = enable;
-	if (radius > 0.0f) gg_probecapture_trace_radius = radius;
-}
 void SetDebugEnvProbeFocus(float x, float y, float z, float radius)
 {
 	gg_debugprobe_focus_x = x;

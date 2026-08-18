@@ -756,6 +756,9 @@ inline half4 EnvironmentReflection_Local(in TextureCube<half4> cubemap, in Surfa
 	// hardware, max 65504). "Distance" is the ray's exit distance in WORLD units, so a probe
 	// whose OBB half-extent exceeds 65504/sqrt(3) ~= 37,820 units overflows to +INF over most
 	// of the direction sphere and the sampled direction becomes garbage.
+	// NOTE the shipping default is mode 3, which skips this block entirely for level-sized
+	// boxes — but the precision fix below still matters for any probe between a room and the
+	// 37,820 ceiling, and mode 1 keeps it available.
 	// GG's globalEnvProbe box is 50,000 units (GGTerrain_part0: globalrange), which leaves
 	// exactly six ~40 degree caps around +-X/+-Y/+-Z finite and everything between them INF —
 	// six discs of correct reflection separated by bands of rubbish. That is the "circles on
@@ -777,12 +780,13 @@ inline half4 EnvironmentReflection_Local(in TextureCube<half4> cubemap, in Surfa
 	}
 	else if (gg_pp == 3 && length(probeProjection[0].xyz) * 37820.0 < 1.0)
 	{
-		// Mode 3 (design alternative, NOT the bug fix): a box this size is not a room, it is
-		// "the whole level" — GG's globalEnvProbe. Parallax-correcting against it skews the
-		// reflection by the surface's offset from the probe centre for no physical gain, and
-		// DX11 never did it. Read the raw reflection vector instead, which is what
-		// EnvironmentReflection_Global would do. Offered so the two can be compared side by
-		// side; mode 1 (the plain precision fix) is the conservative default.
+		// Mode 3 — THE DEFAULT (Lee's call, 08-18 after seeing the A/B). A box this size is not
+		// a room, it is "the whole level" — GG's globalEnvProbe. Parallax-correcting against it
+		// is not modelling anything physical: it drags the reflected horizon by however far the
+		// surface sits from the probe centre (the map origin), which makes the look POSITION
+		// DEPENDENT across a level. DX11 never did it. Read the raw reflection vector instead,
+		// which is what EnvironmentReflection_Global does for the same cube.
+		// Mode 1 keeps the parallax and is the precision-only change, retained for comparison.
 		// The half-extent is derived from the inverse matrix (its row length is 1/half-extent)
 		// rather than from probe.GetRange(): GetRange() is ALSO fp16 (SetRange packs through
 		// XMConvertFloatToHalf), so the global probe's authored range of 100000 comes back as

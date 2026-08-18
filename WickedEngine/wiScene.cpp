@@ -44,10 +44,16 @@ namespace wi::scene
 	// GGMAX 1.55: global env-probe brightness multiplier (1 = stock), set by the game's
 	// "Global Probe Brightness" slider; consumed in lightingHF EnvironmentReflection_Global.
 	float gg_envprobe_brightness = 1.0f;
-	// GGMAX 2.89 (#157): env-probe parallax precision — 0 = stock half (reproduces the fp16
-	// overflow defect), 1 = float (the fix, DEFAULT), 2 = float + magenta overflow map.
-	// See EnvironmentReflection_Local in lightingHF.hlsli for the full explanation.
-	int gg_probeparallax = 1;
+	// GGMAX 2.89 (#157): env-probe parallax precision / policy.
+	//   0 = stock half (reproduces the fp16 overflow defect)
+	//   1 = float precision, parallax kept
+	//   2 = float + magenta map of where the stock half math would overflow
+	//   3 = float + NO parallax on level-sized boxes  <-- DEFAULT (Lee's call, 08-18)
+	// 3 is the default because parallax-correcting against a box that encloses the whole level
+	// is not modelling anything physical: it drags the reflected horizon by however far the
+	// surface sits from the probe centre (the map origin), so the look becomes position
+	// dependent. DX11 never did it. See EnvironmentReflection_Local in lightingHF.hlsli.
+	int gg_probeparallax = 3;
 	// GGMAX 2.89 (#157): 1 = ignore local probes, everything reads the global cube (isolation
 	// lever; reproduces the marker ball's circles without needing a mouse drag).
 	int gg_probeonlyglobal = 0;

@@ -1669,7 +1669,9 @@ struct FilterEnvmapPushConstants
 
 	float filterRoughness;
 	uint filterRayCount;
-	uint padding_filterCB;
+	// GGMAX 2.90: per-probe brightness baked into the filtered mips (was the free padding
+	// slot, so the struct size and layout are unchanged). Restores DX11's filterBrightness.
+	float filterBrightness;
 	int texture_input;
 
 	int texture_output;

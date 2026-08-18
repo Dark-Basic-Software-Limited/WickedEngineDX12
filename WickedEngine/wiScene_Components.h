@@ -1585,6 +1585,13 @@ namespace wi::scene
 		wi::Resource resource; // if texture is coming from an asset
 		XMFLOAT3 position;
 		float range;
+		// GGMAX 2.90: per-probe brightness multiplier baked into the cube during BRDF mip
+		// filtering (restores the DX11 EnvironmentProbeComponent::filterBrightness that the
+		// DX12 port dropped — GGMAX's "Probe Brightness" marker slider drives it).
+		// Deliberately NOT serialized, like position/range above: the source of truth is the
+		// GG entity profile (eleprof.light.fProbeBrightness, saved in the .ele), and
+		// GGTerrain_EnvProbeWork re-pushes it on every probe-tracking update.
+		float filterBrightness = 1.0f;
 		XMFLOAT4X4 inverseMatrix;
 		mutable bool render_dirty = false;
 		mutable bool first_render = true; // true until first render completes
@@ -1594,6 +1601,9 @@ namespace wi::scene
 		constexpr void SetRealTime(bool value) { if (value) { _flags |= REALTIME; } else { _flags &= ~REALTIME; } }
 		constexpr void SetMSAA(bool value) { if (value) { _flags |= MSAA; } else { _flags &= ~MSAA; } SetDirty(); }
 		constexpr void SetUpdateInterval(float value) { realtime_update_interval = std::max(0.0f, value); }
+		// GGMAX 2.90: brightness is BAKED into the cube, so a change must force a re-capture —
+		// but only on an actual change, or the every-frame caller would re-bake forever.
+		void SetBrightness(float value) { if (value != filterBrightness) { filterBrightness = value; SetDirty(); } }
 
 		constexpr bool IsDirty() const { return _flags & DIRTY; }
 		constexpr bool IsRealTime() const { return _flags & REALTIME; }

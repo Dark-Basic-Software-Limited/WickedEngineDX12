@@ -123,6 +123,11 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThreadID)
 			accum += unpack_half4(shared_colors[GTid.x][GTid.y][j]);
 		}
 		accum /= accum.a;
+		// GGMAX 2.90: per-probe brightness, baked here exactly as DX11 did (filterEnvMapCS
+		// "col.rgb *= filterBrightness"). Note this covers mips 1..N-1 only — mip 0 is a
+		// straight CopyResource of the unfiltered render, so mirror-sharp (roughness 0)
+		// reflections ignore the slider. DX11 had the identical gap.
+		accum.rgb *= push.filterBrightness;
 		output[uint3(DTid.xy, face)] = saturateMediump(accum);
 	}
 

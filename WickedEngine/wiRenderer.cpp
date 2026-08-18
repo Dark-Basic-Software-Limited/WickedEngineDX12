@@ -11133,6 +11133,8 @@ void RefreshEnvProbes(const Visibility& vis, CommandList cmd)
 					// dummy probe, reduced ray count:
 					push.filterRayCount = 64;
 				}
+				// GGMAX 2.90: per-probe brightness baked into the filtered mips (DX11 parity)
+				push.filterBrightness = probe.filterBrightness;
 				push.texture_input = device->GetDescriptorIndex(&envrenderingColorBuffer, SubresourceType::SRV);
 				push.texture_output = device->GetDescriptorIndex(&envrenderingColorBuffer_Filtered, SubresourceType::UAV, i);
 				device->PushConstants(&push, sizeof(push), cmd);

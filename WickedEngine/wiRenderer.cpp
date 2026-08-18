@@ -9800,56 +9800,49 @@ void DrawDebugWorld(
 			// chooses which cube it mirrors. This is the like-for-like rig the circle hunt
 			// never had: same ball, same pose, same camera, same shader; the ONLY thing that
 			// changes between shots is the cube (global vs local) or the mip.
-			const bool haveFocus = (focusbest >= 0);
-			XMFLOAT3 ballpos;
-			if (haveFocus)
+			// Where to put the one sphere. Preference order, best answer first:
+			//   1. the probe the game has focused (a picked marker) — the sphere lands exactly
+			//      on the ball being inspected, which is the whole point of the mode;
+			//   2. no pick, but the scene has pool probes — use the one nearest the camera, so
+			//      it still lands on a real marker rather than floating in the user's face;
+			//   3. nothing to stand on — hover it in front of the camera so the mode is never
+			//      simply invisible. 4x the radius so it reads as a ball in the view (a closer
+			//      placement subtends ~80 degrees and swallows the whole frame).
+			int placeat = focusbest;
+			if (placeat < 0)
 			{
-				ballpos = scene.probes[focusbest].position;
+				float bestd2 = FLT_MAX;
+				for (size_t i = 1; i < scene.probes.GetCount(); ++i)
+				{
+					if (!scene.probes[i].texture.IsValid()) continue;
+					const XMFLOAT3& pp = scene.probes[i].position;
+					const float ddx = pp.x - camera.Eye.x;
+					const float ddy = pp.y - camera.Eye.y;
+					const float ddz = pp.z - camera.Eye.z;
+					const float d2 = ddx * ddx + ddy * ddy + ddz * ddz;
+					// ignore the parked pool slots, which sit tens of thousands of units away
+					if (d2 < bestd2 && d2 < (20000.0f * 20000.0f)) { bestd2 = d2; placeat = (int)i; }
+				}
+			}
+			XMFLOAT3 ballpos;
+			if (placeat >= 0)
+			{
+				ballpos = scene.probes[placeat].position;
 			}
 			else
 			{
-				// No marker picked: hover the ball in front of the camera so the mode works
-				// from the harness on any scene, probe markers or not. 1.5x the radius keeps it
-				// close enough that scene geometry (a %probe marker sitting a few hundred units
-				// out, for one) does not occlude the thing being inspected.
 				XMVECTOR eye = XMLoadFloat3(&camera.Eye);
 				XMVECTOR at = XMVector3Normalize(XMLoadFloat3(&camera.At));
-				XMStoreFloat3(&ballpos, XMVectorAdd(eye, XMVectorScale(at, dbgscale * 1.5f)));
+				XMStoreFloat3(&ballpos, XMVectorAdd(eye, XMVectorScale(at, dbgscale * 4.0f)));
 			}
 
+			// mode 1 = the GLOBAL cube: probes[0].texture is literally what every shader reads
+			// as GetScene().globalprobe (wiScene.cpp:1007). mode 2 = the local cube belonging
+			// to the probe we are standing on, falling back to the global if there is none.
 			int cubeindex = -1;
 			if (scene.probes.GetCount() > 0)
 			{
-				if (gg_probeview_mode == 1)
-				{
-					// The GLOBAL cube: probes[0].texture is literally what every shader reads
-					// as GetScene().globalprobe (wiScene.cpp:1007).
-					cubeindex = 0;
-				}
-				else if (haveFocus)
-				{
-					cubeindex = focusbest;
-				}
-				else
-				{
-					// Local mode with nothing picked: mirror the pool probe nearest the camera
-					// (never probes[0] — that one is the global cube by definition).
-					float bestd2 = FLT_MAX;
-					for (size_t i = 1; i < scene.probes.GetCount(); ++i)
-					{
-						const XMFLOAT3& pp = scene.probes[i].position;
-						const float ddx = pp.x - camera.Eye.x;
-						const float ddy = pp.y - camera.Eye.y;
-						const float ddz = pp.z - camera.Eye.z;
-						const float d2 = ddx * ddx + ddy * ddy + ddz * ddz;
-						if (d2 < bestd2 && scene.probes[i].texture.IsValid())
-						{
-							bestd2 = d2;
-							cubeindex = (int)i;
-						}
-					}
-					if (cubeindex < 0) cubeindex = 0; // no pool probe has a cube yet
-				}
+				cubeindex = (gg_probeview_mode == 1 || placeat < 0) ? 0 : placeat;
 			}
 
 			if (cubeindex >= 0 && scene.probes[cubeindex].texture.IsValid())

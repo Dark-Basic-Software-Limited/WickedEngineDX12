@@ -45,7 +45,12 @@ struct alignas(16) ShaderScene
 	// GGMAX 2.80 (#157): replace EVERY read of the GLOBAL env-probe cube with a solid colour,
 	// so anything still showing structure afterwards cannot be coming from the cube. One full
 	// 16-byte row (rgb + enable) for the same alignment reason as the row above.
-	float4 gg_envsolid;			// rgb = the colour, w = 0 off / 1 on
+	float4 gg_envsolid;
+	// GGMAX 2.82 (#157, Lee-directed): DIRECTION-PEEL rungs. xyz = the fixed direction for
+	// mode 4, w = mode: 0 stock chain; 1 box projection OFF (local path uses raw R);
+	// 2 + normal map OFF (R from facenormal); 3 + camera OFF (sample facenormal, no reflect);
+	// 4 FIXED direction xyz at every read site — no direction left.
+	float4 gg_envdir;			// rgb = the colour, w = 0 off / 1 on
 
 	ShaderWeather weather;
 

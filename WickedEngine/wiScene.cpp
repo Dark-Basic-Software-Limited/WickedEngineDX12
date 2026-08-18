@@ -58,6 +58,13 @@ namespace wi::scene
 	float gg_envsolid_g = 0.0f;
 	float gg_envsolid_b = 1.0f;
 
+	// GGMAX 2.82 (#157, Lee-directed): DIRECTION-PEEL rungs for the env cube reads.
+	// mode: 0 stock; 1 box projection OFF; 2 + normal map OFF; 3 + camera OFF; 4 FIXED dir xyz.
+	float gg_envdir_mode = 0.0f;
+	float gg_envdir_x = 0.0f;
+	float gg_envdir_y = 0.0f;
+	float gg_envdir_z = 1.0f;
+
 	// GGMAX 2.15 (2026-08-09): per-system attribution inside Scene::Update.
 	//
 	// WHY THIS EXISTS: the stage ranges (Scene-S1/S2/S4) are the finest attribution normally
@@ -1043,6 +1050,10 @@ namespace wi::scene
 		// GGMAX 2.80 (#157 debug rig): solid-colour global env cube (harness SET_ENVSOLID)
 		extern float gg_envsolid_on, gg_envsolid_r, gg_envsolid_g, gg_envsolid_b;
 		shaderscene.gg_envsolid = XMFLOAT4(gg_envsolid_r, gg_envsolid_g, gg_envsolid_b, gg_envsolid_on);
+
+		// GGMAX 2.82 (#157 debug rig): direction-peel rungs (harness SET_ENVDIR)
+		extern float gg_envdir_mode, gg_envdir_x, gg_envdir_y, gg_envdir_z;
+		shaderscene.gg_envdir = XMFLOAT4(gg_envdir_x, gg_envdir_y, gg_envdir_z, gg_envdir_mode);
 
 		shaderscene.impostorInstanceOffset = impostorInstanceOffset;
 		shaderscene.TLAS = device->GetDescriptorIndex(&TLAS, SubresourceType::SRV);

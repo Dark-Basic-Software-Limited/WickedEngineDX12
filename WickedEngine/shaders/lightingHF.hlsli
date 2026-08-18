@@ -653,6 +653,28 @@ inline bool GGEnvWipeFacePX(in float3 dir)
 		&& abs(dir.x) >= abs(dir.z);
 }
 
+// GGMAX 2.82 (#157, Lee-directed): DIRECTION-PEEL rungs — remove the contributors that bend
+// the env-cube sample direction, ONE AT A TIME (cumulative), until no direction is left.
+// gg_envdir.w: 0 stock chain; 1 box projection OFF (local path handled at its call site);
+//   2 = + NORMAL MAP OFF: direction = reflect off the GEOMETRIC normal (surface.facenormal,
+//       snapshotted in objectHF BEFORE the normal map, AFTER the backface flip);
+//   3 = + CAMERA OFF: direction = the geometric normal itself, no reflect;
+//   4 = FIXED: direction = normalize(gg_envdir.xyz) — every read asks for the same texel.
+// The mesh's own vertex normals are the one contributor that cannot be peeled at read time
+// (they ARE the surface); rung 4 removes them together with everything else.
+inline half3 GGEnvPeelDirSpec(in Surface surface, in half3 stockDir)
+{
+	const float m = GetScene().gg_envdir.w;
+	[branch]
+	if (m >= 4)
+		return (half3)normalize(GetScene().gg_envdir.xyz);
+	else if (m >= 3)
+		return surface.facenormal;
+	else if (m >= 2)
+		return (half3)normalize(-reflect(surface.V, surface.facenormal));
+	return stockDir;
+}
+
 inline half3 GetAmbient(in float3 N)
 {
 	half3 ambient;
@@ -667,6 +689,11 @@ inline half3 GetAmbient(in float3 N)
 
 #else
 
+	// 2.82: the ambient site has no Surface, so only the terminal rung applies here —
+	// mode 4 replaces the sample direction with the FIXED one (modes 1-3 leave N: ambient
+	// already samples a bare normal — no normal map*, no camera, no box projection).
+	// (*callers pass the mapped N; on the ball ambient is 0.0% so this nuance is inert.)
+	const float3 ggAmbDir = (GetScene().gg_envdir.w >= 4) ? normalize(GetScene().gg_envdir.xyz) : N;
 	[branch]
 	if (GetScene().gg_envsolid.w >= 5)
 	{
@@ -678,7 +705,7 @@ inline half3 GetAmbient(in float3 N)
 			uint2 dim;
 			uint mipcount;
 			cubemap.GetDimensions(0, dim.x, dim.y, mipcount);
-			ambient = GGEnvWipeFacePX(N) ? half3(0, 0, 0) : cubemap.SampleLevel(sampler_linear_clamp, N, mipcount).rgb;
+			ambient = GGEnvWipeFacePX(ggAmbDir) ? half3(0, 0, 0) : cubemap.SampleLevel(sampler_linear_clamp, ggAmbDir, mipcount).rgb;
 		}
 	}
 	else if (GetScene().gg_envsolid.w >= 2)
@@ -697,7 +724,7 @@ inline half3 GetAmbient(in float3 N)
 		uint2 dim;
 		uint mipcount;
 		cubemap.GetDimensions(0, dim.x, dim.y, mipcount);
-		ambient = cubemap.SampleLevel(sampler_linear_clamp, N, mipcount).rgb;
+		ambient = cubemap.SampleLevel(sampler_linear_clamp, ggAmbDir, mipcount).rgb;
 	}
 	
 #endif // ENVMAPRENDERING
@@ -756,15 +783,18 @@ inline half3 EnvironmentReflection_Global(in Surface surface)
 	//          for mip 4 on a 4-mip cube and relies on the sampler clamping.
 	//   w = 4  FORCE the mip to gg_envsolid.r and sample the real cube with it.
 	//   w = 5  (2.81) normal render, but the +X FACE of the cube is WIPED to black.
+	// 2.82: ggDir = the direction after the PEEL rungs (SET_ENVDIR); stock = surface.R.
+	// All modes below (wipe included) operate on the peeled direction so the rigs compose.
+	const half3 ggDir = GGEnvPeelDirSpec(surface, surface.R);
 	[branch]
 	if (GetScene().gg_envsolid.w >= 5)
 	{
-		envColor = GGEnvWipeFacePX(surface.R) ? half3(0, 0, 0) : cubemap.SampleLevel(sampler_linear_clamp, surface.R, MIP).rgb * surface.F;
+		envColor = GGEnvWipeFacePX(ggDir) ? half3(0, 0, 0) : cubemap.SampleLevel(sampler_linear_clamp, ggDir, MIP).rgb * surface.F;
 	}
 	else if (GetScene().gg_envsolid.w >= 4)
 	{
 		const half forcedMIP = (half)clamp(GetScene().gg_envsolid.r, 0.0, (float)mipcount - 1.0);
-		envColor = cubemap.SampleLevel(sampler_linear_clamp, surface.R, forcedMIP).rgb * surface.F;
+		envColor = cubemap.SampleLevel(sampler_linear_clamp, ggDir, forcedMIP).rgb * surface.F;
 	}
 	else if (GetScene().gg_envsolid.w >= 3)
 	{
@@ -780,7 +810,7 @@ inline half3 EnvironmentReflection_Global(in Surface surface)
 	else if (GetScene().gg_envsolid.w > 0)
 		envColor = (half3)GetScene().gg_envsolid.rgb * surface.F;
 	else
-	envColor = cubemap.SampleLevel(sampler_linear_clamp, surface.R, MIP).rgb * surface.F;
+	envColor = cubemap.SampleLevel(sampler_linear_clamp, ggDir, MIP).rgb * surface.F;
 
 #ifdef SHEEN
 	envColor *= surface.sheen.albedoScaling;
@@ -835,15 +865,25 @@ inline half4 EnvironmentReflection_Local(in TextureCube<half4> cubemap, in Surfa
 	// Missing it would leave the cube's content on screen and make the whole test meaningless.
 	// 2.80a SPLIT mode (w >= 2): this read site — the PARALLAX-CORRECTED LOCAL path, which the
 	// global probe also travels — is BLUE, at full strength (fresnel dropped, as above).
+	// 2.82: rung 1 peels the BOX PROJECTION — the local path samples the raw reflection
+	// vector instead of the parallax-corrected one; rungs 2-4 then follow the same policy
+	// as the global site (GGEnvPeelDirSpec). Stock (mode 0) keeps R_parallaxCorrected.
+	half3 ggDirL = R_parallaxCorrected;
+	[branch]
+	if (GetScene().gg_envdir.w >= 2)
+		ggDirL = GGEnvPeelDirSpec(surface, surface.R);
+	else if (GetScene().gg_envdir.w >= 1)
+		ggDirL = surface.R;
+
 	// 2.81 mode 5: normal sample, +X face wiped (note: this site serves ALL probes' cubemaps,
 	// so a genuinely-local probe would get its +X face wiped too — fine for a debug rig).
 	half3 envColor = (GetScene().gg_envsolid.w >= 5)
-		? (GGEnvWipeFacePX(R_parallaxCorrected) ? half3(0, 0, 0) : cubemap.SampleLevel(sampler_linear_clamp, R_parallaxCorrected, MIP).rgb * surface.F)
+		? (GGEnvWipeFacePX(ggDirL) ? half3(0, 0, 0) : cubemap.SampleLevel(sampler_linear_clamp, ggDirL, MIP).rgb * surface.F)
 		: (GetScene().gg_envsolid.w >= 2)
 			? half3(0, 0, 1)
 			: (GetScene().gg_envsolid.w > 0)
 				? (half3)GetScene().gg_envsolid.rgb * surface.F
-				: cubemap.SampleLevel(sampler_linear_clamp, R_parallaxCorrected, MIP).rgb * surface.F;
+				: cubemap.SampleLevel(sampler_linear_clamp, ggDirL, MIP).rgb * surface.F;
 
 #ifdef SHEEN
 	envColor *= surface.sheen.albedoScaling;

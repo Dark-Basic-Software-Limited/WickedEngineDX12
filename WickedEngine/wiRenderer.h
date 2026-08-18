@@ -1241,6 +1241,10 @@ namespace wi::renderer
 	// (FilterEnvMap). Default 2.0 — kills the blown horizon band flooding the filtered mips.
 	// 0 = off. Applies on the next capture (use REFRESH_ENVPROBE to re-bake).
 	void SetEnvProbeFilterHDRClamp(float value);
+	// GGMAX 2.85 (#157, Lee-directed): 1 = PLAIN MIPS — skip the BRDF prefilter, ship the
+	// ordinary 2x2 box-reduction chain (DX11-style). 0 = BRDF filter (with the 2.84 fixes).
+	// Applies on the next capture (REFRESH_ENVPROBE to re-bake). Default 1.
+	void SetEnvProbePlainMips(int enable);
 	void SetToDrawDebugEmitters(bool param);
 	bool GetToDrawDebugEmitters();
 	void SetToDrawDebugForceFields(bool param);

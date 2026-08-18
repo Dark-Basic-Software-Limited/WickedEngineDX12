@@ -10549,6 +10549,7 @@ void DrawSun(CommandList cmd)
 // it only because it sits in a plain function body).
 extern int gg_probecapture_trace;
 extern float gg_envprobe_filter_hdrclamp;
+extern int gg_envprobe_plainmips;
 extern float gg_probecapture_trace_radius;
 
 void RefreshEnvProbes(const Visibility& vis, CommandList cmd)
@@ -11119,6 +11120,15 @@ void RefreshEnvProbes(const Visibility& vis, CommandList cmd)
 
 			TextureDesc desc = envrenderingColorBuffer_Filtered.GetDesc();
 
+			// GGMAX 2.85 (#157, Lee-directed): PLAIN MIPS mode — skip the BRDF prefilter
+			// entirely and ship the ordinary 2x2 box-reduction chain that GenerateMipChain
+			// already built (the CopyResource above carried it into the Filtered buffer).
+			// This is the DX11-style mip chain: a mip texel is only ever a local average of
+			// its own face patch, roughness plays no part in authoring the levels. Default ON
+			// per Lee's test; SET_PROBEMIPS 0 restores the BRDF filter (with the 2.84 fixes).
+			if (gg_envprobe_plainmips == 0)
+			{
+
 			device->BindComputeShader(&shaders[CSTYPE_FILTERENVMAP], cmd);
 
 			// GGMAX 2.84 (#157 fix 2): only the SHIPPED mip levels are filtered (the buffers now
@@ -11171,6 +11181,8 @@ void RefreshEnvProbes(const Visibility& vis, CommandList cmd)
 				desc.width *= 2;
 				desc.height *= 2;
 			}
+
+			} // 2.85: end of the BRDF-filter block skipped in PLAIN MIPS mode
 
 			{
 				GPUBarrier barriers[] = {
@@ -20729,6 +20741,13 @@ void SetDebugEnvProbeForceGlobal(int enable) { gg_debugprobe_force_global = enab
 // Takes effect on the NEXT capture (REFRESH_ENVPROBE to re-bake).
 float gg_envprobe_filter_hdrclamp = 2.0f;
 void SetEnvProbeFilterHDRClamp(float value) { gg_envprobe_filter_hdrclamp = value; }
+
+// GGMAX 2.85 (#157, Lee-directed): PLAIN MIPS — skip the BRDF prefilter entirely, ship the
+// ordinary 2x2 box-reduction chain (DX11-style: a mip texel is only ever a local average of
+// its own face patch; roughness plays no part). Default ON per Lee's directive.
+// SET_PROBEMIPS 0 restores the BRDF filter. Applies on the NEXT capture (REFRESH_ENVPROBE).
+int gg_envprobe_plainmips = 1;
+void SetEnvProbePlainMips(int enable) { gg_envprobe_plainmips = enable; }
 // GGMAX 2.77 (#157 instrument): see the RefreshEnvProbes trace block
 int gg_probecapture_trace = 0;
 float gg_probecapture_trace_radius = 400.0f;

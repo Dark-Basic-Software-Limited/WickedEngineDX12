@@ -1237,6 +1237,10 @@ namespace wi::renderer
 	// continuously instead of glimpsed while a Probe Range slider is dragged. Position and
 	// size still come from the focused probe. Default OFF.
 	void SetDebugEnvProbeForceGlobal(int enable);
+	// GGMAX 2.84 (#157 fix 3): clamp HDR samples inside the env-probe BRDF prefilter
+	// (FilterEnvMap). Default 2.0 — kills the blown horizon band flooding the filtered mips.
+	// 0 = off. Applies on the next capture (use REFRESH_ENVPROBE to re-bake).
+	void SetEnvProbeFilterHDRClamp(float value);
 	void SetToDrawDebugEmitters(bool param);
 	bool GetToDrawDebugEmitters();
 	void SetToDrawDebugForceFields(bool param);

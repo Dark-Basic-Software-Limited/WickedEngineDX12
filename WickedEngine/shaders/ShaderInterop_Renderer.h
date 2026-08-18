@@ -1671,7 +1671,9 @@ struct FilterEnvmapPushConstants
 
 	float filterRoughness;
 	uint filterRayCount;
-	uint padding_filterCB;
+	// GGMAX 2.84 (#157 fix 3): clamp each HDR sample inside FilterEnvMap to this value
+	// (0 = off). Kills the 10-20x blown horizon band flooding the filtered mips flat.
+	float filterHDRClamp;
 	int texture_input;
 
 	int texture_output;

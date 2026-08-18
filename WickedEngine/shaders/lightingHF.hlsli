@@ -662,11 +662,23 @@ inline bool GGEnvWipeFacePX(in float3 dir)
 //   4 = FIXED: direction = normalize(gg_envdir.xyz) — every read asks for the same texel.
 // The mesh's own vertex normals are the one contributor that cannot be peeled at read time
 // (they ARE the surface); rung 4 removes them together with everything else.
+// 2.83 (Lee's test): CARDINAL LOCK — snap a direction to its dominant axis, one of the six
+// face centres. Guaranteed dead-centre face reads: no diagonals, no face-edge filtering.
+inline half3 GGCardinalDir(in half3 dir)
+{
+	const half3 a = abs(dir);
+	if (a.x >= a.y && a.x >= a.z) return half3(dir.x > 0 ? 1 : -1, 0, 0);
+	if (a.y >= a.z)               return half3(0, dir.y > 0 ? 1 : -1, 0);
+	return half3(0, 0, dir.z > 0 ? 1 : -1);
+}
+
 inline half3 GGEnvPeelDirSpec(in Surface surface, in half3 stockDir)
 {
 	const float m = GetScene().gg_envdir.w;
 	[branch]
-	if (m >= 4)
+	if (m >= 5)
+		return GGCardinalDir(stockDir);
+	else if (m >= 4)
 		return (half3)normalize(GetScene().gg_envdir.xyz);
 	else if (m >= 3)
 		return surface.facenormal;
@@ -693,7 +705,8 @@ inline half3 GetAmbient(in float3 N)
 	// mode 4 replaces the sample direction with the FIXED one (modes 1-3 leave N: ambient
 	// already samples a bare normal — no normal map*, no camera, no box projection).
 	// (*callers pass the mapped N; on the ball ambient is 0.0% so this nuance is inert.)
-	const float3 ggAmbDir = (GetScene().gg_envdir.w >= 4) ? normalize(GetScene().gg_envdir.xyz) : N;
+	const float3 ggAmbDir = (GetScene().gg_envdir.w >= 5) ? GGCardinalDir((half3)N)
+		: (GetScene().gg_envdir.w >= 4) ? normalize(GetScene().gg_envdir.xyz) : N;
 	[branch]
 	if (GetScene().gg_envsolid.w >= 5)
 	{

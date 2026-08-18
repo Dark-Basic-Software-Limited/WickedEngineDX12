@@ -108,7 +108,13 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThreadID)
 			uint2 dim;
 			input.GetDimensions(dim.x, dim.y); // input to computeLod needs to be resolution of top mip, not the current filter resolution
 			float lod = computeLod(pdf, dim.x, push.filterRayCount);
-			col += input.SampleLevel(sampler_linear_clamp, L, lod) * NoL;
+			float4 s = input.SampleLevel(sampler_linear_clamp, L, lod);
+			// GGMAX 2.84 (#157 fix 3): clamp the HDR peak per sample — a 10-20x blown horizon
+			// band otherwise floods every wide-cone average into a flat wash (the "gaps").
+			// DX11 captured LDR so its band clamped to 1.0 by construction. 0 = off.
+			if (push.filterHDRClamp > 0)
+				s.rgb = min(s.rgb, push.filterHDRClamp.xxx);
+			col += s * NoL;
 		}
 	}
 

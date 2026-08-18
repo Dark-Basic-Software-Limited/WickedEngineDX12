@@ -10548,6 +10548,7 @@ void DrawSun(CommandList cmd)
 // link (the 2.53 linkage rule, lambda variant; the 2.75 sphere-scale extern gets away with
 // it only because it sits in a plain function body).
 extern int gg_probecapture_trace;
+extern float gg_envprobe_filter_hdrclamp;
 extern float gg_probecapture_trace_radius;
 
 void RefreshEnvProbes(const Visibility& vis, CommandList cmd)
@@ -10687,7 +10688,11 @@ void RefreshEnvProbes(const Visibility& vis, CommandList cmd)
 
 			if (!envrenderingColorBuffer.IsValid())
 			{
-				desc.mip_levels = probe.texture.desc.mip_levels;
+				// GGMAX 2.84 (#157 fix 1): FULL mip chain on the filter SOURCE (was probe's 4).
+				// filterEnvMapCS's computeLod requests source lods up to ~8 for rough levels;
+				// with only 4 mips every wide ray clamped to the 16px level, collapsing the
+				// filtered mips toward one value per face (the "single rogue pixel" gaps).
+				desc.mip_levels = GetMipCount(desc.width, desc.height, 1, 1);
 				desc.bind_flags = BindFlag::RENDER_TARGET | BindFlag::SHADER_RESOURCE | BindFlag::UNORDERED_ACCESS;
 				desc.format = format_rendertarget_envprobe;
 				desc.layout = ResourceState::SHADER_RESOURCE;
@@ -10720,7 +10725,11 @@ void RefreshEnvProbes(const Visibility& vis, CommandList cmd)
 
 			if (!envrenderingColorBuffer_Filtered.IsValid())
 			{
-				desc.mip_levels = probe.texture.desc.mip_levels;
+				// GGMAX 2.84: full chain here too so the whole-resource CopyResource from the
+				// source buffer stays legal (identical desc). Only the first probe-mip-count
+				// levels are filtered and shipped; the rest are never read (BlockCompress
+				// loops the DST's mip count).
+				desc.mip_levels = GetMipCount(desc.width, desc.height, 1, 1);
 				desc.bind_flags = BindFlag::SHADER_RESOURCE | BindFlag::UNORDERED_ACCESS;
 				desc.format = format_rendertarget_envprobe;
 				desc.layout = ResourceState::SHADER_RESOURCE;
@@ -11112,7 +11121,14 @@ void RefreshEnvProbes(const Visibility& vis, CommandList cmd)
 
 			device->BindComputeShader(&shaders[CSTYPE_FILTERENVMAP], cmd);
 
-			int mip_start = desc.mip_levels - 1;
+			// GGMAX 2.84 (#157 fix 2): only the SHIPPED mip levels are filtered (the buffers now
+			// carry a full chain for the source lods; probe.texture still ships 4), and the
+			// roughness ladder is aligned to the READ side's mapping (lightingHF samples at
+			// MIP = roughness * mipcount, so shipped mip i corresponds to roughness i/mipcount).
+			// The old ladder i/(mips-1) filtered mip1 at 0.33/mip3 at 1.0 — every level ~33%
+			// blurrier than the reader assumed, on top of the 4-level coarseness.
+			const int gg_shipped_mips = (int)std::min(probe.texture.desc.mip_levels, desc.mip_levels);
+			int mip_start = gg_shipped_mips - 1;
 			desc.width = std::max(1u, desc.width >> mip_start);
 			desc.height = std::max(1u, desc.height >> mip_start);
 			for (int i = mip_start; i > 0; --i)
@@ -11122,7 +11138,8 @@ void RefreshEnvProbes(const Visibility& vis, CommandList cmd)
 				push.filterResolution.y = desc.height;
 				push.filterResolution_rcp.x = 1.0f / push.filterResolution.x;
 				push.filterResolution_rcp.y = 1.0f / push.filterResolution.y;
-				push.filterRoughness = (float)i / (float)(desc.mip_levels - 1);
+				push.filterRoughness = (float)i / (float)gg_shipped_mips;
+				push.filterHDRClamp = gg_envprobe_filter_hdrclamp; // 2.84 fix 3 (0 = off)
 				if (probe_aabb.layerMask & vis.layerMask)
 				{
 					// real probe:
@@ -20704,6 +20721,14 @@ float gg_debugprobe_focus_radius = 0.0f;
 // probe's cube instead of their own, so the base env map can be studied continuously
 int gg_debugprobe_force_global = 0;
 void SetDebugEnvProbeForceGlobal(int enable) { gg_debugprobe_force_global = enable; }
+
+// GGMAX 2.84 (#157 fix 3): FilterEnvMap HDR sample clamp. The GG capture carries a 10-20x
+// blown horizon band; DX11 captured LDR so its band clamped at 1.0 by construction. The GGX
+// prefilter spreads that band's energy across every wide cone, flooding the filtered mips
+// flat (the disc-bug "gaps"). Default 2.0 keeps legitimate sky, kills the band. 0 = off.
+// Takes effect on the NEXT capture (REFRESH_ENVPROBE to re-bake).
+float gg_envprobe_filter_hdrclamp = 2.0f;
+void SetEnvProbeFilterHDRClamp(float value) { gg_envprobe_filter_hdrclamp = value; }
 // GGMAX 2.77 (#157 instrument): see the RefreshEnvProbes trace block
 int gg_probecapture_trace = 0;
 float gg_probecapture_trace_radius = 400.0f;

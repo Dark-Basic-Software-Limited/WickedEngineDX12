@@ -3,6 +3,7 @@
 #include "wiSprite.h"
 #include "wiSpriteFont.h"
 #include "wiRenderer.h"
+#include "wiProfiler.h" // GGMAX 2.92: this file had ZERO profiler instrumentation
 
 using namespace wi::graphics;
 
@@ -175,6 +176,11 @@ namespace wi
 
 		CommandList cmd = device->BeginCommandList();
 		device->EventBegin("RenderPath2D::Render", cmd);
+		// GGMAX 2.92: the whole 2D layer was uninstrumented — full-res rtFinal CLEAR, optional
+		// MSAA resolve, stencil extract/scale, and the sprite/font layers all landed in the
+		// "GPU Idle + unranged" bucket. Scoped (not explicit Begin/End) so the early-return
+		// paths in this function still close the range.
+		ScopedGPUProfiling("RenderPath2D::Render", cmd);
 		wi::image::SetCanvas(*this);
 		wi::font::SetCanvas(*this);
 
@@ -287,6 +293,10 @@ namespace wi
 	{
 		GraphicsDevice* device = wi::graphics::GetDevice();
 		device->EventBegin("RenderPath2D::Compose", cmd);
+		// GGMAX 2.92: the final full-screen premultiplied blit of rtFinal, previously unranged.
+		// ⚠ NESTS inside "RenderPath3D::Compose" (which calls this at wiRenderPath3D.cpp:2009) —
+		// the two rows OVERLAP, so do NOT add them together. GPU Busy unions them correctly.
+		ScopedGPUProfiling("RenderPath2D::Compose", cmd);
 
 		wi::image::Params fx;
 		fx.enableFullScreen();

@@ -1977,6 +1977,12 @@ namespace wi
 	{
 		GraphicsDevice* device = wi::graphics::GetDevice();
 		device->EventBegin("RenderPath3D::Compose", cmd);
+		// GGMAX 2.92: full-screen draw of the last postprocess RT + the customDraw_Compose hook,
+		// previously unranged. ⚠ This is a PARENT row: it CONTAINS "RenderPath2D::Compose"
+		// (called at :2009 below) and "Outline" (reached via customDraw_Compose). Those rows
+		// overlap it — never add them together. GPU Busy unions the intervals, so the header
+		// arithmetic stays right even though the rows do not sum.
+		ScopedGPUProfiling("RenderPath3D::Compose", cmd);
 
 		wi::image::Params fx;
 		fx.blendFlag = BLENDMODE_OPAQUE;

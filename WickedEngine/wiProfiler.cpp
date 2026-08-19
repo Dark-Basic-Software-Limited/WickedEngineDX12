@@ -71,6 +71,25 @@ namespace wi::profiler
 	};
 	wi::unordered_map<size_t, Range> ranges;
 
+	// GGMAX 2.91: GPU Busy / GPU Idle accounting.
+	// "GPU Frame" is a wall-clock SPAN — its begin query rides the frame's FIRST command list
+	// and its end query the LAST — so it structurally contains three things no child range can
+	// account for: passes with no range, driver work at RenderPassBegin/End (CLEAR / STORE /
+	// MSAA resolve / barriers), and any interval where the GPU simply had nothing to run.
+	// Reading "GPU Frame" as "my GPU workload" is therefore wrong; on a paced frame it tends to
+	// the frame period.
+	// ⚠ Busy is deliberately the UNION of the child intervals, NOT their sum. Ranges NEST —
+	// "Occlusion Culling" wraps "Occlusion Culling Render" — so a sum double-counts, which is
+	// exactly the mistake this counter exists to stop anyone making by hand. A union is also
+	// correct if async work ever overlaps again (see gg_single_queue).
+	float gg_gpu_busy_time = 0;
+	float gg_gpu_idle_time = 0;
+	float gg_gpu_busy_times[20] = {};
+	float gg_gpu_idle_times[20] = {};
+	int   gg_gpu_acc_counter = 0;
+	// scratch, reused each frame so the resolve loop allocates nothing
+	wi::vector<std::pair<uint64_t, uint64_t>> gg_gpu_intervals;
+
 	void gg_ClearTextDataCaches(); // GGMAX 1.67: defined next to GetTextData below
 
 	// GGMAX wall-gap tracer (see wiProfiler.h). Main thread only; independent of ENABLED.
@@ -282,6 +301,8 @@ namespace wi::profiler
 		// This should be done before we begin reallocating new queries for current buffer index
 		const uint64_t* queryResults = (const uint64_t*)queryResultBuffer[queryheap_idx].mapped_data;
 		double gpu_frequency = (double)device->GetTimestampFrequency() / 1000.0;
+		gg_gpu_intervals.clear();       // GGMAX 2.91
+		uint64_t gg_frame_span_ticks = 0;
 		for (auto& x : ranges)
 		{
 			auto& range = x.second;
@@ -297,6 +318,14 @@ namespace wi::profiler
 					const uint64_t begin_result = queryResults[begin_idx];
 					const uint64_t end_result = queryResults[end_idx];
 					range.time = (float)abs((double)(end_result - begin_result) / gpu_frequency);
+
+					// GGMAX 2.91: collect raw tick intervals for the Busy union below.
+					const uint64_t lo = std::min(begin_result, end_result);
+					const uint64_t hi = std::max(begin_result, end_result);
+					if (x.first == gpu_frame)
+						gg_frame_span_ticks = hi - lo;   // the span itself, not a child
+					else
+						gg_gpu_intervals.push_back(std::make_pair(lo, hi));
 				}
 				range.gpuBegin[queryheap_idx] = -1;
 				range.gpuEnd[queryheap_idx] = -1;
@@ -314,6 +343,36 @@ namespace wi::profiler
 			}
 
 			range.in_use = false;
+		}
+
+		// GGMAX 2.91: fold the collected child intervals into Busy (union) and Idle.
+		if (gg_frame_span_ticks > 0)
+		{
+			std::sort(gg_gpu_intervals.begin(), gg_gpu_intervals.end());
+			uint64_t busy_ticks = 0;
+			uint64_t cur_lo = 0, cur_hi = 0;
+			bool have = false;
+			for (auto& iv : gg_gpu_intervals)
+			{
+				if (!have) { cur_lo = iv.first; cur_hi = iv.second; have = true; continue; }
+				if (iv.first <= cur_hi)                     // overlaps or nests -> extend
+					cur_hi = std::max(cur_hi, iv.second);
+				else { busy_ticks += cur_hi - cur_lo; cur_lo = iv.first; cur_hi = iv.second; }
+			}
+			if (have) busy_ticks += cur_hi - cur_lo;
+			if (busy_ticks > gg_frame_span_ticks) busy_ticks = gg_frame_span_ticks; // clamp: a
+				// child on another queue can in principle sit outside the span
+			const float busy_ms = (float)((double)busy_ticks / gpu_frequency);
+			const float span_ms = (float)((double)gg_frame_span_ticks / gpu_frequency);
+			// average over the same 20-frame window the ranges use, so these are comparable
+			gg_gpu_busy_times[gg_gpu_acc_counter % arraysize(gg_gpu_busy_times)] = busy_ms;
+			gg_gpu_idle_times[gg_gpu_acc_counter % arraysize(gg_gpu_idle_times)] = std::max(0.0f, span_ms - busy_ms);
+			gg_gpu_acc_counter++;
+			const int n = (int)std::min((size_t)gg_gpu_acc_counter, arraysize(gg_gpu_busy_times));
+			float b = 0, i2 = 0;
+			for (int k = 0; k < n; ++k) { b += gg_gpu_busy_times[k]; i2 += gg_gpu_idle_times[k]; }
+			gg_gpu_busy_time = b / (float)n;
+			gg_gpu_idle_time = i2 / (float)n;
 		}
 
 		device->QueryReset(
@@ -908,7 +967,12 @@ namespace wi::profiler
 		print_sorted(text_cache_cpu_persist);
 		ss << std::endl;
 
+		// GGMAX 2.91: GPU Frame is a wall-clock SPAN, so it never equals the sum of the rows
+		// below it. Busy = union of the child intervals (union, not sum — ranges nest);
+		// Idle = Frame - Busy = unranged passes + barrier/clear/resolve + genuine GPU idle.
 		ss << ranges[gpu_frame].name << ": " << std::fixed << ranges[gpu_frame].time << " ms" << std::endl;
+		ss << "  GPU Busy (union of rows): " << std::fixed << gg_gpu_busy_time << " ms" << std::endl;
+		ss << "  GPU Idle + unranged:      " << std::fixed << gg_gpu_idle_time << " ms" << std::endl;
 		print_sorted(text_cache_gpu_persist);
 
 		return ss.str();

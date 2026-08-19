@@ -18686,6 +18686,9 @@ void Postprocess_Tonemap(
 	}
 
 	device->EventBegin("Postprocess_Tonemap", cmd);
+	// GGMAX 2.91: this runs UNCONDITIONALLY every frame (full-res ClearUAV + full-res dispatch)
+	// and had a PIX marker but no profiler range, so it never showed in the panel.
+	ScopedGPUProfiling("Postprocess_Tonemap", cmd);
 
 	device->Barrier(GPUBarrier::Image(&output, output.desc.layout, ResourceState::UNORDERED_ACCESS), cmd);
 

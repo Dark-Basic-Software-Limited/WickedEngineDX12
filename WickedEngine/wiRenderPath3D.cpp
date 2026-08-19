@@ -2469,6 +2469,17 @@ namespace wi
 			wi::profiler::EndRange(range); // Transparent Scene
 		}
 
+		// GGMAX 2.91: everything from here to RenderPassEnd used to sit in NO profiler range —
+		// the "Transparent Scene" range closes above, but the pass keeps going. That orphaned
+		// window holds customDraw_Transparent (the GG gpup/.arx particle draw), DrawDebugWorld,
+		// DrawWireframeOverlay, DrawLightVisualizers, DrawSpritesAndFonts and DrawLensFlares —
+		// only DrawSoftParticles inside it was ever measured. Wrap the remainder so the panel
+		// accounts for it instead of dumping it into the GPU Frame gap.
+		// ⚠ Explicit Begin/End, NOT ScopedGPUProfiling: the enclosing scope here runs well past
+		// RenderPassEnd, so a scoped object would also swallow the distortion pass and the
+		// postprocess chain and report a meaninglessly large row.
+		auto range_ttail = wi::profiler::BeginRangeGPU("Transparent Tail (custom/debug/sprites/flares)", cmd);
+
 		// Custom scene draw (terrain transparent overlays):
 		// GGMAX 2.13 (game task #120 — the steam-scene fullscreen white-out): the hook
 		// records GG-shader draws (legacy gpup steam, GG terrain) whose constant buffers
@@ -2505,6 +2516,7 @@ namespace wi
 		}
 
 		device->RenderPassEnd(cmd);
+		wi::profiler::EndRange(range_ttail); // GGMAX 2.91: close at the pass boundary
 
 		// Distortion particles:
 		{

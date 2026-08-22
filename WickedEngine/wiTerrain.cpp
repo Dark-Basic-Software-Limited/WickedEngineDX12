@@ -238,6 +238,18 @@ namespace wi::terrain
 
 	wi::jobsystem::context virtual_texture_ctx;
 
+	// GGMAX 2.94: the async VT job is a FILE-SCOPE context, so game code tearing a Terrain down
+	// (the "Terrain Off" brutal off-switch) has no way to join it. Generation_Restart already
+	// does this join for exactly the reason spelled out in the GGMAX 1.45 comment below - the
+	// job holds raw VirtualTexture pointers via virtual_textures_in_use and allocates/steals
+	// from the atlas, so freeing VTs while it runs is a use-after-free. Generation_Cancel does
+	// NOT join it (it only waits on generator->workload), so any external teardown that calls
+	// only Generation_Cancel inherits that race. Expose the join.
+	void gg_WaitVirtualTextureJob()
+	{
+		wi::jobsystem::Wait(virtual_texture_ctx);
+	}
+
 	static std::mutex locker;
 
 	constexpr void weight_norm(XMFLOAT4& weights)

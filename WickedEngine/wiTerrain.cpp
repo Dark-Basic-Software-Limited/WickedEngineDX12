@@ -41,6 +41,29 @@ namespace wi::terrain
 	// exit, so the editor/test game always regenerate WITH grass.
 	bool gg_generation_skip_grass = false;
 
+	// GGMAX 2.94d: how often the VT tile-request round trip runs, in frames. 1 = every frame
+	// (stock upstream behaviour), 4 = the shipped default.
+	//
+	// Measured 2026-08-22 on TESTPRO2 (625-chunk ring): WritebackTileRequestsGPU 3.96 ms/frame
+	// and AllocateTileRequests 1.09 ms/frame, against 0.62 ms to draw the entire scene. Writeback
+	// issues FOUR CopyResource calls per virtual texture per frame - one allocation readback plus
+	// three clear-copies - so ~2500 copies and their barriers every frame, purely for residency
+	// bookkeeping. Residency feedback does not need per-frame latency; it decides which terrain
+	// mip tiles to stream, and a 4-frame lag on that is imperceptible.
+	//
+	// ALLOCATE AND WRITEBACK MUST SHARE THE CADENCE. Writeback is what CLEARS feedbackMap,
+	// requestBuffer and allocationBuffer. Skipping only writeback would leave TILEREQUESTS
+	// re-appending into an uncleared requestBuffer every frame -> duplicate requests and a
+	// plausible free-tile exhaustion. Skipping the pair is coherent instead: feedback simply
+	// ACCUMULATES across the interval (the shader InterlockedOrs into it and nothing else
+	// touches it), then one allocate pass converts the accumulated set and one writeback
+	// exports and clears. More samples per decision, not fewer.
+	//
+	// CopyVirtualTexturePageStatusGPU is deliberately NOT gated - it is the opposite direction
+	// (CPU page table -> GPU), it is already incremental via gg_vt_incremental (1.33), and it
+	// measures 0.02 ms.
+	int gg_vt_writeback_interval = 4;
+
 	// GGMAX 2.58 diagnostic: per-phase chunk-generation cost accumulators (microseconds,
 	// cumulative since launch). Answers "what takes the most time when generating a chunk";
 	// dumped by the game's TERRAIN_GENPROF harness command. renderdata is measured inside

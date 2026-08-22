@@ -31,6 +31,10 @@ namespace wi
 		};
 	private:
 		float exposure = 1.0f;
+		// GGMAX 2.94d: frame counter for the VT tile-request round-trip cadence
+		// (wi::terrain::gg_vt_writeback_interval). Per render path, starts at 0 so the
+		// first frame after a load always runs the round trip.
+		mutable uint32_t gg_vt_writeback_counter = 0;   // mutable: Render() is const
 		float brightness = 0.0f;
 		float contrast = 1.0f;
 		float saturation = 1.0f;

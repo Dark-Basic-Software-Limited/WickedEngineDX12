@@ -1870,7 +1870,25 @@ namespace wi
 			wi::profiler::EndRange(gg_range_cpu); // GGMAX 1.32
 		});
 
-		if (scene->terrains.GetCount() > 0)
+		// GGMAX 2.94d: the VT tile-request round trip runs every Nth frame, not every frame.
+		// Measured on TESTPRO2 (625-chunk ring): Writeback 3.96 ms + Allocate 1.09 ms per frame,
+		// against 0.62 ms to draw the whole scene. Writeback issues four CopyResource calls per
+		// virtual texture (one readback + three clear-copies), so ~2500 copies plus barriers
+		// every frame for residency bookkeeping alone.
+		//
+		// The two are gated TOGETHER and must stay that way: writeback is what clears
+		// feedbackMap / requestBuffer / allocationBuffer, so gating only writeback would leave
+		// TILEREQUESTS re-appending into an uncleared requestBuffer -> duplicate requests.
+		// Gating the pair just lets feedback ACCUMULATE across the interval, which is coherent
+		// (the object shader InterlockedOrs into feedbackMap and nothing else touches it) and
+		// gives each allocate pass more samples, not fewer.
+		//
+		// The counter is per-RenderPath3D, and frame 0 always runs so terrain streams in
+		// immediately on load rather than after a 4-frame stall.
+		const int gg_vt_interval = std::max(1, wi::terrain::gg_vt_writeback_interval);
+		const bool gg_vt_roundtrip_frame = ((gg_vt_writeback_counter % gg_vt_interval) == 0);
+		gg_vt_writeback_counter++;
+		if (scene->terrains.GetCount() > 0 && gg_vt_roundtrip_frame)
 		{
 			CommandList cmd_allocation_tilerequest = device->BeginCommandList(gg_lean(QUEUE_COMPUTE)); // GGMAX 1.48c
 			device->WaitCommandList(cmd_allocation_tilerequest, cmd); // wait for opaque scene

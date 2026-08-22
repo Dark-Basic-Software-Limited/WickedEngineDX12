@@ -64,6 +64,17 @@ namespace wi::terrain
 	// measures 0.02 ms.
 	int gg_vt_writeback_interval = 4;
 
+	// GGMAX 2.94f: the GG bridge's terrain idle gate applies to the BRIDGE's Generation_Update
+	// call only. Scene::Update (wiScene.cpp) calls Generation_Update a SECOND time on the same
+	// frame, and that caller was never gated - so on a parked, settled scene the full chunk
+	// walk (per chunk: frustum test + 4 component hash lookups, then UpdateVirtualTexturesCPU
+	// over all of them again) still ran EVERY frame, 8 frames in 8.
+	//
+	// The bridge already computes exactly the right predicate and runs BEFORE __super::Update
+	// in the same frame, so it just publishes it here. Default false = stock behaviour, so if
+	// the bridge never sets it (standalone paths, other hosts) nothing changes.
+	bool gg_skip_generation_update = false;
+
 	// GGMAX 2.58 diagnostic: per-phase chunk-generation cost accumulators (microseconds,
 	// cumulative since launch). Answers "what takes the most time when generating a chunk";
 	// dumped by the game's TERRAIN_GENPROF harness command. renderdata is measured inside

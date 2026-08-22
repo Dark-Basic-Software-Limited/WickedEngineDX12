@@ -172,11 +172,24 @@ namespace wi::scene
 		if (dt > 0)
 		{
 			// Because this also spawns render tasks, this must not be during dt == 0 (eg. background loading)
+			// GGMAX 2.94f: honour the GG bridge's terrain idle gate here too. The bridge gated
+			// only its OWN Generation_Update call, so this one kept walking all 625 chunks
+			// every frame on a parked, settled scene - the gate was half-applied.
+			//
+			// CONSUME-AND-CLEAR, deliberately: the flag is a one-shot the bridge must re-arm
+			// every frame. If the bridge ever stops running (host without it, a load path, an
+			// early return added later) a sticky `true` would gate generation FOREVER and
+			// terrain would never appear. Failing back to stock every-frame behaviour is the
+			// only safe direction for this flag to rot in.
+			const bool gg_skip_gen = wi::terrain::gg_skip_generation_update;
+			wi::terrain::gg_skip_generation_update = false;
 			for (size_t i = 0; i < terrains.GetCount(); ++i)
 			{
 				wi::terrain::Terrain& terrain = terrains[i];
 				terrain.terrainEntity = terrains.GetEntity(i);
 				terrain.scene = this;
+				if (gg_skip_gen)
+					continue;   // pointers above still refreshed; only the walk is skipped
 				terrain.Generation_Update(camera);
 			}
 		}

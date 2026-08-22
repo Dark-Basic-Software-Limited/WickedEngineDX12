@@ -98,6 +98,11 @@ namespace wi::profiler
 	// Profiler must be enabled via SetEnabled(true) for data to be collected.
 	std::string GetTextData();
 
+	// GGMAX 2.94c: the biggest holes between measured GPU ranges in the latest frame, each
+	// labelled with the range that closed before it and the range that opens after it.
+	// Answers "where is the GPU Idle + unranged time", which no per-row total can.
+	std::string GetGPUGapReport();
+
 	// Returns CPU frame time in milliseconds (0 if profiler not enabled)
 	float GetCPUFrameTime();
 

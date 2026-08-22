@@ -88,7 +88,17 @@ namespace wi::profiler
 	float gg_gpu_idle_times[20] = {};
 	int   gg_gpu_acc_counter = 0;
 	// scratch, reused each frame so the resolve loop allocates nothing
-	wi::vector<std::pair<uint64_t, uint64_t>> gg_gpu_intervals;
+	struct GGInterval { uint64_t lo, hi; const std::string* name; };
+	wi::vector<GGInterval> gg_gpu_intervals;
+
+	// GGMAX 2.94c: THE GAP REPORT. "GPU Idle + unranged" says HOW MUCH dead time a frame holds
+	// but not WHERE. The intervals above are the frame's measured spans in raw ticks, so the
+	// dead time is literally the holes between them once merged. Reporting the biggest holes
+	// WITH the range that closed before each one and the range that opens after it names the
+	// suspect directly, on the shipping build, with no external tooling.
+	// Latest resolved frame only - the scenes this is used on are camera-parked and static, and
+	// averaging gaps across frames would blur exactly the structure we are looking for.
+	std::string gg_gpu_gap_report;
 
 	void gg_ClearTextDataCaches(); // GGMAX 1.67: defined next to GetTextData below
 
@@ -303,6 +313,7 @@ namespace wi::profiler
 		double gpu_frequency = (double)device->GetTimestampFrequency() / 1000.0;
 		gg_gpu_intervals.clear();       // GGMAX 2.91
 		uint64_t gg_frame_span_ticks = 0;
+		uint64_t gg_frame_lo = 0, gg_frame_hi = 0;   // GGMAX 2.94c
 		for (auto& x : ranges)
 		{
 			auto& range = x.second;
@@ -323,9 +334,14 @@ namespace wi::profiler
 					const uint64_t lo = std::min(begin_result, end_result);
 					const uint64_t hi = std::max(begin_result, end_result);
 					if (x.first == gpu_frame)
+					{
 						gg_frame_span_ticks = hi - lo;   // the span itself, not a child
+						gg_frame_lo = lo; gg_frame_hi = hi;   // GGMAX 2.94c: for the gap report
+					}
 					else
-						gg_gpu_intervals.push_back(std::make_pair(lo, hi));
+					{
+						gg_gpu_intervals.push_back(GGInterval{ lo, hi, &range.name });
+					}
 				}
 				range.gpuBegin[queryheap_idx] = -1;
 				range.gpuEnd[queryheap_idx] = -1;
@@ -348,18 +364,63 @@ namespace wi::profiler
 		// GGMAX 2.91: fold the collected child intervals into Busy (union) and Idle.
 		if (gg_frame_span_ticks > 0)
 		{
-			std::sort(gg_gpu_intervals.begin(), gg_gpu_intervals.end());
+			std::sort(gg_gpu_intervals.begin(), gg_gpu_intervals.end(),
+				[](const GGInterval& a, const GGInterval& b) { return a.lo < b.lo; });
 			uint64_t busy_ticks = 0;
 			uint64_t cur_lo = 0, cur_hi = 0;
 			bool have = false;
+			// GGMAX 2.94c: gap collection rides the same merge walk. `closer` tracks the range
+			// whose END defines the current merged block's trailing edge - that is the row the
+			// dead time follows, and it is NOT always the range that opened the block.
+			struct GGGap { uint64_t ticks; const std::string* after; const std::string* before; };
+			wi::vector<GGGap> gaps;
+			const std::string* closer = nullptr;
 			for (auto& iv : gg_gpu_intervals)
 			{
-				if (!have) { cur_lo = iv.first; cur_hi = iv.second; have = true; continue; }
-				if (iv.first <= cur_hi)                     // overlaps or nests -> extend
-					cur_hi = std::max(cur_hi, iv.second);
-				else { busy_ticks += cur_hi - cur_lo; cur_lo = iv.first; cur_hi = iv.second; }
+				if (!have) { cur_lo = iv.lo; cur_hi = iv.hi; closer = iv.name; have = true; continue; }
+				if (iv.lo <= cur_hi)                        // overlaps or nests -> extend
+				{
+					if (iv.hi > cur_hi) { cur_hi = iv.hi; closer = iv.name; }
+				}
+				else
+				{
+					busy_ticks += cur_hi - cur_lo;
+					gaps.push_back(GGGap{ iv.lo - cur_hi, closer, iv.name });
+					cur_lo = iv.lo; cur_hi = iv.hi; closer = iv.name;
+				}
 			}
 			if (have) busy_ticks += cur_hi - cur_lo;
+			// the two edge holes: frame span start -> first range, last range -> frame span end
+			if (have)
+			{
+				const uint64_t first_lo = gg_gpu_intervals.front().lo;
+				if (first_lo > gg_frame_lo) gaps.push_back(GGGap{ first_lo - gg_frame_lo, nullptr, gg_gpu_intervals.front().name });
+				if (gg_frame_hi > cur_hi)   gaps.push_back(GGGap{ gg_frame_hi - cur_hi, closer, nullptr });
+			}
+			{
+				std::sort(gaps.begin(), gaps.end(),
+					[](const GGGap& a, const GGGap& b) { return a.ticks > b.ticks; });
+				std::stringstream gs("");
+				gs.precision(3);
+				gs << std::fixed;
+				gs << "GPU DEAD-TIME GAPS (latest frame, largest first)" << std::endl;
+				gs << "  frame span " << ((double)gg_frame_span_ticks / gpu_frequency) << " ms, "
+				   << gaps.size() << " holes between measured ranges" << std::endl;
+				double shown = 0.0;
+				const size_t lim = std::min<size_t>(gaps.size(), 12);
+				for (size_t gi = 0; gi < lim; ++gi)
+				{
+					const double ms = (double)gaps[gi].ticks / gpu_frequency;
+					if (ms < 0.005) break;
+					shown += ms;
+					gs << "  " << ms << " ms  after [" << (gaps[gi].after ? gaps[gi].after->c_str() : "<frame start>")
+					   << "]  before [" << (gaps[gi].before ? gaps[gi].before->c_str() : "<frame end>") << "]" << std::endl;
+				}
+				double total = 0.0;
+				for (auto& g : gaps) total += (double)g.ticks / gpu_frequency;
+				gs << "  listed " << shown << " ms of " << total << " ms total dead time" << std::endl;
+				gg_gpu_gap_report = gs.str();
+			}
 			if (busy_ticks > gg_frame_span_ticks) busy_ticks = gg_frame_span_ticks; // clamp: a
 				// child on another queue can in principle sit outside the span
 			const float busy_ms = (float)((double)busy_ticks / gpu_frequency);
@@ -983,6 +1044,14 @@ namespace wi::profiler
 		if (!ENABLED || !initialized)
 			return 0.0f;
 		return ranges[cpu_frame].time;
+	}
+
+	// GGMAX 2.94c: WHERE the "GPU Idle + unranged" time sits, not just how much of it there is.
+	std::string GetGPUGapReport()
+	{
+		if (!ENABLED || !initialized)
+			return "";
+		return gg_gpu_gap_report;
 	}
 
 	float GetGPUFrameTime()

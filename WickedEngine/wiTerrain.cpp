@@ -2656,6 +2656,7 @@ namespace wi::terrain
 		wi::jobsystem::Wait(virtual_texture_ctx);
 		GraphicsDevice* device = GetDevice();
 		device->EventBegin("Terrain - CopyVirtualTexturePageStatusGPU", cmd);
+		auto gg_vtrange = wi::profiler::BeginRangeGPU("TerrainVT - CopyPageStatus", cmd); // GGMAX 2.94c
 		for (const VirtualTexture* vt : virtual_textures_in_use)
 		{
 			if (vt->residency == nullptr)
@@ -2668,6 +2669,7 @@ namespace wi::terrain
 			vt->gg_page_upload_pending = false;
 			device->CopyResource(&vt->residency->pageBuffer, &vt->residency->pageBuffer_CPU_upload[vt->residency->cpu_resource_id], cmd);
 		}
+		wi::profiler::EndRange(gg_vtrange); // GGMAX 2.94c
 		device->EventEnd(cmd);
 
 		if (chunk_buffer.IsValid())
@@ -2708,6 +2710,7 @@ namespace wi::terrain
 		GraphicsDevice* device = GetDevice();
 
 		device->EventBegin("Terrain - AllocateVirtualTextureTileRequestsGPU", cmd);
+		auto gg_vtrange = wi::profiler::BeginRangeGPU("TerrainVT - AllocateTileRequests", cmd); // GGMAX 2.94c
 
 		{
 			device->EventBegin("Tile Requests", cmd);
@@ -2763,6 +2766,7 @@ namespace wi::terrain
 			device->EventEnd(cmd);
 		}
 
+		wi::profiler::EndRange(gg_vtrange); // GGMAX 2.94c
 		device->EventEnd(cmd);
 	}
 
@@ -2772,6 +2776,7 @@ namespace wi::terrain
 		GraphicsDevice* device = GetDevice();
 
 		device->EventBegin("Terrain - WritebackTileRequestsGPU", cmd);
+		auto gg_vtrange = wi::profiler::BeginRangeGPU("TerrainVT - WritebackTileRequests", cmd); // GGMAX 2.94c
 
 		for (const VirtualTexture* vt : virtual_textures_in_use)
 		{
@@ -2807,6 +2812,7 @@ namespace wi::terrain
 			wi::renderer::PushBarrier(GPUBarrier::Image(&vt->residency->residencyMap, ResourceState::COPY_DST, ResourceState::COPY_SRC));
 		}
 		wi::renderer::FlushBarriers(cmd);
+		wi::profiler::EndRange(gg_vtrange); // GGMAX 2.94c
 		device->EventEnd(cmd);
 	}
 

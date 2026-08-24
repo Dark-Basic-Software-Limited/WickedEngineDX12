@@ -3024,6 +3024,14 @@ namespace wi::scene
 					{
 						auto& component = scene.hierarchy.Create(entity);
 						component.Serialize(archive, seri);
+						// GGMAX 3.14: the ONLY hierarchy mutation outside Component_Attach /
+						// Component_Detach / Entity_Remove / Clear / Merge. It was harmless while
+						// the topdown snapshot was rebuilt unconditionally every frame; now that a
+						// rebuild can be SKIPPED on an unchanged stamp, a deserialize that did not
+						// bump the counter could leave the snapshot describing the old hierarchy.
+						// (A pure add also moves hierarchy.GetCount(), which the guard checks too,
+						// so this closes the belt as well as the braces.)
+						scene.gg_hier_mutation_counter.fetch_add(1, std::memory_order_relaxed);
 					}
 				}
 				{

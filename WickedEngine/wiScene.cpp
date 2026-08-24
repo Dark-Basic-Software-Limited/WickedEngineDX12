@@ -2273,6 +2273,19 @@ namespace wi::scene
 	// If maxSubtree is a large fraction of visited, the system is imbalanced and the fix is to
 	// split big subtrees across jobs. If maxSubtree is small and visited is large, it is genuine
 	// aggregate per-entity work and the Dispatch shape is already right.
+	// GGMAX 3.14: skip the per-frame topdown-hierarchy REBUILD when the hierarchy has not changed.
+	// StartBuildTopDownHierarchy cleared and repopulated every bucket of topdown_hierarchy plus the
+	// roots list EVERY frame - on the canyon test level that is 8,774 hash lookups and vector
+	// pushes per frame to reproduce a structure that was already correct. The consumer already
+	// decides whether the snapshot is usable from exactly two values (mutation stamp + count);
+	// if that pair is good enough to TRUST the snapshot it is good enough to skip REBUILDING it,
+	// so this adds no new correctness assumption - only the scene-pointer guard below, because
+	// the snapshot state is file-scope and therefore shared between Scene instances.
+	int  gg_hier_cache_snapshot = 1;   // harness SET_HIERCACHE 0|1, 1 = skip redundant rebuilds
+	bool gg_hier_snapshot_valid = false;
+	const void* gg_hier_snapshot_scene = nullptr;
+	uint32_t gg_hier_rebuilds = 0;     // diagnostic: rebuilds actually performed
+	uint32_t gg_hier_skips = 0;        // diagnostic: rebuilds skipped
 	std::atomic<uint32_t> gg_hier_max_subtree{ 0 };
 	std::atomic<uint32_t> gg_hier_visited{ 0 };
 	uint32_t              gg_hier_root_count = 0;
@@ -10127,6 +10140,21 @@ namespace wi::scene
 	void Scene::StartBuildTopDownHierarchy()
 	{
 		WaitBuildTopDownHierarchy();
+
+		// GGMAX 3.14: nothing changed since the last build -> the snapshot still describes this
+		// hierarchy exactly, so rebuilding it reproduces the same data. Guarded on the SAME pair
+		// the consumer validates with, plus the scene pointer (the snapshot is file-scope state
+		// shared across Scene instances, so a second scene must never inherit the first's).
+		if (gg_hier_cache_snapshot &&
+			gg_hier_snapshot_valid &&
+			gg_hier_snapshot_scene == this &&
+			gg_hier_snapshot_count == hierarchy.GetCount() &&
+			gg_hier_snapshot_mutation == gg_hier_mutation_counter.load(std::memory_order_acquire))
+		{
+			gg_hier_skips++;
+			return;
+		}
+
 		wi::jobsystem::Execute(topdown_hierarchy_workload, [&](wi::jobsystem::JobArgs args) {
 			for (auto& x : topdown_hierarchy)
 			{
@@ -10157,6 +10185,10 @@ namespace wi::scene
 				}
 			}
 			gg_hier_snapshot_count = hierarchy.GetCount(); // GGMAX 1.36 (review F9/F11)
+			// GGMAX 3.14: this snapshot is now current FOR THIS SCENE.
+			gg_hier_snapshot_scene = this;
+			gg_hier_snapshot_valid = true;
+			gg_hier_rebuilds++;
 		});
 	}
 	void Scene::WaitBuildTopDownHierarchy() const

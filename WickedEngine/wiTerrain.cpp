@@ -63,6 +63,7 @@ namespace wi::terrain
 	// (CPU page table -> GPU), it is already incremental via gg_vt_incremental (1.33), and it
 	// measures 0.02 ms.
 	int gg_vt_writeback_interval = 4;
+	uint32_t gg_bake_resolution = 0;   // GGMAX 3.02: 0 = SVT_TILE_SIZE
 
 	// GGMAX 2.94f: the GG bridge's terrain idle gate applies to the BRIDGE's Generation_Update
 	// call only. Scene::Update (wiScene.cpp) calls Generation_Update a SECOND time on the same
@@ -2053,7 +2054,12 @@ namespace wi::terrain
 			}
 			VirtualTexture& vt = *chunk_data.vt;
 
-			const uint32_t min_resolution = SVT_TILE_SIZE;
+			// GGMAX 3.02: bake-mode resolution override. 0 = SVT_TILE_SIZE (256, a SINGLE tile,
+			// which is precisely why the bake path needs no residency object and skips all four
+			// VT GPU passes). Anything larger is >1 tile and pulls residency back in - see
+			// VirtualTexture::init, "if (tile_count > 1) residency = atlas.allocate_residency".
+			// Exposed so that trade can be MEASURED rather than argued.
+			const uint32_t min_resolution = ( gg_bake_resolution > 0 ) ? gg_bake_resolution : SVT_TILE_SIZE;
 			const uint32_t max_resolution = 65536u;
 
 			//GGMAX

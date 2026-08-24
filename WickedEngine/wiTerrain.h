@@ -47,6 +47,7 @@ namespace wi::terrain
 	extern bool gg_generation_skip_grass; // GGMAX 2.60: generator-only, see wiTerrain.cpp
 	void gg_WaitVirtualTextureJob();      // GGMAX 2.94: join the async VT job before any external Terrain teardown
 	extern bool gg_skip_generation_update; // GGMAX 2.94f: set by the GG bridge from its idle gate; skips the ENGINE-side Generation_Update for the same frame
+	extern uint32_t gg_bake_resolution;   // GGMAX 3.02: per-chunk texture size in bake mode (0 = 256)
 	extern int gg_vt_writeback_interval;  // GGMAX 2.94d: VT tile-request round trip cadence in frames (1 = stock every-frame, 4 = default)
 
 	// GGMAX 2.58 diagnostic: per-phase chunk-generation cost accumulators (us, cumulative).

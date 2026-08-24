@@ -22,6 +22,7 @@
 #include <sstream>
 #include <vector>
 #include <algorithm>
+#include <thread>   // GGMAX 3.13: main-thread identification for CPU nesting
 
 using namespace wi::graphics;
 
@@ -64,12 +65,28 @@ namespace wi::profiler
 
 		wi::Timer cpuTimer;
 
+		// GGMAX 3.13: CPU nesting. Ranges NEST, so the flat alphabetical list the panel used to
+		// print made a parent and its child look like two independent costs - "Update - Logic
+		// (Total)", "Logic - common_loop" and "CL-GameLoop" are the SAME 3.5 ms seen at three
+		// depths, and reading them as 10.5 ms was the obvious mistake to make. Recorded per
+		// thread at Begin so the text builder can print a tree instead.
+		int         gg_depth = 0;
+		std::string gg_parent;
+		bool        gg_main_thread = false;
+
 		int gpuBegin[arraysize(queryResultBuffer)];
 		int gpuEnd[arraysize(queryResultBuffer)];
 
 		bool IsCPURange() const { return !cmd.IsValid(); }
 	};
 	wi::unordered_map<size_t, Range> ranges;
+
+	// GGMAX 3.13: per-thread stack of OPEN cpu range names. Thread-local because CPU ranges nest
+	// per thread; a shared stack would interleave worker ranges into the main thread's tree.
+	thread_local std::vector<std::string> gg_cpu_stack;
+	thread_local std::vector<range_id>    gg_cpu_stack_ids;
+	std::thread::id gg_main_thread_id;
+
 
 	// GGMAX 2.91: GPU Busy / GPU Idle accounting.
 	// "GPU Frame" is a wall-clock SPAN — its begin query rides the frame's FIRST command list
@@ -301,6 +318,10 @@ namespace wi::profiler
 #endif // PERFORMANCEAPI_ENABLED
 		}
 
+		// GGMAX 3.13: whoever opens the frame IS the main thread, by definition.
+		gg_main_thread_id = std::this_thread::get_id();
+		gg_cpu_stack.clear();
+		gg_cpu_stack_ids.clear();
 		cpu_frame = BeginRangeCPU("CPU Frame");
 
 		GraphicsDevice* device = wi::graphics::GetDevice();
@@ -497,6 +518,12 @@ namespace wi::profiler
 		ranges[id].in_use = true;
 		ranges[id].name = name;
 		ranges[id].cpuTimer.record();
+		// GGMAX 3.13: capture where this range sits in the CALL TREE, not just how long it took.
+		ranges[id].gg_depth  = (int)gg_cpu_stack.size();
+		ranges[id].gg_parent = gg_cpu_stack.empty() ? std::string() : gg_cpu_stack.back();
+		ranges[id].gg_main_thread = (std::this_thread::get_id() == gg_main_thread_id);
+		gg_cpu_stack.push_back(ranges[id].name);
+		gg_cpu_stack_ids.push_back(id);
 
 		lock.unlock();
 
@@ -542,6 +569,14 @@ namespace wi::profiler
 			if (it->second.IsCPURange())
 			{
 				it->second.time = (float)it->second.cpuTimer.elapsed();
+				// GGMAX 3.13: pop only if THIS range is the one on top. A range begun on one
+				// thread and ended on another, or an unbalanced Begin/End, must not corrupt the
+				// stack for everything after it - leaving it alone degrades to a flat row.
+				if (!gg_cpu_stack_ids.empty() && gg_cpu_stack_ids.back() == id)
+				{
+					gg_cpu_stack_ids.pop_back();
+					gg_cpu_stack.pop_back();
+				}
 
 #if PERFORMANCEAPI_ENABLED
 				if (superluminal_handle)
@@ -596,6 +631,11 @@ namespace wi::profiler
 	{
 		uint32_t num_hits = 0;
 		float total_time = 0;
+		// GGMAX 3.13: where this row sits in the CPU call tree, so the panel can indent it
+		// instead of pretending every row is an independent cost.
+		int         depth = 0;
+		std::string parent;
+		bool        main_thread = false;
 	};
 	wi::unordered_map<std::string, Hits> time_cache_cpu;
 	wi::unordered_map<std::string, Hits> time_cache_gpu;
@@ -988,8 +1028,12 @@ namespace wi::profiler
 			{
 				if (x.first == cpu_frame)
 					continue;
-				text_cache_cpu_persist[x.second.name].num_hits++;
-				text_cache_cpu_persist[x.second.name].total_time += x.second.time;
+				Hits& h = text_cache_cpu_persist[x.second.name];
+				h.num_hits++;
+				h.total_time += x.second.time;
+				h.depth       = x.second.gg_depth;        // GGMAX 3.13
+				h.parent      = x.second.gg_parent;
+				h.main_thread = x.second.gg_main_thread;
 			}
 			else
 			{
@@ -1024,8 +1068,86 @@ namespace wi::profiler
 			}
 		};
 
-		ss << ranges[cpu_frame].name << ": " << std::fixed << ranges[cpu_frame].time << " ms" << std::endl;
-		print_sorted(text_cache_cpu_persist);
+		// GGMAX 3.13: CPU rows printed as the CALL TREE they actually are.
+		// They were printed flat and alphabetically, which made a parent and its child look like
+		// two separate costs. On a canyon test level "Update - Logic (Total)" 3.32, "Logic -
+		// common_loop" 3.56 and "CL-GameLoop" 3.55 are the SAME work at three depths - adding
+		// them gives 10.4 ms of a 7.99 ms frame. Indentation makes that unmissable, and the
+		// self column says how much of a parent is its OWN work rather than its children's.
+		{
+			ss << ranges[cpu_frame].name << ": " << std::fixed << ranges[cpu_frame].time << " ms" << std::endl;
+
+			// children by parent name; roots are the ranges with no open parent
+			wi::unordered_map<std::string, std::vector<const std::string*>> kids;
+			std::vector<const std::string*> roots;
+			float top_level_total = 0;
+			for (auto& x : text_cache_cpu_persist)
+			{
+				if (x.second.num_hits == 0)
+					continue;
+				// ⚠ "CPU Frame" is ITSELF a cpu range and it opens first on the main thread, so
+				// every main-thread range names it as parent - but it is deliberately excluded
+				// from this cache, so treating only empty parents as roots orphaned the entire
+				// main thread and printed nothing but worker rows. Its children ARE the roots.
+				const bool is_root = x.second.parent.empty() || x.second.parent == ranges[cpu_frame].name;
+				if (is_root)
+				{
+					roots.push_back(&x.first);
+					// Siblings at depth 0 run one after another on their thread, so THESE do add
+					// up - unlike the nested rows. Worker-thread roots are excluded because they
+					// run alongside the main thread, not inside its frame.
+					if (x.second.main_thread)
+						top_level_total += x.second.total_time;
+				}
+				else
+				{
+					kids[x.second.parent].push_back(&x.first);
+				}
+			}
+			auto by_time = [&](const std::string* a2, const std::string* b2)
+			{ return text_cache_cpu_persist[*a2].total_time > text_cache_cpu_persist[*b2].total_time; };
+			std::sort(roots.begin(), roots.end(), by_time);
+			for (auto& k : kids) std::sort(k.second.begin(), k.second.end(), by_time);
+
+			// ⚠ Every row here (CPU Frame included) is a 20-FRAME ROLLING AVERAGE, each kept on
+			// its own counter. Independently-averaged children therefore do not add to exactly
+			// the averaged parent, and the residual wanders a few percent either way from frame
+			// to frame. Reported as a signed delta and named, so nobody reads a negative
+			// "unattributed" as a double-count bug - which is the very confusion this whole
+			// change exists to remove.
+			const float delta = top_level_total - ranges[cpu_frame].time;
+			ss << "  main-thread rows total: " << std::fixed << top_level_total << " ms   ("
+			   << (delta >= 0 ? "+" : "") << std::fixed << delta << " vs frame - 20-frame averaging skew)" << std::endl;
+			ss << "  (indented rows are INSIDE their parent - only same-indent rows add up)" << std::endl;
+
+			// iterative DFS so a pathological tree cannot blow the stack
+			struct Frame { const std::string* name; int indent; };
+			std::vector<Frame> stack;
+			for (size_t i = roots.size(); i-- > 0; ) stack.push_back({ roots[i], 1 });
+			int guard = 0;
+			while (!stack.empty() && guard++ < 4096)
+			{
+				Frame f = stack.back(); stack.pop_back();
+				Hits& h = text_cache_cpu_persist[*f.name];
+				float child_sum = 0;
+				auto kit = kids.find(*f.name);
+				if (kit != kids.end())
+					for (auto* c : kit->second) child_sum += text_cache_cpu_persist[*c].total_time;
+
+				for (int i = 0; i < f.indent; i++) ss << "  ";
+				ss << *f.name;
+				if (h.num_hits > 1) ss << " (" << h.num_hits << "x)";
+				ss << ": " << std::fixed << h.total_time << " ms";
+				if (child_sum > 0.0f) ss << "   [self " << std::fixed << (h.total_time - child_sum) << "]";
+				if (!h.main_thread) ss << "   [worker]";
+				ss << std::endl;
+
+				if (kit != kids.end())
+					for (size_t i = kit->second.size(); i-- > 0; ) stack.push_back({ kit->second[i], f.indent + 1 });
+			}
+
+			for (auto& x : text_cache_cpu_persist) { x.second.num_hits = 0; x.second.total_time = 0; }
+		}
 		ss << std::endl;
 
 		// GGMAX 2.91: GPU Frame is a wall-clock SPAN, so it never equals the sum of the rows

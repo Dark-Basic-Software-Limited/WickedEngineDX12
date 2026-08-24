@@ -67,6 +67,9 @@ namespace wi
 		// subresources (GPU descriptor indices derived from streamed resources are invalid
 		// across a bump). Consumers cache per-epoch (ShaderMaterial recompose cache in wiScene).
 		extern std::atomic<uint32_t> gg_streaming_descriptor_epoch;
+		// GGMAX 3.12: global texture-detail divide. 1 = off, 2 or 4 = create every DDS from its
+		// 2nd/3rd mip. Set from the game; see wiResourceManager.cpp for the hazards.
+		extern int gg_texture_divide;
 
 		wi::vector<std::string> GetSupportedImageExtensions();
 		wi::vector<std::string> GetSupportedSoundExtensions();

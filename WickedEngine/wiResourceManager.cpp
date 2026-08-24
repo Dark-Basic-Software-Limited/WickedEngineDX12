@@ -226,6 +226,7 @@ namespace wi
 		// GGMAX 1.73 DIAG: see the definition comment further down — declared here because
 		// LoadResourceDirectly (above the streaming machinery) is the site that writes the trace.
 		extern bool gg_stream_load_trace;
+		extern int  gg_texture_divide;   // GGMAX 3.12, see the definition comment below
 
 		void SetMode(Mode param)
 		{
@@ -509,6 +510,54 @@ namespace wi
 						}
 
 						int mip_offset = 0;
+
+						// GGMAX 3.12: GLOBAL TEXTURE-DETAIL DIVIDE. Drop the top 1 or 2 mips so the
+						// texture is CREATED smaller. CreateTexture below is already called as
+						// `initdata + mip_offset`, so advancing the offset and shrinking desc is the
+						// whole trick - no rebuild of the subresource array.
+						//
+						// ★ Deliberately a LOAD-TIME reduction and not a streaming target. Wicked's
+						// streaming already walks mips down toward a per-material goal, but it is
+						// gated EDITOR-ONLY (gameisexe == 0), so it can do nothing for the players
+						// this exists to help. This path runs in an exported game.
+						//
+						// ⚠ STREAMING IS DISABLED for a divided texture, on purpose. The streaming
+						// branch below records `streaming_data.data_offset = header.mip_offset(mip)`
+						// for absolute mips 0..mip_levels-1; with the top mips already dropped those
+						// offsets would all be off by mip_offset. Rather than thread the offset
+						// through that bookkeeping, opt the texture out - the two features want the
+						// same thing and the divide is the blunter, cheaper one.
+						//
+						// ⚠⚠ GGMAX 1.73 BLOCK ALIGNMENT. A block-compressed texture's TOP mip must be
+						// a multiple of the 4x4 block. Halving a legal size can produce an illegal one
+						// (500 -> 250); D3D12's GetCopyableFootprints then returns 0xFFFF.. sentinels
+						// and the upload memcpy's four billion rows off the end of the file buffer.
+						// That was the "Trapped" and "RPG Template" load crash. So: STOP EARLY rather
+						// than produce an illegal size. Such a texture simply keeps more detail.
+						if (gg_texture_divide > 1 && desc.depth == 1 && desc.array_size == 1 && !header.is_cubemap())
+						{
+							flags &= ~Flags::STREAMING;
+							const uint32_t format_block_size = GetFormatBlockSize(desc.format);
+							int steps = (gg_texture_divide >= 4) ? 2 : 1;
+							while (steps > 0 && desc.mip_levels > 1)
+							{
+								const uint32_t next_width = desc.width >> 1;
+								const uint32_t next_height = desc.height >> 1;
+								if (next_width == 0 || next_height == 0)
+									break;
+								if (format_block_size > 1
+									&& ((next_width % format_block_size) != 0 || (next_height % format_block_size) != 0))
+								{
+									break; // next step would be an illegal top-level size for this format
+								}
+								desc.width = next_width;
+								desc.height = next_height;
+								desc.mip_levels -= 1;
+								mip_offset++;
+								steps--;
+							}
+						}
+
 						if (has_flag(flags, Flags::STREAMING))
 						{
 							// Remember full mipcount for streaming:
@@ -1196,6 +1245,12 @@ namespace wi
 		// Off by default — it writes a flushed line per enrolled texture, which is far too much
 		// I/O for normal running. Harness SET_TEXSTREAMTRACE 1 arms it before a suspect load.
 		bool gg_stream_load_trace = false;
+
+		// GGMAX 3.12: GLOBAL TEXTURE-DETAIL DIVIDE. 1 = untouched (default). 2 or 4 = every DDS is
+		// created from its 2nd or 3rd mip instead of mip 0, so a 1024x1024 becomes a 512 or a 256.
+		// Cuts texture VRAM ~4x/16x and, more to the point on a weak card, the bandwidth needed to
+		// sample it. Set from the game (setup.ini `texturedivide`, harness SET_TEXTUREDIVIDE).
+		int gg_texture_divide = 1;
 
 		// GGMAX 1.73: streaming bounds-guard reporting. Every rejection the streaming job makes
 		// is logged once per (resource, reason) to stream_guard.txt next to the EXE, with the

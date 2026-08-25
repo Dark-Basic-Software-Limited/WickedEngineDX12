@@ -1028,14 +1028,32 @@ namespace wi::profiler
 	// Off by default - the fixed row set from 3.19 stays the out-of-the-box behaviour, and
 	// this only trades length back for anyone who wants it.
 	bool gg_hide_idle_rows = false;
-	// GGMAX 3.20a: what counts as "this row is worth a slot", in ms. 0.005 is the display
-	// threshold - below it the row prints 0.00 - and it is the rule Lee asked for. MEASURED on
-	// A Grand Canyon Adventure it reaches only 8 rows of 127, because just 5-7 rows never once
-	// cross 0.005; the rest do, briefly, and are correctly kept. Raising it turns the control
-	// from "hide rows that show nothing" into "hide rows that never cost anything worth
-	// reading": 0.02 takes ~20, 0.05 takes ~39, 0.10 takes ~52. Settable so a threshold can be
-	// tried and MEASURED rather than argued about.
-	float gg_idle_row_ms = 0.005f;
+	// GGMAX 3.20b: what counts as "this row is worth a slot", in ms.
+	//
+	// 0.005 is the DISPLAY threshold - below it the row prints 0.00 - and it was the rule Lee
+	// first asked for. Measured on A Grand Canyon Adventure it reaches 12 rows of 127, because
+	// only 8 rows never once cross 0.005; the rest do, briefly, and were correctly kept.
+	//
+	// 0.05 is the SHIPPED default. It changes the question from "does this row show anything"
+	// to "does this row ever cost anything worth reading". Ticking it takes the panel from 127
+	// rows to 71 immediately, and it then GROWS BACK to about 95 over the next few minutes as
+	// borderline rows cross 0.05 for the first time and earn their pin.
+	//
+	// ★★ That transient is MONOTONE, which is what makes it acceptable. Measured over 90
+	// consecutive dumps: eleven changes in three minutes and every single one was an INSERTION
+	// (+1 or +3, never a removal). A row you are watching is never taken away from under you;
+	// occasionally one appears above it. An earlier 24-second window read the same growth as
+	// "churn" and it is not - that call was made on too short a look, and the longer one
+	// reversed it.
+	//
+	// ⚠ It is not fast, though: still growing at t=178 s from a standing start. After the
+	// camera had been flown about it re-settled in 32 s and then held for the rest of the
+	// watch, so the slow part is rows waiting for the activity that exercises them.
+	//
+	// Canyon reference, rows a threshold would take: 0.005->8  0.01->11  0.02->13  0.05->41
+	// 0.10->62  0.20->71. Note the cliff between 0.02 and 0.05: this is a two-way choice, not
+	// a dial. DUMP_IDLEPEAKS reprints that table for whatever level is loaded.
+	float gg_idle_row_ms = 0.05f;
 	uint32_t gg_hidden_row_count = 0; // reported to the panel so the box visibly did something
 
 	void gg_ClearTextDataCaches()

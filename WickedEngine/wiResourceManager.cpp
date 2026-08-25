@@ -64,6 +64,14 @@ namespace wi
 		size_t container_fileoffset = 0;
 		uint64_t timestamp = 0;
 
+		// GGMAX 3.19: the flags this resource was FIRST loaded with, captured the first time a
+		// live texture-detail apply touches it. The divide clears Flags::STREAMING, so feeding
+		// the CURRENT flags back into Load() on a later apply would leave a texture permanently
+		// opted out of streaming even after the user went back to Full - a one-way door the user
+		// never asked for. Every apply re-loads from the ORIGINAL flags instead.
+		resourcemanager::Flags gg_flags_predivide = resourcemanager::Flags::NONE;
+		bool gg_flags_predivide_saved = false;
+
 		// Streaming parameters:
 		StreamingTexture streaming_texture;
 		std::atomic<uint32_t> streaming_resolution{ 0 };
@@ -2007,8 +2015,14 @@ namespace wi
 				const uint64_t saved_timestamp = e.res->timestamp;
 				e.res->timestamp = 0; // Load() only rebuilds a resource it considers outdated
 
+				if (!e.res->gg_flags_predivide_saved)
+				{
+					e.res->gg_flags_predivide = e.res->flags;
+					e.res->gg_flags_predivide_saved = true;
+				}
+
 				const std::string container = (e.res->container_filename == e.name) ? std::string() : e.res->container_filename;
-				Resource reloaded = Load(e.name, e.res->flags, nullptr, e.res->container_filesize, container, e.res->container_fileoffset);
+				Resource reloaded = Load(e.name, e.res->gg_flags_predivide, nullptr, e.res->container_filesize, container, e.res->container_fileoffset);
 
 				ResourceInternal* fresh = (ResourceInternal*)reloaded.internal_state.get();
 				if (fresh == nullptr || fresh == e.res.get() || !fresh->texture.IsValid())
@@ -2035,7 +2049,7 @@ namespace wi
 				e.res->container_filename   = fresh->container_filename;
 				e.res->container_filesize   = fresh->container_filesize;
 				e.res->container_fileoffset = fresh->container_fileoffset;
-				e.res->filedata             = fresh->filedata;
+				e.res->filedata             = std::move(fresh->filedata); // fresh is discarded below
 
 				{
 					std::scoped_lock lck(locker);

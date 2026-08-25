@@ -647,6 +647,10 @@ namespace wi::profiler
 		// GetTextData. A range that the job system sometimes runs inline on the main thread
 		// otherwise changes parent between frames and the row physically jumps the list.
 		bool        tree_latched = false;
+		// GGMAX 3.20a: the highest value this row has EVER been about to print, over every
+		// frame - not every sampled frame. Exists because a 25-dump sample said 37 rows were
+		// permanently 0.00 and the engine, which sees all ~13,500, hid 11.
+		float       peak_time = 0;
 	};
 	wi::unordered_map<std::string, Hits> time_cache_cpu;
 	wi::unordered_map<std::string, Hits> time_cache_gpu;
@@ -1024,6 +1028,14 @@ namespace wi::profiler
 	// Off by default - the fixed row set from 3.19 stays the out-of-the-box behaviour, and
 	// this only trades length back for anyone who wants it.
 	bool gg_hide_idle_rows = false;
+	// GGMAX 3.20a: what counts as "this row is worth a slot", in ms. 0.005 is the display
+	// threshold - below it the row prints 0.00 - and it is the rule Lee asked for. MEASURED on
+	// A Grand Canyon Adventure it reaches only 8 rows of 127, because just 5-7 rows never once
+	// cross 0.005; the rest do, briefly, and are correctly kept. Raising it turns the control
+	// from "hide rows that show nothing" into "hide rows that never cost anything worth
+	// reading": 0.02 takes ~20, 0.05 takes ~39, 0.10 takes ~52. Settable so a threshold can be
+	// tried and MEASURED rather than argued about.
+	float gg_idle_row_ms = 0.005f;
 	uint32_t gg_hidden_row_count = 0; // reported to the panel so the box visibly did something
 
 	void gg_ClearTextDataCaches()
@@ -1088,41 +1100,61 @@ namespace wi::profiler
 			}
 		}
 
-		// GGMAX 3.20: HIDE IDLE ROWS - the latch, and why it is not "is this row 0.00".
+		// GGMAX 3.20: HIDE IDLE ROWS - the latch, and what "idle" was decided to mean.
 		//
 		// 3.19 gave every row a permanent slot so the list would stop moving under the eye.
-		// That worked, at the cost of ~50 rows sitting at 0.00 on a typical level. This buys
-		// the length back - but only if it does not re-create the very shifting 3.19 removed,
-		// and the constraint Lee set is exact: a row that READS 0.00 but occasionally does
-		// 0.00001 ms of work must keep its slot.
+		// That worked, at the cost of ~30 rows sitting at 0.00 on a typical level. This buys
+		// the length back - and the hard part was never the hiding, it was doing it without
+		// re-creating the very shifting 3.19 removed.
 		//
-		// So the decision is never taken from the printed value. 0.00 is a rounding artefact
-		// of a 2-decimal format: a range that ran for twelve nanoseconds prints identically to
-		// one that did not run at all, and those two rows want opposite treatment. It is taken
-		// from num_hits - "did this range execute" - and then only after it has failed to
-		// execute for GG_IDLE_FRAMES CONSECUTIVE frames. A single hit anywhere inside that
-		// window puts the counter back to zero, so an occasional row never even approaches the
-		// threshold.
+		// ★★ THE STABILITY DOES NOT COME FROM THE THRESHOLD. It comes from sticky_show: a
+		// hidden row that shows a measurable time again is pinned visible for the rest of the
+		// session. That bounds the whole feature at TWO position changes per row per session -
+		// one to hide, one to un-hide, never again - rather than a row that breathes in and out
+		// on its own period. Because that latch is what holds the list still, the threshold
+		// itself is cheap to get wrong: too tight costs one flicker, after which the row is
+		// permanent; too loose only means fewer rows go.
 		//
-		// ★ And a hidden row that runs again is pinned visible for the rest of the session
-		// (sticky_show). That bounds the whole feature at TWO position changes per row per
-		// session - one to hide, one to un-hide, never again - rather than a row that breathes
-		// in and out on its own period. It also makes the threshold cheap to get wrong: too
-		// tight costs one flicker, after which the row is permanent.
+		// ⚠ SO WHICH THRESHOLD. It was first built on num_hits - "did this range EXECUTE" -
+		// because 0.00 is a rounding artefact of a 2-decimal format and a range that ran for
+		// twelve nanoseconds prints identically to one that never ran at all. That is the
+		// conservative reading and it was Lee's first instruction. MEASURED, it hid 3 rows of
+		// 127: 29 of the 32 rows printing 0.00 execute every single frame doing under five
+		// microseconds, so the conservative rule correctly kept them and the panel did not get
+		// shorter. Lee's call on seeing the numbers: "hide them all, use the 0.00 rule".
 		//
-		// ⚠ The latch is maintained whether or not the box is ticked, so it is already warm
-		// when you tick it. Ticking hides the long-quiet rows immediately instead of starting
-		// a ten-second settling period during which the list would - of all things - shift.
+		// So a row counts as active when the time it would PRINT is non-zero, and GG_IDLE_MS
+		// below is tied to the two decimals a few lines down. A row doing real but sub-display
+		// work is now hidden - and the moment it ever crosses the display threshold it comes
+		// back and stays for the session, which is what the original instruction was protecting.
+		// ⚠ Change ss.precision(2) and this constant has to move with it.
 		{
 			const uint32_t GG_IDLE_FRAMES = 600; // ~10 s at 60 fps, ~20 s at 30. Generous on
 			                                     // purpose: erring long only means FEWER rows
 			                                     // are hidden, which is the harmless direction.
+			const float GG_IDLE_MS = gg_idle_row_ms; // default 0.005 = "prints as 0.00 ms"
+			// ⚠ GGMAX 3.20a: a sticky_show pin was EARNED UNDER A THRESHOLD. Change the
+			// threshold and every pin has to be forfeited, or raising it would appear to do
+			// almost nothing - the rows it should newly take are exactly the ones most likely
+			// to have been pinned already. Costs one settling period, which is the honest price
+			// of changing the rule mid-session.
+			static float last_threshold = -1.0f;
+			if (last_threshold != gg_idle_row_ms)
+			{
+				last_threshold = gg_idle_row_ms;
+				for (auto* cache : { &text_cache_cpu_persist, &text_cache_gpu_persist })
+					for (auto& x : *cache)
+					{ x.second.quiet_frames = 0; x.second.sticky_show = false; x.second.hidden = false; }
+			}
+
 			auto update_idle_latch = [&](wi::unordered_map<std::string, Hits>& cache)
 			{
 				for (auto& x : cache)
 				{
 					Hits& h = x.second;
-					if (h.num_hits > 0)
+					if (h.total_time > h.peak_time) h.peak_time = h.total_time;
+					// "active" = it would print something other than 0.00 this frame.
+					if (h.total_time >= GG_IDLE_MS)
 					{
 						if (h.hidden) h.sticky_show = true; // it came back - pin it for good
 						h.hidden = false;
@@ -1328,6 +1360,48 @@ namespace wi::profiler
 		ss << "  GPU Idle + unranged:      " << std::fixed << gg_gpu_idle_time << " ms" << std::endl;
 		print_sorted(text_cache_gpu_persist);
 
+		return ss.str();
+	}
+
+	// GGMAX 3.20a: what a "hide rows at 0.00" rule can actually reach on this level.
+	// A sparse dump sample cannot answer that - it sees one frame in a couple of hundred, so a
+	// row that crosses the display threshold every few seconds looks permanently 0.00 in the
+	// sample and is not. This walks the peak each row has ever been about to print and reports
+	// how many rows a given threshold would take, which is a number that can be chosen from.
+	std::string gg_GetIdleRowReport()
+	{
+		const float STEPS[] = { 0.005f, 0.01f, 0.02f, 0.05f, 0.10f, 0.20f };
+		int counts[6] = {};
+		std::vector<std::pair<float, const std::string*>> low;
+		int total = 0;
+		auto scan = [&](wi::unordered_map<std::string, Hits>& cache)
+		{
+			for (auto& x : cache)
+			{
+				total++;
+				for (int i = 0; i < 6; i++)
+					if (x.second.peak_time < STEPS[i]) counts[i]++;
+				if (x.second.peak_time < 0.20f)
+					low.push_back(std::make_pair(x.second.peak_time, &x.first));
+			}
+		};
+		scan(text_cache_cpu_persist);
+		scan(text_cache_gpu_persist);
+		std::sort(low.begin(), low.end(),
+			[](const std::pair<float, const std::string*>& a, const std::pair<float, const std::string*>& b)
+			{ return a.first != b.first ? a.first < b.first : *a.second < *b.second; });
+
+		std::stringstream ss("");
+		ss.precision(4);
+		ss << "IDLE-ROW PEAKS - the highest ms each row has EVER been about to print, over every"
+		   << " frame since the profiler was enabled." << std::endl;
+		ss << "rows total: " << total << std::endl;
+		ss << "a threshold of ... would hide ... rows:" << std::endl;
+		for (int i = 0; i < 6; i++)
+			ss << "   peak < " << std::fixed << STEPS[i] << " ms : " << counts[i] << std::endl;
+		ss << "the quiet end of the list (peak < 0.20 ms), lowest first:" << std::endl;
+		for (auto& e : low)
+			ss << "   " << std::fixed << e.first << "   " << *e.second << std::endl;
 		return ss.str();
 	}
 

@@ -93,14 +93,17 @@ namespace wi::profiler
 		unsigned long long* max_us, unsigned long long* total_us,
 		unsigned long long* pso_compiles, unsigned long long* pso_compile_us);
 
-	// GGMAX 3.20: "Hide idle rows" in the Performance panel. A row is dropped only after 600
-	// consecutive frames without EXECUTING, and one that runs again is pinned visible for the
-	// rest of the session - so the list gets shorter without re-introducing the shifting that
-	// 3.19 removed. Never keyed on a row printing 0.00: that is a rounding artefact of the
-	// 2-decimal format, and a range that ran for twelve nanoseconds prints the same as one
-	// that never ran at all.
+	// GGMAX 3.20: "Hide idle rows" in the Performance panel. A row is dropped after 600
+	// consecutive frames of printing 0.00, and one that shows a measurable time again is
+	// pinned visible for the rest of the session. That pin, not the threshold, is what keeps
+	// the list from shifting - it caps the feature at two position changes per row per session.
 	extern bool gg_hide_idle_rows;
+	extern float gg_idle_row_ms; // activity threshold in ms; 0.005 = "would print 0.00"
 	extern uint32_t gg_hidden_row_count; // rows suppressed by the last GetTextData()
+
+	// GGMAX 3.20a: per-row PEAK printable time over every frame, and how many rows a given
+	// hide threshold would take. A sparse dump sample cannot answer that question.
+	std::string gg_GetIdleRowReport();
 
 	// Safe data access (no GPU calls, no rendering - just reads internal timing data)
 	// Returns formatted text of all CPU and GPU profiling ranges with timing in ms.

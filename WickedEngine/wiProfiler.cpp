@@ -1024,10 +1024,11 @@ namespace wi::profiler
 	wi::unordered_map<std::string, Hits> text_cache_cpu_persist;
 	wi::unordered_map<std::string, Hits> text_cache_gpu_persist;
 
-	// GGMAX 3.20: the Performance panel's "Hide idle rows" tick box writes this.
-	// Off by default - the fixed row set from 3.19 stays the out-of-the-box behaviour, and
-	// this only trades length back for anyone who wants it.
-	bool gg_hide_idle_rows = false;
+	// GGMAX 3.20c: the Performance panel's "Hide idle rows" tick box writes this.
+	// ON by default as of 3.20c - Lee reviewed the panel with it ticked and asked for that to
+	// be what everyone gets. Untick to see every range the profiler knows about, which is
+	// still the right view when you are hunting something that only runs occasionally.
+	bool gg_hide_idle_rows = true;
 	// GGMAX 3.20b: what counts as "this row is worth a slot", in ms.
 	//
 	// 0.005 is the DISPLAY threshold - below it the row prints 0.00 - and it was the rule Lee

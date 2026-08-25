@@ -93,10 +93,11 @@ namespace wi::profiler
 		unsigned long long* max_us, unsigned long long* total_us,
 		unsigned long long* pso_compiles, unsigned long long* pso_compile_us);
 
-	// GGMAX 3.20: "Hide idle rows" in the Performance panel. A row is dropped after 600
-	// consecutive frames of printing 0.00, and one that shows a measurable time again is
-	// pinned visible for the rest of the session. That pin, not the threshold, is what keeps
-	// the list from shifting - it caps the feature at two position changes per row per session.
+	// GGMAX 3.20: "Hide idle rows" in the Performance panel, ON by default since 3.20c.
+	// A row is dropped after 600 consecutive frames below gg_idle_row_ms, and one that crosses
+	// it is pinned visible for the rest of the session. That pin, not the threshold, is what
+	// keeps the list from shifting - it caps the feature at two position changes per row per
+	// session, and makes the transient after ticking a monotone GROWTH rather than a churn.
 	extern bool gg_hide_idle_rows;
 	extern float gg_idle_row_ms; // activity threshold in ms; 0.005 = "would print 0.00"
 	extern uint32_t gg_hidden_row_count; // rows suppressed by the last GetTextData()

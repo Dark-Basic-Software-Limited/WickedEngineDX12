@@ -1251,6 +1251,14 @@ namespace wi
 		// Cuts texture VRAM ~4x/16x and, more to the point on a weak card, the bandwidth needed to
 		// sample it. Set from the game (setup.ini `texturedivide`, harness SET_TEXTUREDIVIDE).
 		int gg_texture_divide = 1;
+		// GGMAX 3.19: what the last live apply actually did, in BYTES of texture resource, summed
+		// from the descriptors themselves. Driver-reported VRAM cannot answer this - the allocator
+		// keeps its heaps when a texture is freed, and in the EDITOR streaming has usually already
+		// walked these textures down to a low mip, so a divided-but-unstreamed texture can be
+		// LARGER than the streamed one it replaced. These two numbers are the honest measure.
+		std::atomic<uint64_t> gg_texdivide_bytes_before{ 0 };
+		std::atomic<uint64_t> gg_texdivide_bytes_after{ 0 };
+		std::atomic<uint32_t> gg_texdivide_skipped{ 0 };
 
 		// GGMAX 1.73: streaming bounds-guard reporting. Every rejection the streaming job makes
 		// is logged once per (resource, reason) to stream_guard.txt next to the EXE, with the
@@ -1929,6 +1937,126 @@ namespace wi
 				}
 			}
 			locker.unlock();
+		}
+
+		// GGMAX 3.19: APPLY THE TEXTURE-DETAIL DIVIDE TO WHAT IS ALREADY IN MEMORY.
+		//
+		// 3.12 shipped the divide as a LOAD-TIME reduction, which meant the panel control did
+		// nothing at all to the level you were looking at - you had to choose it and then load.
+		// Nobody reads a tooltip that says so; the control simply looked broken. This re-creates
+		// every file-backed texture at the CURRENT gg_texture_divide, in place.
+		//
+		// ★ IN PLACE is the whole design. Load() creates a BRAND NEW ResourceInternal when it
+		// decides a resource is outdated and rebinds the name to it - but every material, decal
+		// and terrain layer is holding a wi::Resource to the OLD internal, so they would all
+		// keep the old texture and never know. So we let Load() do the real work (it owns every
+		// format, every guard and the divide itself - none of that is worth duplicating), then
+		// TRANSPLANT the result into the internal that everyone is already pointing at and put
+		// the cache entry back. No rebinding, no re-walk of the scene.
+		//
+		// ⚠ Two safety rules, both learned the hard way on this codebase:
+		//   - WaitForGPU FIRST. The 2026-08-05 PLAY GAME device hang was the SVT tile-render
+		//     compute pass still sampling terrain DDS textures that a material swap had just
+		//     dropped. Same shape of swap here, so the same drain.
+		//   - The outgoing Texture objects are held for one further apply. The device defers
+		//     destruction by a few frames on its own, but the hang above proved that a stale
+		//     GPU-side descriptor can outlive even a full drain, so this is belt and braces.
+		//
+		// Returns how many textures were actually rebuilt.
+		uint32_t gg_ApplyTextureDivideLive()
+		{
+			GraphicsDevice* device = GetDevice();
+			if (device == nullptr)
+				return 0;
+
+			// Snapshot under the lock and then let go of it - Load() below takes the same lock.
+			struct Entry { std::string name; wi::allocator::shared_ptr<ResourceInternal> res; };
+			wi::vector<Entry> todo;
+			{
+				std::scoped_lock lck(locker);
+				todo.reserve(resources.size());
+				for (auto& x : resources)
+				{
+					wi::allocator::shared_ptr<ResourceInternal> r = x.second.lock();
+					if (r == nullptr) continue;
+					if (!r->texture.IsValid()) continue;
+					if (r->tile_pool.IsValid()) continue;        // a virtual texture - not ours to rebuild
+					if (r->container_filename.empty()) continue; // handed in from memory, nothing to re-read
+					if (has_flag(r->flags, Flags::IMPORT_DELAY)) continue;
+					// Only DDS is worth touching: the divide acts inside the DDS branch of the
+					// loader, so re-creating a PNG or a font atlas would churn a texture into an
+					// identical one. Keeps the UI and the colour-grading LUTs entirely out of it.
+					if (wi::helper::toUpper(wi::helper::GetExtensionFromFileName(x.first)) != "DDS") continue;
+					Entry e;
+					e.name = x.first;
+					e.res = r;
+					todo.push_back(e);
+				}
+			}
+
+			device->WaitForGPU();
+
+			static wi::vector<Texture> gg_outgoing_retention;
+			wi::vector<Texture> outgoing;
+
+			uint32_t changed = 0, skipped = 0;
+			uint64_t bytes_before = 0, bytes_after = 0;
+			for (size_t i = 0; i < todo.size(); ++i)
+			{
+				Entry& e = todo[i];
+				const uint64_t saved_timestamp = e.res->timestamp;
+				e.res->timestamp = 0; // Load() only rebuilds a resource it considers outdated
+
+				const std::string container = (e.res->container_filename == e.name) ? std::string() : e.res->container_filename;
+				Resource reloaded = Load(e.name, e.res->flags, nullptr, e.res->container_filesize, container, e.res->container_fileoffset);
+
+				ResourceInternal* fresh = (ResourceInternal*)reloaded.internal_state.get();
+				if (fresh == nullptr || fresh == e.res.get() || !fresh->texture.IsValid())
+				{
+					// Missing file, unreadable, or Load() handed our own entry straight back.
+					// Leave the live texture exactly as it was - a softer texture is a feature,
+					// a texture that vanished is a bug.
+					e.res->timestamp = saved_timestamp;
+					skipped++;
+					std::scoped_lock lck(locker);
+					resources[e.name] = e.res;
+					continue;
+				}
+
+				outgoing.push_back(e.res->texture);
+				bytes_before += ComputeTextureMemorySizeInBytes(e.res->texture.desc);
+				bytes_after  += ComputeTextureMemorySizeInBytes(fresh->texture.desc);
+
+				e.res->texture              = fresh->texture;
+				e.res->srgb_subresource     = fresh->srgb_subresource;
+				e.res->streaming_texture    = fresh->streaming_texture;
+				e.res->flags                = fresh->flags;
+				e.res->timestamp            = fresh->timestamp;
+				e.res->container_filename   = fresh->container_filename;
+				e.res->container_filesize   = fresh->container_filesize;
+				e.res->container_fileoffset = fresh->container_fileoffset;
+				e.res->filedata             = fresh->filedata;
+
+				{
+					std::scoped_lock lck(locker);
+					resources[e.name] = e.res; // the name goes back to the internal everyone holds
+				}
+				changed++;
+			}
+
+			gg_outgoing_retention = std::move(outgoing); // the set from the previous apply releases here
+			gg_texdivide_bytes_before.store(bytes_before, std::memory_order_relaxed);
+			gg_texdivide_bytes_after.store(bytes_after, std::memory_order_relaxed);
+			gg_texdivide_skipped.store(skipped, std::memory_order_relaxed);
+
+			if (changed > 0)
+			{
+				// Descriptor indices moved, so every ShaderMaterial has to be recomposed. This is
+				// the same epoch the streaming swap bumps (GGMAX 1.41) and wiScene reads it in
+				// RunMaterialUpdateSystem, so one increment refreshes the whole scene.
+				gg_streaming_descriptor_epoch.fetch_add(1, std::memory_order_relaxed);
+			}
+			return changed;
 		}
 
 	}

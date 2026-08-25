@@ -70,6 +70,15 @@ namespace wi
 		// GGMAX 3.12: global texture-detail divide. 1 = off, 2 or 4 = create every DDS from its
 		// 2nd/3rd mip. Set from the game; see wiResourceManager.cpp for the hazards.
 		extern int gg_texture_divide;
+		// GGMAX 3.19: re-create every file-backed texture at the CURRENT gg_texture_divide, in
+		// place, so the panel control changes the level you are looking at instead of only the
+		// next one you load. Main thread only - it drains the GPU. Returns textures rebuilt.
+		uint32_t gg_ApplyTextureDivideLive();
+		// GGMAX 3.19: what that last apply moved, in bytes of texture resource, plus how many
+		// resources it could not rebuild (missing file, or handed straight back from cache).
+		extern std::atomic<uint64_t> gg_texdivide_bytes_before;
+		extern std::atomic<uint64_t> gg_texdivide_bytes_after;
+		extern std::atomic<uint32_t> gg_texdivide_skipped;
 
 		wi::vector<std::string> GetSupportedImageExtensions();
 		wi::vector<std::string> GetSupportedSoundExtensions();

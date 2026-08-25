@@ -22,6 +22,7 @@
 #include <sstream>
 #include <vector>
 #include <algorithm>
+#include <cmath>     // GGMAX 3.19: std::abs
 #include <thread>   // GGMAX 3.13: main-thread identification for CPU nesting
 
 using namespace wi::graphics;
@@ -1083,8 +1084,12 @@ namespace wi::profiler
 			float top_level_total = 0;
 			for (auto& x : text_cache_cpu_persist)
 			{
-				if (x.second.num_hits == 0)
-					continue;
+				// GGMAX 3.19: rows with num_hits == 0 are KEPT and printed as 0.00 ms. 1.67
+				// made this cache persistent for exactly that reason, then 3.13's tree print
+				// re-introduced the skip - so a conditionally-executed range (TerrainW - *,
+				// Planar Reflections, ...) vanished on the frames it did not run and every
+				// row below it jumped up a line. A fixed row set is worth more than hiding
+				// idle rows: the panel is read by eye, and a list that moves cannot be read.
 				// ⚠ "CPU Frame" is ITSELF a cpu range and it opens first on the main thread, so
 				// every main-thread range names it as parent - but it is deliberately excluded
 				// from this cache, so treating only empty parents as roots orphaned the entire
@@ -1104,8 +1109,17 @@ namespace wi::profiler
 					kids[x.second.parent].push_back(&x.first);
 				}
 			}
+			// GGMAX 3.19: SIBLINGS ARE ORDERED BY NAME, not by cost.
+			// 3.13 sorted each group hottest-first, which reads well in a screenshot and badly in
+			// motion: these rows are 20-frame rolling averages of sub-millisecond work and they
+			// genuinely swing an order of magnitude between reads (CL-EntityProps measured 0.02 to
+			// 0.23 ms over ten samples eight seconds apart), so neighbours traded places
+			// constantly and the row you were watching was never where you left it. A latched key
+			// with a deadband was tried first and could not hold that much movement. Cost order is
+			// not worth a list that will not stay still - and it is not lost either: the panel
+			// already paints anything over 1 ms yellow, so the expensive rows still find your eye.
 			auto by_time = [&](const std::string* a2, const std::string* b2)
-			{ return text_cache_cpu_persist[*a2].total_time > text_cache_cpu_persist[*b2].total_time; };
+			{ return *a2 < *b2; };
 			std::sort(roots.begin(), roots.end(), by_time);
 			for (auto& k : kids) std::sort(k.second.begin(), k.second.end(), by_time);
 
@@ -1116,9 +1130,8 @@ namespace wi::profiler
 			// "unattributed" as a double-count bug - which is the very confusion this whole
 			// change exists to remove.
 			const float delta = top_level_total - ranges[cpu_frame].time;
-			ss << "  main-thread rows total: " << std::fixed << top_level_total << " ms   ("
+			ss << "  Main Thread Total: " << std::fixed << top_level_total << " ms   ("
 			   << (delta >= 0 ? "+" : "") << std::fixed << delta << " vs frame - 20-frame averaging skew)" << std::endl;
-			ss << "  (indented rows are INSIDE their parent - only same-indent rows add up)" << std::endl;
 
 			// iterative DFS so a pathological tree cannot blow the stack
 			struct Frame { const std::string* name; int indent; };
@@ -1138,7 +1151,9 @@ namespace wi::profiler
 				ss << *f.name;
 				if (h.num_hits > 1) ss << " (" << h.num_hits << "x)";
 				ss << ": " << std::fixed << h.total_time << " ms";
-				if (child_sum > 0.0f) ss << "   [self " << std::fixed << (h.total_time - child_sum) << "]";
+				// GGMAX 3.19: keyed on HAVING children, not on their cost being above zero -
+				// gating on child_sum made the column blink out whenever every child idled.
+				if (kit != kids.end()) ss << "   [self " << std::fixed << (h.total_time - child_sum) << "]";
 				if (!h.main_thread) ss << "   [worker]";
 				ss << std::endl;
 

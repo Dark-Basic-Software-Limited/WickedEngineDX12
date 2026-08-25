@@ -93,6 +93,15 @@ namespace wi::profiler
 		unsigned long long* max_us, unsigned long long* total_us,
 		unsigned long long* pso_compiles, unsigned long long* pso_compile_us);
 
+	// GGMAX 3.20: "Hide idle rows" in the Performance panel. A row is dropped only after 600
+	// consecutive frames without EXECUTING, and one that runs again is pinned visible for the
+	// rest of the session - so the list gets shorter without re-introducing the shifting that
+	// 3.19 removed. Never keyed on a row printing 0.00: that is a rounding artefact of the
+	// 2-decimal format, and a range that ran for twelve nanoseconds prints the same as one
+	// that never ran at all.
+	extern bool gg_hide_idle_rows;
+	extern uint32_t gg_hidden_row_count; // rows suppressed by the last GetTextData()
+
 	// Safe data access (no GPU calls, no rendering - just reads internal timing data)
 	// Returns formatted text of all CPU and GPU profiling ranges with timing in ms.
 	// Profiler must be enabled via SetEnabled(true) for data to be collected.

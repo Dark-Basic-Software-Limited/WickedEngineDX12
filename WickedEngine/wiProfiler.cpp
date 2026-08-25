@@ -637,6 +637,16 @@ namespace wi::profiler
 		int         depth = 0;
 		std::string parent;
 		bool        main_thread = false;
+		// GGMAX 3.20: bookkeeping for the "hide idle rows" tick box. See the long note in
+		// GetTextData - the short version is that hiding is latched on CONSECUTIVE frames
+		// without a hit, never on the row printing 0.00.
+		uint32_t    quiet_frames = 0;   // consecutive GetTextData calls with num_hits == 0
+		bool        sticky_show  = false; // ran again after being hidden -> pinned visible
+		bool        hidden       = false;
+		// GGMAX 3.20: the tree position is LATCHED on first sighting - see the note in
+		// GetTextData. A range that the job system sometimes runs inline on the main thread
+		// otherwise changes parent between frames and the row physically jumps the list.
+		bool        tree_latched = false;
 	};
 	wi::unordered_map<std::string, Hits> time_cache_cpu;
 	wi::unordered_map<std::string, Hits> time_cache_gpu;
@@ -1009,10 +1019,21 @@ namespace wi::profiler
 	// Reflections, ...) come and go between frames.
 	wi::unordered_map<std::string, Hits> text_cache_cpu_persist;
 	wi::unordered_map<std::string, Hits> text_cache_gpu_persist;
+
+	// GGMAX 3.20: the Performance panel's "Hide idle rows" tick box writes this.
+	// Off by default - the fixed row set from 3.19 stays the out-of-the-box behaviour, and
+	// this only trades length back for anyone who wants it.
+	bool gg_hide_idle_rows = false;
+	uint32_t gg_hidden_row_count = 0; // reported to the panel so the box visibly did something
+
 	void gg_ClearTextDataCaches()
 	{
+		// Clearing also resets every idle latch, which is what we want on a level change:
+		// the passes a NEW level does not use should be re-judged from scratch rather than
+		// inheriting a verdict earned on the old one.
 		text_cache_cpu_persist.clear();
 		text_cache_gpu_persist.clear();
+		gg_hidden_row_count = 0;
 	}
 
 	std::string GetTextData()
@@ -1030,11 +1051,33 @@ namespace wi::profiler
 				if (x.first == cpu_frame)
 					continue;
 				Hits& h = text_cache_cpu_persist[x.second.name];
+				// GGMAX 3.20: LATCH the tree position on the first frame this name is seen.
+				//
+				// 3.13 re-read parent/main_thread every frame, and for most ranges that is a
+				// constant. It is not constant for anything the job system can run INLINE:
+				// gg_parent comes off a thread_local stack, so "Animation Dependencies" is a
+				// worker-thread ROOT on the frames a worker picks it up and a depth-4 child of
+				// "Scene-S1 Anim+Transform" on the frames the calling thread drains the queue
+				// itself. Measured on A Grand Canyon Adventure: one dump in 31 put that row at
+				// line 86 instead of line 4, moving all 82 rows in between.
+				//
+				// That is Lee's original "rows shift up and down" report, surviving 3.19 - 3.19
+				// fixed rows vanishing and siblings trading places, and this is a third,
+				// rarer mechanism that a twelve-dump window happened not to catch.
+				//
+				// ★ Latching costs nothing in honesty: the row already SUMS both call sites
+				// into one number (they share a name, so they share a cache entry), so its
+				// position was the only thing pretending the two were distinguishable. Pinning
+				// it to wherever it was first seen makes the position agree with the total.
+				if (!h.tree_latched)
+				{
+					h.tree_latched = true;
+					h.depth       = x.second.gg_depth;        // GGMAX 3.13
+					h.parent      = x.second.gg_parent;
+					h.main_thread = x.second.gg_main_thread;
+				}
 				h.num_hits++;
 				h.total_time += x.second.time;
-				h.depth       = x.second.gg_depth;        // GGMAX 3.13
-				h.parent      = x.second.gg_parent;
-				h.main_thread = x.second.gg_main_thread;
 			}
 			else
 			{
@@ -1042,6 +1085,79 @@ namespace wi::profiler
 					continue;
 				text_cache_gpu_persist[x.second.name].num_hits++;
 				text_cache_gpu_persist[x.second.name].total_time += x.second.time;
+			}
+		}
+
+		// GGMAX 3.20: HIDE IDLE ROWS - the latch, and why it is not "is this row 0.00".
+		//
+		// 3.19 gave every row a permanent slot so the list would stop moving under the eye.
+		// That worked, at the cost of ~50 rows sitting at 0.00 on a typical level. This buys
+		// the length back - but only if it does not re-create the very shifting 3.19 removed,
+		// and the constraint Lee set is exact: a row that READS 0.00 but occasionally does
+		// 0.00001 ms of work must keep its slot.
+		//
+		// So the decision is never taken from the printed value. 0.00 is a rounding artefact
+		// of a 2-decimal format: a range that ran for twelve nanoseconds prints identically to
+		// one that did not run at all, and those two rows want opposite treatment. It is taken
+		// from num_hits - "did this range execute" - and then only after it has failed to
+		// execute for GG_IDLE_FRAMES CONSECUTIVE frames. A single hit anywhere inside that
+		// window puts the counter back to zero, so an occasional row never even approaches the
+		// threshold.
+		//
+		// ★ And a hidden row that runs again is pinned visible for the rest of the session
+		// (sticky_show). That bounds the whole feature at TWO position changes per row per
+		// session - one to hide, one to un-hide, never again - rather than a row that breathes
+		// in and out on its own period. It also makes the threshold cheap to get wrong: too
+		// tight costs one flicker, after which the row is permanent.
+		//
+		// ⚠ The latch is maintained whether or not the box is ticked, so it is already warm
+		// when you tick it. Ticking hides the long-quiet rows immediately instead of starting
+		// a ten-second settling period during which the list would - of all things - shift.
+		{
+			const uint32_t GG_IDLE_FRAMES = 600; // ~10 s at 60 fps, ~20 s at 30. Generous on
+			                                     // purpose: erring long only means FEWER rows
+			                                     // are hidden, which is the harmless direction.
+			auto update_idle_latch = [&](wi::unordered_map<std::string, Hits>& cache)
+			{
+				for (auto& x : cache)
+				{
+					Hits& h = x.second;
+					if (h.num_hits > 0)
+					{
+						if (h.hidden) h.sticky_show = true; // it came back - pin it for good
+						h.hidden = false;
+						h.quiet_frames = 0;
+					}
+					else if (!h.sticky_show && h.quiet_frames < GG_IDLE_FRAMES)
+					{
+						h.quiet_frames++;
+						if (h.quiet_frames >= GG_IDLE_FRAMES) h.hidden = true;
+					}
+				}
+			};
+			update_idle_latch(text_cache_cpu_persist);
+			update_idle_latch(text_cache_gpu_persist);
+
+			// ⚠ A hidden PARENT holding a visible CHILD would orphan that child outright - the
+			// print below is a DFS, and it can only reach a row through its parent. So force
+			// every ancestor of a visible row visible. A parent cannot normally be idle while
+			// its child runs (the child runs inside it), but "normally" is not a guarantee
+			// across worker threads and re-parenting, and the failure mode here is a row that
+			// silently vanishes from the panel rather than merely printing 0.00.
+			// No early-out on an already-visible ancestor: this map is unordered, so a row
+			// un-hidden by a later iteration would have had its own chain walked while it was
+			// still hidden. Walking to the top every time is ~133 rows of pointer chasing.
+			for (auto& x : text_cache_cpu_persist)
+			{
+				if (x.second.hidden) continue;
+				std::string p = x.second.parent;
+				for (int guard = 0; guard < 64 && !p.empty(); guard++)
+				{
+					auto it = text_cache_cpu_persist.find(p);
+					if (it == text_cache_cpu_persist.end()) break;
+					it->second.hidden = false;
+					p = it->second.parent;
+				}
 			}
 		}
 
@@ -1060,10 +1176,17 @@ namespace wi::profiler
 				{ return *a.first < *b.first; });
 			for (auto& x : sorted)
 			{
-				if (x.second->num_hits > 1)
-					ss << "\t" << *x.first << " (" << x.second->num_hits << "x): " << std::fixed << x.second->total_time << " ms" << std::endl;
-				else
-					ss << "\t" << *x.first << ": " << std::fixed << x.second->total_time << " ms" << std::endl;
+				// GGMAX 3.20: a hidden row is not printed - but it IS still reset. These are
+				// accumulators; skipping the reset would let a hidden row keep adding until it
+				// reappeared and printed a total covering every frame it was invisible.
+				const bool skip = gg_hide_idle_rows && x.second->hidden;
+				if (!skip)
+				{
+					if (x.second->num_hits > 1)
+						ss << "\t" << *x.first << " (" << x.second->num_hits << "x): " << std::fixed << x.second->total_time << " ms" << std::endl;
+					else
+						ss << "\t" << *x.first << ": " << std::fixed << x.second->total_time << " ms" << std::endl;
+				}
 				x.second->num_hits = 0;
 				x.second->total_time = 0;
 			}
@@ -1076,6 +1199,7 @@ namespace wi::profiler
 		// them gives 10.4 ms of a 7.99 ms frame. Indentation makes that unmissable, and the
 		// self column says how much of a parent is its OWN work rather than its children's.
 		{
+			gg_hidden_row_count = 0; // GGMAX 3.20: recounted below over both caches
 			ss << ranges[cpu_frame].name << ": " << std::fixed << ranges[cpu_frame].time << " ms" << std::endl;
 
 			// children by parent name; roots are the ranges with no open parent
@@ -1118,6 +1242,20 @@ namespace wi::profiler
 			// with a deadband was tried first and could not hold that much movement. Cost order is
 			// not worth a list that will not stay still - and it is not lost either: the panel
 			// already paints anything over 1 ms yellow, so the expensive rows still find your eye.
+			// GGMAX 3.20: counted over the whole CPU cache, before the DFS, because the DFS
+			// never visits a hidden row (it stops at the highest hidden ancestor) and so
+			// cannot count the subtree underneath it.
+			// GPU rows are counted here too, not down in print_sorted, because the header line
+			// that reports the number is emitted BEFORE the GPU block runs - counting them at
+			// print time would leave the panel understating what it just did.
+			if (gg_hide_idle_rows)
+			{
+				for (auto& x : text_cache_cpu_persist)
+					if (x.second.hidden) gg_hidden_row_count++;
+				for (auto& x : text_cache_gpu_persist)
+					if (x.second.hidden) gg_hidden_row_count++;
+			}
+
 			auto by_time = [&](const std::string* a2, const std::string* b2)
 			{ return *a2 < *b2; };
 			std::sort(roots.begin(), roots.end(), by_time);
@@ -1131,12 +1269,28 @@ namespace wi::profiler
 			// change exists to remove.
 			const float delta = top_level_total - ranges[cpu_frame].time;
 			ss << "  Main Thread Total: " << std::fixed << top_level_total << " ms   ("
-			   << (delta >= 0 ? "+" : "") << std::fixed << delta << " vs frame - 20-frame averaging skew)" << std::endl;
+			   << (delta >= 0 ? "+" : "") << std::fixed << delta << " vs frame - 20-frame averaging skew)";
+			// GGMAX 3.20: the hidden count rides the EXISTING line rather than taking one of
+			// its own - a row that appears only when the box is ticked is itself a shift.
+			if (gg_hide_idle_rows) ss << "   [" << gg_hidden_row_count << " idle hidden]";
+			ss << std::endl;
 
 			// iterative DFS so a pathological tree cannot blow the stack
 			struct Frame { const std::string* name; int indent; };
+			// GGMAX 3.20: hidden rows are skipped at PUSH time, so the tree structure itself
+			// (kids / roots / child_sum) stays complete. That keeps the [self] column present
+			// and exact whether or not the box is ticked - gating the tree on visibility would
+			// make [self] blink out on any parent whose children all went quiet, which is the
+			// bug 3.19 fixed. A hidden row has no visible descendants (see the ancestor pass
+			// above), so skipping it drops exactly its own subtree and nothing else.
+			auto row_hidden = [&](const std::string* nm) -> bool
+			{
+				if (!gg_hide_idle_rows) return false;
+				auto it = text_cache_cpu_persist.find(*nm);
+				return it != text_cache_cpu_persist.end() && it->second.hidden;
+			};
 			std::vector<Frame> stack;
-			for (size_t i = roots.size(); i-- > 0; ) stack.push_back({ roots[i], 1 });
+			for (size_t i = roots.size(); i-- > 0; ) if (!row_hidden(roots[i])) stack.push_back({ roots[i], 1 });
 			int guard = 0;
 			while (!stack.empty() && guard++ < 4096)
 			{
@@ -1158,7 +1312,8 @@ namespace wi::profiler
 				ss << std::endl;
 
 				if (kit != kids.end())
-					for (size_t i = kit->second.size(); i-- > 0; ) stack.push_back({ kit->second[i], f.indent + 1 });
+					for (size_t i = kit->second.size(); i-- > 0; )
+						if (!row_hidden(kit->second[i])) stack.push_back({ kit->second[i], f.indent + 1 });
 			}
 
 			for (auto& x : text_cache_cpu_persist) { x.second.num_hits = 0; x.second.total_time = 0; }

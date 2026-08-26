@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "CommonInclude.h"
 #include "wiScene_Decl.h"
 #include "wiScene_Components.h"
@@ -103,6 +103,14 @@ namespace wi::terrain
 	// texture (16384 = stock, 768 MB tile pool; halving halves it). Applied at atlas creation.
 	extern uint32_t gg_svt_atlas_height;
 	extern bool gg_svt_keep_emissive; // GGMAX 1.98 (A4): setup.ini svtemissive=1 restores the unused 4th SVT map
+
+	// GGMAX 3.25k: terrain-bake helpers. gg_BakeMipCount gives the mip chain length that stops
+	// at 4x4 (BC1 has no smaller block); the caller must create its BC1 destination with the same
+	// count, because BlockCompress pairs source mip N with destination mip N.
+	uint32_t gg_BakeMipCount(uint32_t resolution);
+	// Frees the shared uncompressed bake scratch - ~340 MB at 8192 with mips, so call it once
+	// the bake has finished rather than leaving it resident.
+	void gg_ReleaseBakeScratch();
 
 	static constexpr int chunk_width = 64 + 3; // + 3: filler vertices for lod apron and grid perimeter
 	static constexpr float chunk_half_width = (chunk_width - 1) * 0.5f;

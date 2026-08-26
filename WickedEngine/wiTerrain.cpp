@@ -2497,6 +2497,25 @@ namespace wi::terrain
 	// `output` is created on first use and reused after that, so a re-bake of the same chunk at
 	// the same resolution costs one dispatch and no allocation.
 	// =========================================================================================
+	// GGMAX 3.25k: the bake's shared uncompressed scratch. File scope rather than function-static
+	// so it can be RELEASED once a bake finishes - at 8192 with a mip chain it is about 340 MB,
+	// which is far too much to leave resident for a one-shot conversion.
+	static Texture gg_bake_scratch;
+
+	// Mip chain length that stops at 4x4. BC1 compresses 4x4 blocks, so a 2x2 or 1x1 BC mip is
+	// not representable; the engine's own DDS import aligns to 4 for the same reason.
+	uint32_t gg_BakeMipCount(uint32_t resolution)
+	{
+		uint32_t mips = 1, r = resolution;
+		while (r > 4u) { r >>= 1; mips++; }
+		return mips;
+	}
+
+	void gg_ReleaseBakeScratch()
+	{
+		gg_bake_scratch = {};
+	}
+
 	bool Terrain::gg_BakeChunkBasecolor(const ChunkData& chunk_data, wi::graphics::Texture& output, uint32_t resolution, CommandList cmd) const
 	{
 		if (!chunk_data.blendmap.IsValid())
@@ -2517,13 +2536,14 @@ namespace wi::terrain
 		// and immediately compressed into the caller's BC1 texture. Only one chunk is in flight
 		// at a time, so a single scratch serves all 625 - at 1024 that is 4 MB total instead of
 		// 2.5 GB of per-chunk uncompressed textures.
-		static Texture gg_bake_scratch;
+		const uint32_t mip_count = gg_BakeMipCount(resolution);
 		if (!gg_bake_scratch.IsValid() || gg_bake_scratch.desc.width != resolution)
 		{
+			gg_bake_scratch = {};
 			TextureDesc sd;
 			sd.width = resolution;
 			sd.height = resolution;
-			sd.mip_levels = 1;
+			sd.mip_levels = mip_count;
 			// UNORM, not _SRGB: DX12 forbids a UAV on an sRGB format. The shader applies the sRGB
 			// curve itself and the BC1_UNORM_SRGB destination decodes it in hardware on sample.
 			sd.format = Format::R8G8B8A8_UNORM;
@@ -2532,6 +2552,12 @@ namespace wi::terrain
 			if (!device->CreateTexture(&sd, nullptr, &gg_bake_scratch))
 				return false;
 			device->SetName(&gg_bake_scratch, "GGMAX::TerrainBake::scratch");
+			// per-mip SRV and UAV, which is what GenerateMipChain and BlockCompress index by.
+			for (uint32_t i = 0; i < gg_bake_scratch.desc.mip_levels; ++i)
+			{
+				device->CreateSubresource(&gg_bake_scratch, SubresourceType::SRV, 0, 1, i, 1);
+				device->CreateSubresource(&gg_bake_scratch, SubresourceType::UAV, 0, 1, i, 1);
+			}
 		}
 
 		// The caller owns `output` and must have created it as a committed BC1 texture with
@@ -2539,7 +2565,8 @@ namespace wi::terrain
 		if (!output.IsValid())
 			return false;
 
-		const int uav = device->GetDescriptorIndex(&gg_bake_scratch, SubresourceType::UAV);
+		// subresource 0 = mip 0. With a chain present the default UAV is ambiguous, so name it.
+		const int uav = device->GetDescriptorIndex(&gg_bake_scratch, SubresourceType::UAV, 0);
 		const int blendmap_srv = device->GetDescriptorIndex(&chunk_data.blendmap, SubresourceType::SRV);
 		if (uav < 0 || blendmap_srv < 0)
 			return false;
@@ -2612,6 +2639,10 @@ namespace wi::terrain
 			device->Barrier(&barrier, 1, cmd);
 		}
 
+		// Fill the rest of the chain from mip 0, then compress every level. BlockCompress binds
+		// source mip N for destination mip N, so the two counts must agree - which is why the
+		// caller creates its BC1 with gg_BakeMipCount(resolution) levels as well.
+		wi::renderer::GenerateMipChain(gg_bake_scratch, wi::renderer::MIPGENFILTER_LINEAR, cmd);
 		wi::renderer::BlockCompress(gg_bake_scratch, output, cmd);
 
 		device->EventEnd(cmd);

@@ -1,4 +1,4 @@
-#include "wiTerrain.h"
+﻿#include "wiTerrain.h"
 #include "wiProfiler.h"
 #include "wiTimer.h"
 #include "wiRenderer.h"
@@ -2508,23 +2508,34 @@ namespace wi::terrain
 
 		GraphicsDevice* device = GetDevice();
 
-		if (!output.IsValid() || output.desc.width != resolution || output.desc.height != resolution)
+		// ★ ONE SHARED SCRATCH for the whole bake, not one per chunk. The compute shader needs a
+		// UAV and DX12 forbids a UAV on a BC format, so the uncompressed surface is written here
+		// and immediately compressed into the caller's BC1 texture. Only one chunk is in flight
+		// at a time, so a single scratch serves all 625 - at 1024 that is 4 MB total instead of
+		// 2.5 GB of per-chunk uncompressed textures.
+		static Texture gg_bake_scratch;
+		if (!gg_bake_scratch.IsValid() || gg_bake_scratch.desc.width != resolution)
 		{
-			TextureDesc desc;
-			desc.width = resolution;
-			desc.height = resolution;
-			desc.mip_levels = 1;
-			// UNORM and not _SRGB on purpose: DX12 forbids a UAV on an sRGB format, so the shader
-			// applies the sRGB curve itself and the sampler in the draw pass undoes it.
-			desc.format = Format::R8G8B8A8_UNORM;
-			desc.bind_flags = BindFlag::SHADER_RESOURCE | BindFlag::UNORDERED_ACCESS;
-			desc.layout = ResourceState::SHADER_RESOURCE;
-			if (!device->CreateTexture(&desc, nullptr, &output))
+			TextureDesc sd;
+			sd.width = resolution;
+			sd.height = resolution;
+			sd.mip_levels = 1;
+			// UNORM, not _SRGB: DX12 forbids a UAV on an sRGB format. The shader applies the sRGB
+			// curve itself and the BC1_UNORM_SRGB destination decodes it in hardware on sample.
+			sd.format = Format::R8G8B8A8_UNORM;
+			sd.bind_flags = BindFlag::SHADER_RESOURCE | BindFlag::UNORDERED_ACCESS;
+			sd.layout = ResourceState::SHADER_RESOURCE;
+			if (!device->CreateTexture(&sd, nullptr, &gg_bake_scratch))
 				return false;
-			device->SetName(&output, "GGMAX::TerrainBake::chunk_basecolor");
+			device->SetName(&gg_bake_scratch, "GGMAX::TerrainBake::scratch");
 		}
 
-		const int uav = device->GetDescriptorIndex(&output, SubresourceType::UAV);
+		// The caller owns `output` and must have created it as a committed BC1 texture with
+		// SHADER_RESOURCE only - BlockCompress transitions it to COPY_DST and back itself.
+		if (!output.IsValid())
+			return false;
+
+		const int uav = device->GetDescriptorIndex(&gg_bake_scratch, SubresourceType::UAV);
 		const int blendmap_srv = device->GetDescriptorIndex(&chunk_data.blendmap, SubresourceType::SRV);
 		if (uav < 0 || blendmap_srv < 0)
 			return false;
@@ -2583,7 +2594,7 @@ namespace wi::terrain
 		device->BindComputeShader(wi::renderer::GetShader(wi::enums::CSTYPE_GG_TERRAIN_BAKECHUNK), cmd);
 
 		{
-			GPUBarrier barrier = GPUBarrier::Image(&output, ResourceState::SHADER_RESOURCE, ResourceState::UNORDERED_ACCESS);
+			GPUBarrier barrier = GPUBarrier::Image(&gg_bake_scratch, ResourceState::SHADER_RESOURCE, ResourceState::UNORDERED_ACCESS);
 			device->Barrier(&barrier, 1, cmd);
 		}
 
@@ -2591,9 +2602,14 @@ namespace wi::terrain
 		device->Dispatch((resolution + 7u) / 8u, (resolution + 7u) / 8u, 1u, cmd);
 
 		{
-			GPUBarrier barrier = GPUBarrier::Image(&output, ResourceState::UNORDERED_ACCESS, ResourceState::SHADER_RESOURCE);
+			// back to SHADER_RESOURCE, which is exactly the state BlockCompress requires its
+			// source to be in - it never transitions the source itself.
+			GPUBarrier barrier = GPUBarrier::Image(&gg_bake_scratch, ResourceState::UNORDERED_ACCESS, ResourceState::SHADER_RESOURCE);
 			device->Barrier(&barrier, 1, cmd);
 		}
+
+		wi::renderer::BlockCompress(gg_bake_scratch, output, cmd);
+
 		device->EventEnd(cmd);
 		return true;
 	}

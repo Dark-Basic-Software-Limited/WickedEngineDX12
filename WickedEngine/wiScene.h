@@ -22,6 +22,16 @@
 namespace wi::scene
 {
 
+	// GGMAX 3.25: Reduction Scale (the slider under "Lower Animation & LUA Speed"). Defined in
+	// wiScene.cpp - see the long note there for the specification and why the phase key is the
+	// object index. Declared here because wiRenderer.cpp needs the same period rule to decide
+	// which skinning dispatches it can skip.
+	// Distance under which animation is NEVER skipped, in world units (GG inches).
+	static constexpr float GG_ANIM_REDUCTION_NEAR_DIST = 500.0f;
+	extern std::atomic<uint32_t> gg_anim_reduction_scale;   // 0 or 1 = off, else 2..100
+	extern uint32_t gg_anim_reduction_skipped;              // diagnostic
+	uint32_t gg_anim_reduction_period(float distance, uint32_t scale);
+
 	// GGMAX 2.60 diagnostic: MergeFastInternal cost attribution (see wiScene.cpp)
 	struct GGMergeProfEntry { char name[48]; uint64_t us; };
 	extern uint64_t gg_mergeprof_total_us;

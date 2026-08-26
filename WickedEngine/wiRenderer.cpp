@@ -1529,6 +1529,7 @@ void LoadShaders()
 	wi::jobsystem::Execute(ctx, [](wi::jobsystem::JobArgs args) { LoadShader(ShaderStage::CS, shaders[CSTYPE_DDGI_UPDATE], "ddgi_updateCS.cso"); });
 	wi::jobsystem::Execute(ctx, [](wi::jobsystem::JobArgs args) { LoadShader(ShaderStage::CS, shaders[CSTYPE_DDGI_UPDATE_DEPTH], "ddgi_updateCS_depth.cso"); });
 	wi::jobsystem::Execute(ctx, [](wi::jobsystem::JobArgs args) { LoadShader(ShaderStage::CS, shaders[CSTYPE_TERRAIN_VIRTUALTEXTURE_UPDATE_BASECOLORMAP], "terrainVirtualTextureUpdateCS.cso"); });
+	wi::jobsystem::Execute(ctx, [](wi::jobsystem::JobArgs args) { LoadShader(ShaderStage::CS, shaders[CSTYPE_GG_TERRAIN_BAKECHUNK], "terrainBakeChunkCS.cso"); }); // GGMAX 3.25
 	wi::jobsystem::Execute(ctx, [](wi::jobsystem::JobArgs args) { LoadShader(ShaderStage::CS, shaders[CSTYPE_TERRAIN_VIRTUALTEXTURE_UPDATE_NORMALMAP], "terrainVirtualTextureUpdateCS_normalmap.cso"); });
 	wi::jobsystem::Execute(ctx, [](wi::jobsystem::JobArgs args) { LoadShader(ShaderStage::CS, shaders[CSTYPE_TERRAIN_VIRTUALTEXTURE_UPDATE_SURFACEMAP], "terrainVirtualTextureUpdateCS_surfacemap.cso"); });
 	wi::jobsystem::Execute(ctx, [](wi::jobsystem::JobArgs args) { LoadShader(ShaderStage::CS, shaders[CSTYPE_TERRAIN_VIRTUALTEXTURE_UPDATE_EMISSIVEMAP], "terrainVirtualTextureUpdateCS_emissivemap.cso"); });
@@ -6387,10 +6388,62 @@ void UpdateRenderData(
 			descriptor_skinningbuffer = device->GetDescriptorIndex(&vis.scene->skinningUploadBuffer[vis.scene->cpu_gpu_mapped_resource_index], SubresourceType::SRV);
 		}
 		device->BindComputeShader(&shaders[CSTYPE_SKINNING], cmd);
+
+		// GGMAX 3.25 - REDUCTION SCALE, the GPU half.
+		//
+		// Stock, this loop dispatches skinning for every skinned mesh in the SCENE - not the
+		// visible set, the scene - every frame, whatever the distance and whether or not the
+		// pose changed. On a level with a lot of characters that is the whole of the 3-6 ms Lee
+		// measured on his AMD card while only his own weapon was animating nearby.
+		//
+		// When an object's animation was skipped this frame its bone matrices are byte-identical
+		// to last frame's, so the skinning dispatch would recompute exactly the vertices already
+		// sitting in the streamout buffer. Skipping the dispatch leaves that buffer alone and
+		// the mesh draws from it unchanged - which is precisely the intended result, a held pose.
+		//
+		// Built from OBJECTS, not meshes, because distance is a property of the instance. A mesh
+		// instanced by several objects is skinned if ANY of them wants it this frame; a mesh no
+		// object references is left alone and dispatches as before, because there is nothing to
+		// measure a distance from and a wrong guess there would freeze something visible.
+		static wi::vector<uint8_t> gg_skin_state; // bit0 = referenced by an object, bit1 = wants skinning
+		const uint32_t gg_red_scale = wi::scene::gg_anim_reduction_scale.load(std::memory_order_relaxed);
+		const bool gg_red_active = (gg_red_scale > 1);
+		if (gg_red_active)
+		{
+			gg_skin_state.clear();
+			gg_skin_state.resize(vis.scene->meshes.GetCount(), 0);
+			const uint32_t gg_frame = (uint32_t)device->GetFrameCount();
+			const XMFLOAT3& gg_eye = vis.scene->camera.Eye;
+			const size_t gg_obj_count = vis.scene->objects.GetCount();
+			for (size_t oi = 0; oi < gg_obj_count; ++oi)
+			{
+				const ObjectComponent& obj = vis.scene->objects[oi];
+				const size_t mi = vis.scene->meshes.GetIndex(obj.meshID);
+				if (mi >= gg_skin_state.size())
+					continue;
+				float d = 0;
+				if (oi < vis.scene->aabb_objects.size())
+				{
+					const XMFLOAT3 c = vis.scene->aabb_objects[oi].getCenter();
+					const float dx = c.x - gg_eye.x, dy = c.y - gg_eye.y, dz = c.z - gg_eye.z;
+					d = std::sqrt(dx * dx + dy * dy + dz * dz);
+				}
+				const uint32_t period = wi::scene::gg_anim_reduction_period(d, gg_red_scale);
+				// Same phase key (the object index) as RunAnimationUpdateSystem, so the pose
+				// update and the skinning land on the SAME frame for the same object.
+				const bool wants = (period <= 1) || (((gg_frame + (uint32_t)oi * 7u) % period) == 0);
+				gg_skin_state[mi] |= (uint8_t)(1u | (wants ? 2u : 0u));
+			}
+		}
+
 		for (size_t i = 0; i < vis.scene->meshes.GetCount(); ++i)
 		{
 			Entity entity = vis.scene->meshes.GetEntity(i);
 			const MeshComponent& mesh = vis.scene->meshes[i];
+
+			// referenced by at least one object, and none of them wants it this frame
+			if (gg_red_active && i < gg_skin_state.size() && gg_skin_state[i] == 1)
+				continue;
 
 			if (
 				(mesh.IsSkinned() || !mesh.morph_targets.empty() || mesh.vb_bon.IsValid()) && // Note: even if all morphs are inactive, the skinning must be done

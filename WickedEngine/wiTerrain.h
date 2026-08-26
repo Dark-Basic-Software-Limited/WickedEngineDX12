@@ -533,6 +533,9 @@ namespace wi::terrain
 
 		void UpdateVirtualTexturesCPU();
 		void UpdateVirtualTexturesGPU(wi::graphics::CommandList cmd) const;
+		// GGMAX 3.25: Terrain Bake - resolve one chunk into a plain RGBA8 Texture2D using the same
+		// blendmap-x-materials blend as the virtual-texture tile bake. Creates/reuses `output`.
+		bool gg_BakeChunkBasecolor(const ChunkData& chunk_data, wi::graphics::Texture& output, uint32_t resolution, wi::graphics::CommandList cmd) const;
 		void CopyVirtualTexturePageStatusGPU(wi::graphics::CommandList cmd) const;
 		void AllocateVirtualTextureTileRequestsGPU(wi::graphics::CommandList cmd) const;
 		void WritebackTileRequestsGPU(wi::graphics::CommandList cmd) const;

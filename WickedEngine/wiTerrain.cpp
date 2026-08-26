@@ -2478,6 +2478,126 @@ namespace wi::terrain
 		}
 	}
 
+	// =========================================================================================
+	// GGMAX 3.25: TERRAIN BAKE - resolve one chunk's painted surface into a plain Texture2D.
+	//
+	// The "Terrain Bake" low-spec switch turns the whole rendered terrain into a set of ordinary
+	// meshes and ordinary textures, then removes the Wicked terrain entirely (the 2.94 Terrain
+	// Off teardown). This is the texture half: it runs the SAME blend the virtual-texture tile
+	// bake runs - blendmap layer weights against the layer materials' basecolour maps, front to
+	// back with early-out - but writes an uncompressed RGBA8 pixel instead of a BC1 block into a
+	// sparse atlas tile. See terrainBakeChunkCS.hlsl for why the compression cannot come along.
+	//
+	// Deliberately reads chunk_data.blendmap and NOT vt->blendmap. They are the same texture
+	// (UpdateVirtualTexturesCPU does `vt.blendmap = chunk_data.blendmap`), but the chunk owns it
+	// and a chunk can be perfectly bakeable while its virtual texture is still null or evicted.
+	// Depending on the VT here would make the bake silently camera-history-dependent: chunks the
+	// player had walked near would bake and the rest would come out empty.
+	//
+	// `output` is created on first use and reused after that, so a re-bake of the same chunk at
+	// the same resolution costs one dispatch and no allocation.
+	// =========================================================================================
+	bool Terrain::gg_BakeChunkBasecolor(const ChunkData& chunk_data, wi::graphics::Texture& output, uint32_t resolution, CommandList cmd) const
+	{
+		if (!chunk_data.blendmap.IsValid())
+			return false;
+		if (resolution < 8 || resolution > 4096)
+			return false;
+		if (scene == nullptr)
+			return false;
+
+		GraphicsDevice* device = GetDevice();
+
+		if (!output.IsValid() || output.desc.width != resolution || output.desc.height != resolution)
+		{
+			TextureDesc desc;
+			desc.width = resolution;
+			desc.height = resolution;
+			desc.mip_levels = 1;
+			// UNORM and not _SRGB on purpose: DX12 forbids a UAV on an sRGB format, so the shader
+			// applies the sRGB curve itself and the sampler in the draw pass undoes it.
+			desc.format = Format::R8G8B8A8_UNORM;
+			desc.bind_flags = BindFlag::SHADER_RESOURCE | BindFlag::UNORDERED_ACCESS;
+			desc.layout = ResourceState::SHADER_RESOURCE;
+			if (!device->CreateTexture(&desc, nullptr, &output))
+				return false;
+			device->SetName(&output, "GGMAX::TerrainBake::chunk_basecolor");
+		}
+
+		const int uav = device->GetDescriptorIndex(&output, SubresourceType::UAV);
+		const int blendmap_srv = device->GetDescriptorIndex(&chunk_data.blendmap, SubresourceType::SRV);
+		if (uav < 0 || blendmap_srv < 0)
+			return false;
+
+		TerrainVirtualTexturePush push = {};
+		push.output_texture = uav;
+		push.blendmap_texture = blendmap_srv;
+		push.blendmap_layers = chunk_data.blendmap.desc.array_size;
+		if (push.blendmap_layers == 0)
+			return false;
+
+		// Material index table, one uint per blendmap layer. Same clamping as the tile bake: an
+		// entity without a live MaterialComponent gives GetIndex() == SIZE_MAX, which the shader
+		// would turn into an out-of-bounds ShaderMaterial read, a garbage texture descriptor and
+		// a GPU page fault. That exact path was the 2.04 Aztec DEVICE_HUNG, so it is clamped here
+		// too rather than assumed impossible on the bake path.
+		auto mem = device->AllocateGPU(sizeof(uint32_t) * push.blendmap_layers, cmd);
+		if (mem.data == nullptr)
+			return false;
+		const uint32_t splineMaterialCount = (uint32_t)splineMaterialEntities.size();
+		const uint32_t baseMaterialCount = (push.blendmap_layers > splineMaterialCount)
+			? (push.blendmap_layers - splineMaterialCount) : 0u;
+		const size_t material_count = scene->materials.GetCount();
+		auto safe_index = [&](Entity entity) -> uint32_t
+		{
+			const size_t idx = scene->materials.GetIndex(entity);
+			return (idx >= material_count) ? 0u : (uint32_t)idx;
+		};
+		for (uint32_t i = 0; i < baseMaterialCount; ++i)
+		{
+			const uint32_t mi = (i < (uint32_t)materialEntities.size()) ? safe_index(materialEntities[i]) : 0u;
+			std::memcpy((uint32_t*)mem.data + i, &mi, sizeof(uint32_t)); // memcpy: no uncached read back from a GPU pointer
+		}
+		for (uint32_t i = 0; i < splineMaterialCount && (baseMaterialCount + i) < push.blendmap_layers; ++i)
+		{
+			const uint32_t mi = safe_index(splineMaterialEntities[i]);
+			std::memcpy((uint32_t*)mem.data + baseMaterialCount + i, &mi, sizeof(uint32_t));
+		}
+		push.blendmap_buffer = device->GetDescriptorIndex(&mem.buffer, SubresourceType::SRV);
+		if (push.blendmap_buffer < 0)
+			return false;
+		push.blendmap_buffer_offset = (uint32_t)mem.offset;
+
+		// Whole chunk in one go: no tile borders, no packed mip tail, no page offsets.
+		push.offset = int2(0, 0);
+		push.write_offset = uint2(0, 0);
+		push.write_size = resolution;              // PIXELS here, not 4x4 blocks
+		push.resolution_rcp = 1.0f / (float)resolution;
+		// Same distance-tiling policy as the live terrain, or the baked chunks would disagree
+		// with any still-live chunk on texture scale.
+		push.gg_tile_share = (std::min(gg_terrain_tile_share_mips, 255u) << 24u)
+			| (std::min(gg_terrain_tile_hold_mips, 255u) << 16u);
+
+		device->EventBegin("GGMAX Terrain Bake Chunk", cmd);
+		wi::renderer::BindCommonResources(cmd);
+		device->BindComputeShader(wi::renderer::GetShader(wi::enums::CSTYPE_GG_TERRAIN_BAKECHUNK), cmd);
+
+		{
+			GPUBarrier barrier = GPUBarrier::Image(&output, ResourceState::SHADER_RESOURCE, ResourceState::UNORDERED_ACCESS);
+			device->Barrier(&barrier, 1, cmd);
+		}
+
+		device->PushConstants(&push, sizeof(push), cmd);
+		device->Dispatch((resolution + 7u) / 8u, (resolution + 7u) / 8u, 1u, cmd);
+
+		{
+			GPUBarrier barrier = GPUBarrier::Image(&output, ResourceState::UNORDERED_ACCESS, ResourceState::SHADER_RESOURCE);
+			device->Barrier(&barrier, 1, cmd);
+		}
+		device->EventEnd(cmd);
+		return true;
+	}
+
 	void Terrain::UpdateVirtualTexturesGPU(CommandList cmd) const
 	{
 		{

@@ -390,6 +390,10 @@ namespace wi::enums
 		CSTYPE_DDGI_UPDATE,
 		CSTYPE_DDGI_UPDATE_DEPTH,
 		CSTYPE_TERRAIN_VIRTUALTEXTURE_UPDATE_BASECOLORMAP,
+		// GGMAX 3.25: per-chunk terrain BAKE (Terrain Bake low-spec switch). Same blend as the
+		// tile bake above, writes a plain RGBA8 pixel instead of a BC1 block so the result is an
+		// ordinary Texture2D with no sparse atlas behind it. See terrainBakeChunkCS.hlsl.
+		CSTYPE_GG_TERRAIN_BAKECHUNK,
 		CSTYPE_TERRAIN_VIRTUALTEXTURE_UPDATE_NORMALMAP,
 		CSTYPE_TERRAIN_VIRTUALTEXTURE_UPDATE_SURFACEMAP,
 		CSTYPE_TERRAIN_VIRTUALTEXTURE_UPDATE_EMISSIVEMAP,

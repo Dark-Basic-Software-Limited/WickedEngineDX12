@@ -2252,6 +2252,52 @@ namespace wi::scene
 	std::atomic<uint32_t> gg_anim_vis_pause_frames{ 0 };
 	std::atomic<uint32_t> gg_anim_vis_pause_neardist2{ 0 };
 
+	// GGMAX 3.25 - REDUCTION SCALE ("Lower Animation & LUA Speed" -> Reduction Scale slider).
+	//
+	// The 1.29 throttle above halves animation EVALUATION and nothing else. Lee measured
+	// "Skinning and Morph" at 3-6 ms on a 6-year-old AMD card on a level where the only thing
+	// animating near him was his own weapon, and ticking the throttle moved it by nothing at
+	// all. Reading the code says why: wiRenderer's skinning loop walks scene->meshes and issues
+	// a compute dispatch for EVERY skinned mesh in the scene, with no distance test, no
+	// visibility test, and no check for whether the pose actually changed since last frame.
+	//
+	// So this skips both halves together, on a period that grows with distance:
+	//     under 500 units  : never skipped (you would see it)
+	//     at or beyond     : skipped = (scale / 10) * (distance / 500)
+	// which is Lee's specification exactly - scale 50 at 500 units skips 5, at 1000 units skips
+	// 10; scale 80 at 500 skips 8, at 1000 skips 16; scale 100 at 500 skips 10.
+	//
+	// ⚠ The step at 500 units is deliberate and is in the specification: an object at 499 units
+	// is never skipped and one at 501 jumps straight to the full rate for its distance. It is
+	// not smoothed here because a distant character's animation phase is not something a player
+	// can track, so there is nothing to see crossing the boundary.
+	//
+	// THE PHASE KEY IS THE OBJECT INDEX, and that is load-bearing. The animation update and the
+	// skinning dispatch are decided in two different places over two different collections; if
+	// they keyed their phase off anything else (animation index here, mesh index there) they
+	// would agree on the RATE but disagree on WHICH frames, and a character would be posed on
+	// one frame and skinned on another - permanently one update stale, which reads as a subtle
+	// judder rather than a clean lower frame rate. Keyed off the object index, both arrive at
+	// the same answer for the same object on the same frame.
+	std::atomic<uint32_t> gg_anim_reduction_scale{ 0 };   // 0 or 1 = off, else 2..100
+	uint32_t gg_anim_reduction_skipped = 0;               // diagnostic: animations skipped last frame
+
+	// Shared by RunAnimationUpdateSystem and the skinning dispatch. Returns the number of frames
+	// between updates (1 = every frame).
+	uint32_t gg_anim_reduction_period(float distance, uint32_t scale)
+	{
+		if (scale <= 1) return 1;
+		if (distance < GG_ANIM_REDUCTION_NEAR_DIST) return 1;
+		const float skipped = (float(scale) * 0.1f) * (distance / GG_ANIM_REDUCTION_NEAR_DIST);
+		uint32_t period = 1u + (uint32_t)skipped;
+		// Guard only. At 40,000 units (about a kilometre) and scale 100 the formula asks for 800
+		// frames, which is a thirteen-second freeze; nothing at that range is legible either way,
+		// but an unbounded period makes the behaviour hard to reason about and impossible to
+		// test, so it stops here.
+		if (period > 240u) period = 240u;
+		return period;
+	}
+
 	// GGMAX delta 1.36: level-order hierarchy update master switch (false = stock chain walk).
 	bool gg_hierarchy_levelorder = true;
 
@@ -2362,6 +2408,27 @@ namespace wi::scene
 						{
 							iCulledAnimations++;
 							bCulled = true;
+						}
+						// GGMAX 3.25: Reduction Scale, on top of the 30fps parity above. Same
+						// object index the skinning dispatch uses as its phase key - see the
+						// long note by gg_anim_reduction_scale for why that matters.
+						const uint32_t redScale = gg_anim_reduction_scale.load(std::memory_order_relaxed);
+						if (!bCulled && redScale > 1)
+						{
+							const size_t roi = objects.GetIndex(animation.objectIndex);
+							if (roi < aabb_objects.size())
+							{
+								const XMFLOAT3 rc = aabb_objects[roi].getCenter();
+								const XMFLOAT3& rEye = GetCamera().Eye;
+								const float rdx = rc.x - rEye.x, rdy = rc.y - rEye.y, rdz = rc.z - rEye.z;
+								const float rd = std::sqrt(rdx * rdx + rdy * rdy + rdz * rdz);
+								const uint32_t period = gg_anim_reduction_period(rd, redScale);
+								if (period > 1 && ((animParityFrame + (uint32_t)roi * 7u) % period) != 0)
+								{
+									iCulledAnimations++;
+									bCulled = true;
+								}
+							}
 						}
 					}
 					if (handleprimaryandsecondary == 0 && animation.useprimaryanimtimer != 0) continue;

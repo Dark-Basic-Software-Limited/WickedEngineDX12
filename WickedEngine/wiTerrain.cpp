@@ -2501,7 +2501,11 @@ namespace wi::terrain
 	{
 		if (!chunk_data.blendmap.IsValid())
 			return false;
-		if (resolution < 8 || resolution > 4096)
+		// 8192 ceiling, not 4096: the GGMAX two-tier bake promotes chunks inside the play area to a
+		// much higher resolution than the distant ones, and 4096 over a ~5120-unit chunk is still
+		// only about 1.25 units per texel. BC1 keeps even 8192 at 32 MB a chunk, and the caller
+		// budgets how many chunks may be promoted.
+		if (resolution < 8 || resolution > 8192)
 			return false;
 		if (scene == nullptr)
 			return false;

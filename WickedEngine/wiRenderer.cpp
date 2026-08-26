@@ -6405,45 +6405,28 @@ void UpdateRenderData(
 		// instanced by several objects is skinned if ANY of them wants it this frame; a mesh no
 		// object references is left alone and dispatches as before, because there is nothing to
 		// measure a distance from and a wrong guess there would freeze something visible.
-		static wi::vector<uint8_t> gg_skin_state; // bit0 = referenced by an object, bit1 = wants skinning
-		const uint32_t gg_red_scale = wi::scene::gg_anim_reduction_scale.load(std::memory_order_relaxed);
-		const bool gg_red_active = (gg_red_scale > 1);
-		if (gg_red_active)
-		{
-			gg_skin_state.clear();
-			gg_skin_state.resize(vis.scene->meshes.GetCount(), 0);
-			const uint32_t gg_frame = (uint32_t)device->GetFrameCount();
-			const XMFLOAT3& gg_eye = vis.scene->camera.Eye;
-			const size_t gg_obj_count = vis.scene->objects.GetCount();
-			for (size_t oi = 0; oi < gg_obj_count; ++oi)
-			{
-				const ObjectComponent& obj = vis.scene->objects[oi];
-				const size_t mi = vis.scene->meshes.GetIndex(obj.meshID);
-				if (mi >= gg_skin_state.size())
-					continue;
-				float d = 0;
-				if (oi < vis.scene->aabb_objects.size())
-				{
-					const XMFLOAT3 c = vis.scene->aabb_objects[oi].getCenter();
-					const float dx = c.x - gg_eye.x, dy = c.y - gg_eye.y, dz = c.z - gg_eye.z;
-					d = std::sqrt(dx * dx + dy * dy + dz * dz);
-				}
-				const uint32_t period = wi::scene::gg_anim_reduction_period(d, gg_red_scale);
-				// Same phase key (the object index) as RunAnimationUpdateSystem, so the pose
-				// update and the skinning land on the SAME frame for the same object.
-				const bool wants = (period <= 1) || (((gg_frame + (uint32_t)oi * 7u) % period) == 0);
-				gg_skin_state[mi] |= (uint8_t)(1u | (wants ? 2u : 0u));
-			}
-		}
+		// ★ GGMAX 3.25n: read the SAME per-armature decision the animation system made this
+		// frame. It is not recomputed here on purpose. The previous version derived its own answer
+		// per OBJECT, and a GameGuru character is several objects sharing one armature - so the
+		// head and the body skinned on different frames, from different armature states, and the
+		// character grew a second head. The unit of a skinned pose is the armature.
+		const bool gg_red_active = !wi::scene::gg_anim_armature_update.empty();
 
 		for (size_t i = 0; i < vis.scene->meshes.GetCount(); ++i)
 		{
 			Entity entity = vis.scene->meshes.GetEntity(i);
 			const MeshComponent& mesh = vis.scene->meshes[i];
 
-			// referenced by at least one object, and none of them wants it this frame
-			if (gg_red_active && i < gg_skin_state.size() && gg_skin_state[i] == 1)
-				continue;
+			// This mesh's armature was held this frame: its bone matrices are byte-identical to
+			// last frame's, so the dispatch would recompute vertices already in the streamout
+			// buffer. Meshes with no armature (morph-only) are never skipped.
+			if (gg_red_active && mesh.armatureID != wi::ecs::INVALID_ENTITY)
+			{
+				const size_t gg_ai = vis.scene->armatures.GetIndex(mesh.armatureID);
+				if (gg_ai < wi::scene::gg_anim_armature_update.size() &&
+					wi::scene::gg_anim_armature_update[gg_ai] == 0)
+					continue;
+			}
 
 			if (
 				(mesh.IsSkinned() || !mesh.morph_targets.empty() || mesh.vb_bon.IsValid()) && // Note: even if all morphs are inactive, the skinning must be done

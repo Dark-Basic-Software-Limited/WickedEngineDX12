@@ -1,4 +1,4 @@
-#include "wiScene.h"
+﻿#include "wiScene.h"
 #include <intrin.h> // GGMAX 1.81: _ReturnAddress() for the Scene::Update caller tracer
 #include "wiTextureHelper.h"
 #include "wiResourceManager.h"
@@ -2281,6 +2281,12 @@ namespace wi::scene
 	// the same answer for the same object on the same frame.
 	std::atomic<uint32_t> gg_anim_reduction_scale{ 0 };   // 0 or 1 = off, else 2..100
 	uint32_t gg_anim_reduction_skipped = 0;               // diagnostic: animations skipped last frame
+	// Per-ARMATURE update decision for this frame, indexed by armature index. 1 = this armature
+	// (and therefore every mesh it drives) advances this frame. Filled once at the top of
+	// RunAnimationUpdateSystem and read by BOTH the animation skip below and the skinning
+	// dispatch in wiRenderer - one decision, so the parts of a character cannot disagree.
+	wi::vector<uint8_t> gg_anim_armature_update;
+	uint32_t gg_anim_armatures_skipped = 0;   // diagnostic: armatures held this frame
 
 	// Shared by RunAnimationUpdateSystem and the skinning dispatch. Returns the number of frames
 	// between updates (1 = every frame).
@@ -2343,6 +2349,50 @@ namespace wi::scene
 	void Scene::RunAnimationUpdateSystem(wi::jobsystem::context& ctx)
 	{
 		auto range = wi::profiler::BeginRangeCPU("Animations");
+
+		// ---- GGMAX 3.25n: one Reduction Scale decision per ARMATURE, for this frame ----------
+		// Single-threaded and cheap (one pass over objects), and it must happen before the jobs
+		// below read it. See the long note by gg_anim_armature_update for why the armature is the
+		// only correct unit: a character is several objects sharing one armature, and two meshes
+		// posed from different frames of the same armature is literally a second head.
+		{
+			const uint32_t redScale = gg_anim_reduction_scale.load(std::memory_order_relaxed);
+			const size_t armCount = armatures.GetCount();
+			gg_anim_armature_update.clear();
+			gg_anim_armatures_skipped = 0;
+			if (redScale > 1 && armCount > 0)
+			{
+				gg_anim_armature_update.resize(armCount, 1);
+				// nearest distance of any object driven by each armature - one number per
+				// character, so every part of it lands in the same period.
+				wi::vector<float> nearest;
+				nearest.resize(armCount, FLT_MAX);
+				const XMFLOAT3& eye = GetCamera().Eye;
+				const size_t objCount = objects.GetCount();
+				for (size_t oi = 0; oi < objCount; ++oi)
+				{
+					const ObjectComponent& obj = objects[oi];
+					const MeshComponent* m = meshes.GetComponent(obj.meshID);
+					if (m == nullptr || m->armatureID == wi::ecs::INVALID_ENTITY) continue;
+					const size_t ai = armatures.GetIndex(m->armatureID);
+					if (ai >= armCount) continue;
+					if (oi >= aabb_objects.size()) continue;
+					const XMFLOAT3 c = aabb_objects[oi].getCenter();
+					const float dx = c.x - eye.x, dy = c.y - eye.y, dz = c.z - eye.z;
+					const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
+					if (d < nearest[ai]) nearest[ai] = d;
+				}
+				const uint32_t frame = gg_anim30fps_frame.load(std::memory_order_relaxed);
+				for (size_t ai = 0; ai < armCount; ++ai)
+				{
+					if (nearest[ai] == FLT_MAX) continue;   // no object drives it - leave it alone
+					const uint32_t period = gg_anim_reduction_period(nearest[ai], redScale);
+					const bool go = (period <= 1) || (((frame + (uint32_t)ai * 7u) % period) == 0);
+					gg_anim_armature_update[ai] = go ? 1 : 0;
+					if (!go) gg_anim_armatures_skipped++;
+				}
+			}
+		}
 
 		wi::jobsystem::Wait(animation_dependency_scan_workload);
 
@@ -2409,24 +2459,26 @@ namespace wi::scene
 							iCulledAnimations++;
 							bCulled = true;
 						}
-						// GGMAX 3.25: Reduction Scale, on top of the 30fps parity above. Same
-						// object index the skinning dispatch uses as its phase key - see the
-						// long note by gg_anim_reduction_scale for why that matters.
-						const uint32_t redScale = gg_anim_reduction_scale.load(std::memory_order_relaxed);
-						if (!bCulled && redScale > 1)
+						// GGMAX 3.25n: Reduction Scale, read from the per-ARMATURE decision made
+						// once at the top of this function. Deliberately NOT recomputed here: the
+						// first version keyed off the object index and the parts of one character
+						// (head, body, legs are separate objects sharing one armature) advanced on
+						// different frames and in different periods, which is what produced Lee's
+						// flicker and a character with two heads.
+						if (!bCulled && !gg_anim_armature_update.empty())
 						{
-							const size_t roi = objects.GetIndex(animation.objectIndex);
-							if (roi < aabb_objects.size())
+							const ObjectComponent* aobj = objects.GetComponent(animation.objectIndex);
+							if (aobj != nullptr)
 							{
-								const XMFLOAT3 rc = aabb_objects[roi].getCenter();
-								const XMFLOAT3& rEye = GetCamera().Eye;
-								const float rdx = rc.x - rEye.x, rdy = rc.y - rEye.y, rdz = rc.z - rEye.z;
-								const float rd = std::sqrt(rdx * rdx + rdy * rdy + rdz * rdz);
-								const uint32_t period = gg_anim_reduction_period(rd, redScale);
-								if (period > 1 && ((animParityFrame + (uint32_t)roi * 7u) % period) != 0)
+								const MeshComponent* am = meshes.GetComponent(aobj->meshID);
+								if (am != nullptr && am->armatureID != wi::ecs::INVALID_ENTITY)
 								{
-									iCulledAnimations++;
-									bCulled = true;
+									const size_t ai = armatures.GetIndex(am->armatureID);
+									if (ai < gg_anim_armature_update.size() && gg_anim_armature_update[ai] == 0)
+									{
+										iCulledAnimations++;
+										bCulled = true;
+									}
 								}
 							}
 						}

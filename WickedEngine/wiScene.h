@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "CommonInclude.h"
 #include "wiJobSystem.h"
 #include "wiSpinLock.h"
@@ -29,6 +29,10 @@ namespace wi::scene
 	// Distance under which animation is NEVER skipped, in world units (GG inches).
 	static constexpr float GG_ANIM_REDUCTION_NEAR_DIST = 500.0f;
 	extern std::atomic<uint32_t> gg_anim_reduction_scale;   // 0 or 1 = off, else 2..100
+	// Per-armature update decision for the current frame, indexed by armature index. Filled by
+	// RunAnimationUpdateSystem, read by the skinning dispatch. Empty = Reduction Scale is off.
+	extern wi::vector<uint8_t> gg_anim_armature_update;
+	extern uint32_t gg_anim_armatures_skipped;
 	extern uint32_t gg_anim_reduction_skipped;              // diagnostic
 	uint32_t gg_anim_reduction_period(float distance, uint32_t scale);
 

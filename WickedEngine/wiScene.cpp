@@ -2287,6 +2287,16 @@ namespace wi::scene
 	// dispatch in wiRenderer - one decision, so the parts of a character cannot disagree.
 	wi::vector<uint8_t> gg_anim_armature_update;
 	uint32_t gg_anim_armatures_skipped = 0;   // diagnostic: armatures held this frame
+	// Armatures posed at least once since the level loaded. An armature NOT in here must be
+	// updated regardless of its phase - see the long note above. Cleared by gg_ResetAnimReduction.
+	wi::unordered_set<wi::ecs::Entity> gg_anim_posed_once;
+	uint32_t gg_anim_forced_first_pose = 0;   // diagnostic: armatures forced this frame
+
+	void gg_ResetAnimReduction()
+	{
+		gg_anim_posed_once.clear();
+		gg_anim_forced_first_pose = 0;
+	}
 
 	// Shared by RunAnimationUpdateSystem and the skinning dispatch. Returns the number of frames
 	// between updates (1 = every frame).
@@ -2383,13 +2393,22 @@ namespace wi::scene
 					if (d < nearest[ai]) nearest[ai] = d;
 				}
 				const uint32_t frame = gg_anim30fps_frame.load(std::memory_order_relaxed);
+				gg_anim_forced_first_pose = 0;
 				for (size_t ai = 0; ai < armCount; ++ai)
 				{
 					if (nearest[ai] == FLT_MAX) continue;   // no object drives it - leave it alone
+					const wi::ecs::Entity ae = armatures.GetEntity(ai);
+					// ★ An armature that has never been posed has no valid bounds, and culling and
+					// LOD read those bounds. Force its first pose whatever the phase says.
+					const bool posed = gg_anim_posed_once.count(ae) != 0;
 					const uint32_t period = gg_anim_reduction_period(nearest[ai], redScale);
-					const bool go = (period <= 1) || (((frame + (uint32_t)ai * 7u) % period) == 0);
+					const bool go = !posed || (period <= 1) || (((frame + (uint32_t)ai * 7u) % period) == 0);
 					gg_anim_armature_update[ai] = go ? 1 : 0;
-					if (!go) gg_anim_armatures_skipped++;
+					if (go)
+					{
+						if (!posed) { gg_anim_posed_once.insert(ae); gg_anim_forced_first_pose++; }
+					}
+					else gg_anim_armatures_skipped++;
 				}
 			}
 		}

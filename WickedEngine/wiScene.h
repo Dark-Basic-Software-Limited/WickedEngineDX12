@@ -33,6 +33,11 @@ namespace wi::scene
 	// RunAnimationUpdateSystem, read by the skinning dispatch. Empty = Reduction Scale is off.
 	extern wi::vector<uint8_t> gg_anim_armature_update;
 	extern uint32_t gg_anim_armatures_skipped;
+	extern uint32_t gg_anim_forced_first_pose;
+	// Clears the "posed at least once" set. The game calls this on every level load: an armature
+	// carried over from a previous level would otherwise be eligible for holding before it has
+	// been posed in the new one, which is the whole defect this guards against.
+	void gg_ResetAnimReduction();
 	extern uint32_t gg_anim_reduction_skipped;              // diagnostic
 	uint32_t gg_anim_reduction_period(float distance, uint32_t scale);
 

@@ -2291,11 +2291,21 @@ namespace wi::scene
 	// updated regardless of its phase - see the long note above. Cleared by gg_ResetAnimReduction.
 	wi::unordered_set<wi::ecs::Entity> gg_anim_posed_once;
 	uint32_t gg_anim_forced_first_pose = 0;   // diagnostic: armatures forced this frame
+	// Seconds of full-rate animation still owed after a level load or a test-game entry. While
+	// this is above zero NOTHING is held. Counted down by the game, which owns the frame delta.
+	float gg_anim_reduction_grace = 0.0f;
+	float gg_anim_reduction_grace_seconds = 10.0f;   // Lee's number, 2026-08-27
+	// How many times the grace has been re-armed. If this keeps climbing while a level is
+	// simply being played, something is calling the reset repeatedly and the reduction will
+	// never engage - which is indistinguishable, from the outside, from the feature being off.
+	uint32_t gg_anim_reduction_resets = 0;
 
 	void gg_ResetAnimReduction()
 	{
 		gg_anim_posed_once.clear();
 		gg_anim_forced_first_pose = 0;
+		gg_anim_reduction_grace = gg_anim_reduction_grace_seconds;
+		gg_anim_reduction_resets++;
 	}
 
 	// Shared by RunAnimationUpdateSystem and the skinning dispatch. Returns the number of frames
@@ -2370,7 +2380,10 @@ namespace wi::scene
 			const size_t armCount = armatures.GetCount();
 			gg_anim_armature_update.clear();
 			gg_anim_armatures_skipped = 0;
-			if (redScale > 1 && armCount > 0)
+			// ⚠ During the grace window the vector is left EMPTY, which is what both consumers
+			// read as "reduction off" - so animation runs at full rate AND every skinning
+			// dispatch is issued. That is the point: let the level finish becoming itself first.
+			if (redScale > 1 && armCount > 0 && gg_anim_reduction_grace <= 0.0f)
 			{
 				gg_anim_armature_update.resize(armCount, 1);
 				// nearest distance of any object driven by each armature - one number per

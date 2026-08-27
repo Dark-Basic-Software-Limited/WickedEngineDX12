@@ -34,6 +34,11 @@ namespace wi::scene
 	extern wi::vector<uint8_t> gg_anim_armature_update;
 	extern uint32_t gg_anim_armatures_skipped;
 	extern uint32_t gg_anim_forced_first_pose;
+	// Seconds of full-rate animation still owed after a level load / test-game entry; while it is
+	// above zero nothing is held. The GAME counts it down, because it owns the frame delta.
+	extern float gg_anim_reduction_grace;
+	extern float gg_anim_reduction_grace_seconds;
+	extern uint32_t gg_anim_reduction_resets;
 	// Clears the "posed at least once" set. The game calls this on every level load: an armature
 	// carried over from a previous level would otherwise be eligible for holding before it has
 	// been posed in the new one, which is the whole defect this guards against.

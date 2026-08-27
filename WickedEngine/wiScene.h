@@ -27,7 +27,19 @@ namespace wi::scene
 	// object index. Declared here because wiRenderer.cpp needs the same period rule to decide
 	// which skinning dispatches it can skip.
 	// Distance under which animation is NEVER skipped, in world units (GG inches).
-	static constexpr float GG_ANIM_REDUCTION_NEAR_DIST = 500.0f;
+	//
+	// ★ This does DOUBLE DUTY and that is deliberate: it is both the cutoff and the pro-rata
+	// reference in gg_anim_reduction_period, so the spec reads "scale/10 frames skipped AT this
+	// distance, growing pro-rata beyond it". Moving it therefore does not just push the cutoff
+	// out - it stretches the whole curve by the same factor, which is what makes it a single
+	// honest knob instead of two that can disagree.
+	//
+	// 500 -> 1000 (Lee, 2026-08-27): "I still see strangeness as characters run towards me".
+	// The reduction holds the POSE while the object's transform keeps moving at full rate, so a
+	// running character skates - limbs held, body translating - and that reads far worse on
+	// something closing on you head-on than on the same character crossing at distance. Doubling
+	// this both stops any reduction inside 1000 units and halves the skip everywhere beyond it.
+	static constexpr float GG_ANIM_REDUCTION_NEAR_DIST = 1000.0f;
 	extern std::atomic<uint32_t> gg_anim_reduction_scale;   // 0 or 1 = off, else 2..100
 	// Per-armature update decision for the current frame, indexed by armature index. Filled by
 	// RunAnimationUpdateSystem, read by the skinning dispatch. Empty = Reduction Scale is off.

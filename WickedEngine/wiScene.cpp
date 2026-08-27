@@ -2316,8 +2316,8 @@ namespace wi::scene
 		if (distance < GG_ANIM_REDUCTION_NEAR_DIST) return 1;
 		const float skipped = (float(scale) * 0.1f) * (distance / GG_ANIM_REDUCTION_NEAR_DIST);
 		uint32_t period = 1u + (uint32_t)skipped;
-		// Guard only. At 40,000 units (about a kilometre) and scale 100 the formula asks for 800
-		// frames, which is a thirteen-second freeze; nothing at that range is legible either way,
+		// Guard only. At 40,000 units (about a kilometre) and scale 100 the formula asks for 400
+		// frames, which is a seven-second freeze; nothing at that range is legible either way,
 		// but an unbounded period makes the behaviour hard to reason about and impossible to
 		// test, so it stops here.
 		if (period > 240u) period = 240u;

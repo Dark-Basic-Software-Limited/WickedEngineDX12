@@ -1,4 +1,4 @@
-#include "wiGraphicsDevice_DX12.h"
+﻿#include "wiGraphicsDevice_DX12.h"
 
 #ifdef WICKEDENGINE_BUILD_DX12
 #include "wiHelper.h"
@@ -428,6 +428,9 @@ namespace wi::graphics
 	float gg_submit_ms_sync = 0;     // cross-queue frame sync + descriptor heap signals
 	float gg_submit_ms_stall = 0;    // next-buffer fence stall + allocation handler update
 	uint32_t gg_submit_lists = 0;    // command lists closed this frame
+	// GGMAX 3.26: lists DROPPED because Close() failed. Non-zero means a recording-scope bug is
+	// live; before 3.26 that condition removed the device instead of reporting itself.
+	std::atomic<uint32_t> gg_close_failures{ 0 };
 	uint32_t gg_submit_batches = 0;  // ExecuteCommandLists invocations this frame
 	uint32_t gg_submit_deps = 0;     // command lists carrying cross-queue waits/signals
 	static uint32_t gg_submit_batches_accum = 0;
@@ -3454,20 +3457,31 @@ std::mutex queue_locker;
 #ifdef PLATFORM_WINDOWS_DESKTOP
 		// Create fence to detect device removal
 		{
-			dx12_check(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(deviceRemovedFence.GetAddressOf())));
-			dx12_check(deviceRemovedFence->SetName(L"deviceRemovedFence"));
+			// ⚠ GGMAX 3.26: same family as the WaitForGPU bug - the following lines dereference
+			// the fence this one creates, and dx12_check stops nothing under NDEBUG.
+			const HRESULT gg_drf_hr = dx12_check(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(deviceRemovedFence.GetAddressOf())));
+			if (FAILED(gg_drf_hr) || deviceRemovedFence == nullptr)
+			{
+				wilog_error("Could not create the device-removal fence (%s); automatic removal "
+					"detection is disabled for this session.",
+					wi::helper::GetPlatformErrorString(gg_drf_hr).c_str());
+			}
+			else
+			{
+				dx12_check(deviceRemovedFence->SetName(L"deviceRemovedFence"));
 
-			HANDLE deviceRemovedEvent = CreateEventW(NULL, FALSE, FALSE, NULL);
-			dx12_check(deviceRemovedFence->SetEventOnCompletion(UINT64_MAX, deviceRemovedEvent));
+				HANDLE deviceRemovedEvent = CreateEventW(NULL, FALSE, FALSE, NULL);
+				dx12_check(deviceRemovedFence->SetEventOnCompletion(UINT64_MAX, deviceRemovedEvent));
 
-			RegisterWaitForSingleObject(
-				&deviceRemovedWaitHandle,
-				deviceRemovedEvent,
-				HandleDeviceRemoved,
-				this, // Pass the device as our context
-				INFINITE, // No timeout
-				0 // No flags
-			);
+				RegisterWaitForSingleObject(
+					&deviceRemovedWaitHandle,
+					deviceRemovedEvent,
+					HandleDeviceRemoved,
+					this, // Pass the device as our context
+					INFINITE, // No timeout
+					0 // No flags
+				);
+			}
 		}
 #endif // PLATFORM_WINDOWS_DESKTOP
 
@@ -3654,6 +3668,19 @@ std::mutex queue_locker;
 
 	bool GraphicsDevice_DX12::CreateSwapChain(const SwapChainDesc* desc, wi::platform::window_type window, SwapChain* swapchain) const
 	{
+		// ★ GGMAX 3.26. On 2026-08-27 this ran on an already-removed device: the async removal
+		// handler had set deviceRemoved on a threadpool thread, then a WM_SIZE arrived through the
+		// nested message pump of an error dialog and drove the whole resize path - which frees the
+		// backbuffer RTVs and clears the backbuffers BEFORE any HRESULT is examined. Even had
+		// WaitForGPU survived, this would have torn down live descriptors on a dead device.
+		//
+		// Refusing early is the correct answer: there is nothing left to present to.
+		if (deviceRemoved.load(std::memory_order_acquire))
+		{
+			wilog_error("CreateSwapChain refused: the device has been removed.");
+			return false;
+		}
+
 		auto internal_state = swapchain->IsValid() ? wi::allocator::shared_ptr<SwapChain_DX12>(swapchain->internal_state) : wi::allocator::make_shared<SwapChain_DX12>();
 		internal_state->allocationhandler = allocationhandler;
 		swapchain->internal_state = internal_state;
@@ -3854,7 +3881,15 @@ std::mutex queue_locker;
 
 		for (uint32_t i = 0; i < desc->buffer_count; ++i)
 		{
-			dx12_check(internal_state->swapChain->GetBuffer(i, PPV_ARGS(internal_state->backBuffers[i])));
+			// ⚠ GGMAX 3.26: a failed GetBuffer used to leave a null backbuffer that was handed
+			// straight to CreateRenderTargetView on the next line. Same family again.
+			if (FAILED(dx12_check(internal_state->swapChain->GetBuffer(i, PPV_ARGS(internal_state->backBuffers[i]))))
+				|| internal_state->backBuffers[i] == nullptr)
+			{
+				wilog_error("CreateSwapChain: GetBuffer(%u) failed; abandoning swapchain creation "
+					"rather than creating an RTV on a null resource.", i);
+				return false;
+			}
 
 			internal_state->backbufferRTV[i] = allocationhandler->descriptors_rtv.allocate();
 			device->CreateRenderTargetView(internal_state->backBuffers[i].Get(), &rtvDesc, internal_state->backbufferRTV[i]);
@@ -6073,13 +6108,48 @@ std::mutex queue_locker;
 			for (uint32_t cmd = 0; cmd < cmd_last; ++cmd)
 			{
 				CommandList_DX12& commandlist = *commandlists[cmd].get();
+
+				// ★★★ GGMAX 3.26 - THE PRIMARY FAILURE, and the reason it killed the device.
+				//
+				// This HRESULT used to be discarded (dx12_check asserts, and the assert compiles out
+				// under NDEBUG). On 2026-08-27 SIX lists in one frame returned E_INVALIDARG here and
+				// all six were pushed to submit_cmds anyway; ExecuteCommandLists then removed the
+				// device with DXGI_ERROR_INVALID_CALL and an EMPTY DRED breadcrumb list - empty
+				// because the runtime rejected the submission CPU-side and the GPU never ran a thing.
+				//
+				// Close() returns E_INVALIDARG for RECORDING-SCOPE errors: an unmatched render pass or
+				// query, a list closed twice, a bundle left open. A list that fails to close is
+				// therefore ALREADY malformed, and submitting it can only destroy the device. Dropping
+				// it costs one visually broken frame; submitting it costs the process.
+				//
+				// ★ This is also the experiment that settles cause-vs-consequence. A post-removal
+				// Close() returns this same HRESULT on this driver, so the log alone could not say
+				// whether the six failures caused the removal or merely followed it. If the device
+				// stops dying now, they were the cause.
+				HRESULT gg_closeResult;
 				if (commandlist.queue == QUEUE_VIDEO_DECODE)
 				{
-					dx12_check(commandlist.GetVideoDecodeCommandList()->Close());
+					gg_closeResult = commandlist.GetVideoDecodeCommandList()->Close();
 				}
 				else
 				{
-					dx12_check(commandlist.GetGraphicsCommandList()->Close());
+					gg_closeResult = commandlist.GetGraphicsCommandList()->Close();
+				}
+
+				if (FAILED(gg_closeResult))
+				{
+					// ⚠ NAME the list. The old log said only "Close() failed" six times, which
+					// narrows nothing down - a count of failures is not an identification of them.
+					wilog_error("SubmitCommandLists: command list %u of %u (queue %u) failed to Close() "
+						"with %s. NOT submitting it - a list that cannot close is malformed, and "
+						"submitting one removes the device. This is a RECORDING-SCOPE error: an "
+						"unmatched RenderPassBegin/End, an open query or event scope, or a double "
+						"Close. Re-run with -debugdevice to have the runtime name it.",
+						cmd, cmd_last, (uint32_t)commandlist.queue,
+						wi::helper::GetPlatformErrorString(gg_closeResult).c_str());
+					gg_close_failures.fetch_add(1, std::memory_order_relaxed);
+					// Only the SUBMISSION below is skipped; the dependency and worker-pipeline
+					// bookkeeping still has to run or the frame's semaphores leak.
 				}
 
 				CommandQueue& queue = queues[commandlist.queue];
@@ -6094,7 +6164,10 @@ std::mutex queue_locker;
 					queue.submit();
 				}
 
-				queue.submit_cmds.push_back(commandlist.GetCommandList());
+				if (SUCCEEDED(gg_closeResult))
+				{
+					queue.submit_cmds.push_back(commandlist.GetCommandList());
+				}
 
 				if (dependency)
 				{
@@ -6191,7 +6264,16 @@ std::mutex queue_locker;
 					// If the device was reset we must completely reinitialize the renderer.
 					if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET)
 					{
-						wilog_messagebox("Device Lost on Present: %s", wi::helper::GetPlatformErrorString(((hr == DXGI_ERROR_DEVICE_REMOVED) ? device->GetDeviceRemovedReason() : hr)).c_str());
+						// ★★ GGMAX 3.26 - wilog_MESSAGEBOX, not wilog_error, is what turned a
+						// diagnosable device loss into an unreadable AV.
+						//
+						// A modal box PUMPS THE MESSAGE QUEUE. Raised from here - inside
+						// SubmitCommandLists, inside the frame - it let a WM_SIZE re-enter WndProc
+						// underneath recorded work and run the whole swapchain teardown. Lee never even
+						// saw the box: the process died while it was still up.
+						//
+						// Log here; the main loop shows one dialog once it has stopped rendering.
+						wilog_error("Device Lost on Present: %s", wi::helper::GetPlatformErrorString(((hr == DXGI_ERROR_DEVICE_REMOVED) ? device->GetDeviceRemovedReason() : hr)).c_str());
 
 						// Handle device lost
 						OnDeviceRemoved();
@@ -6535,15 +6617,53 @@ std::mutex queue_locker;
 
 		std::string message = "D3D12: device removed, cause: ";
 		message += removedReasonString;
-		wilog_messagebox("%s", message.c_str());
-		wi::platform::Exit();
+		deviceRemovedMessage = message;
+		// ★★★ GGMAX 3.26 - THIS ONE RAN ON A THREADPOOL THREAD.
+		//
+		// HandleDeviceRemoved is invoked by RegisterWaitForSingleObject, so OnDeviceRemoved can run
+		// on a pool thread. wi::helper::messageBox uses MessageBox(GetActiveWindow(), ...) and
+		// GetActiveWindow is PER-THREAD - on a pool thread it returns NULL, so the box was created
+		// with NO OWNER. An un-owned top-level window from the foreground process activates itself
+		// and steals foreground WITHOUT disabling the game window, and that activation is what the
+		// main thread received, mid-frame, inside its own dialog's pump.
+		//
+		// Two threads racing to raise modal dialogs about the same event is the actual defect. Log
+		// from wherever we are; the MAIN thread owns the one dialog and the exit (wiApplication.cpp).
+		wilog_error("%s", message.c_str());
 #endif // PLATFORM_WINDOWS_DESKTOP
 	}
 
 	void GraphicsDevice_DX12::WaitForGPU() const
 	{
+		// ★★★ GGMAX 3.26 - THIS FUNCTION WAS THE CRASH SITE, and the bug was discarded failure.
+		//
+		// dx12_check's assert compiles out under NDEBUG, so a failed CreateFence left `fence` NULL
+		// and execution carried straight on into FOUR dereferences of it. On 2026-08-27 the device
+		// had already been removed, CreateFence returned 0x887A0005, and Signal(nullptr) reached
+		// D3D12Core's `mov r8d,[r14+0E8h]` with r14 = 0 - the AV at address 0xe8 in Lee's log.
+		// (The log reports page state FREE, which reads like a use-after-free and is not: 0xE8 lies
+		// inside the permanent 64 KB null guard region, which VirtualQuery always calls MEM_FREE.
+		// Nothing was released. It was a plain null.)
+		//
+		// ⚠ NOT specific to the swapchain path that happened to reach it. WaitForGPU has NINE call
+		// sites - the device dtor, CreateSwapChain, FlushDeferredDestroys, two in wiHelper, one in
+		// wiResourceManager and three in GameGuru - and before this guard every one of them AV'd
+		// identically the moment the device was gone. Fixing only the caller would have left the
+		// other eight armed.
+		if (deviceRemoved.load(std::memory_order_acquire))
+			return;
+
 		ComPtr<ID3D12Fence> fence;
-		dx12_check(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, PPV_ARGS(fence)));
+		const HRESULT gg_fence_hr = device->CreateFence(0, D3D12_FENCE_FLAG_NONE, PPV_ARGS(fence));
+		if (FAILED(gg_fence_hr) || fence == nullptr)
+		{
+			// Deliberately not dx12_check: a failure here is EXPECTED during a device loss, and the
+			// point of the guard is to survive it rather than assert about it.
+			wilog_error("WaitForGPU: CreateFence failed with %s - the device is gone, so there is "
+				"nothing left to wait for. Returning instead of dereferencing a null fence.",
+				wi::helper::GetPlatformErrorString(gg_fence_hr).c_str());
+			return;
+		}
 
 		for (auto& queue : queues)
 		{

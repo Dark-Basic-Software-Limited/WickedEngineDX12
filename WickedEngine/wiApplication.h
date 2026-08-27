@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "CommonInclude.h"
 #include "wiPlatform.h"
 #include "wiResourceManager.h"
@@ -47,7 +47,17 @@ namespace wi
 	public:
 		virtual ~Application() = default;
 
+		// ⚠ INERT. Upstream writes this from WM_SETFOCUS/WM_KILLFOCUS; GameGuru kept the flag and
+		// dropped the writers, so it has been permanently true since the port and the guard that
+		// reads it at main.cpp:509 has never guarded anything. Wiring the writers would ALSO change
+		// update behaviour (see the read at wiApplication.cpp Update) - pausing MAX whenever it
+		// loses focus - which is a product decision, not a crash fix, so 3.26 leaves it alone and
+		// replaces the dead guard with tests that actually test something.
 		bool is_window_active = true;
+		// GGMAX 3.26: true while Run() is recording a frame. SetWindow refuses to tear the swapchain
+		// down underneath recorded work and defers to the next frame instead.
+		bool gg_in_frame = false;
+		bool gg_resize_pending = false;
 		bool allow_hdr = true;
 		wi::graphics::SwapChain swapChain;
 		wi::Canvas canvas;

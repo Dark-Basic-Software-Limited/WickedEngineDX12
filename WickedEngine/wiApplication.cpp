@@ -1,4 +1,4 @@
-#include "wiApplication.h"
+﻿#include "wiApplication.h"
 #include "wiRenderPath.h"
 #include "wiRenderer.h"
 #include "wiHelper.h"
@@ -90,12 +90,50 @@ namespace wi
 
 	void Application::Run()
 	{
+		// ★★ GGMAX 3.26 - the ONE place a device loss is reported to the user, and the only
+		// thread it is safe to report it from.
+		//
+		// Previously two threads raced to raise modal boxes about the same removal: this loop (from
+		// inside SubmitCommandLists, mid-frame) and the async removal handler (on a threadpool
+		// thread, with a NULL owner window). Both now only log. Here, at the top of a frame with
+		// nothing recorded and nothing in flight, a modal box is harmless - and we stop rendering
+		// rather than driving a dead device round the loop again.
+		if (graphicsDevice != nullptr && graphicsDevice->IsDeviceRemoved())
+		{
+			auto* gg_dx12 = dynamic_cast<wi::graphics::GraphicsDevice_DX12*>(graphicsDevice.get());
+			if (gg_dx12 != nullptr && gg_dx12->ClaimDeviceRemovedReport())
+			{
+				wi::helper::messageBox(graphicsDevice->GetDeviceRemovedMessage()
+					+ "\n\nThe graphics device was lost and GameGuru MAX has to close. See Files/log.txt"
+					  " and dred_report.txt for the post-mortem.", "Graphics device lost");
+				wi::platform::Exit();
+			}
+			return;
+		}
+
+		// A5: a resize that arrived while a frame was recording is applied here, where it is safe.
+		if (gg_resize_pending)
+		{
+			gg_resize_pending = false;
+			SetWindow(window);
+		}
+
 		if (!initialized)
 		{
 			// Initialize in a lazy way, so the user application doesn't have to call this explicitly
 			Initialize();
 			initialized = true;
 		}
+
+		// A5: from here to the end of SubmitCommandLists we are recording. Anything that would
+		// destroy the swapchain in this window must defer.
+		gg_in_frame = true;
+		struct GGFrameScope
+		{
+			bool& f;
+			GGFrameScope(bool& b) : f(b) {}
+			~GGFrameScope() { f = false; }
+		} gg_frame_scope(gg_in_frame);
 
 		wi::font::UpdateAtlas(canvas.GetDPIScaling());
 
@@ -741,6 +779,43 @@ namespace wi
 
 	void Application::SetWindow(wi::platform::window_type window)
 	{
+		// ★★★ GGMAX 3.26 - RE-ENTRANCY GUARD.
+		//
+		// This function has no in-frame state of any kind (`initialized` is a one-shot lazy-init
+		// latch, not a guard). Entered mid-frame it mutates five things the recorded command list
+		// depends on: the window, the global device pointer, the canvas, the swapchain (whose desc
+		// is overwritten and whose backbuffers and RTV descriptors are FREED before any HRESULT is
+		// examined) and rendertargetPreHDR10, which the interrupted frame has already opened a
+		// render pass on and drawn from.
+		//
+		// ⚠ This matters well beyond the modal-dialog crash that exposed it. GameGuru runs NESTED
+		// MESSAGE PUMPS during ordinary level loading - EmptyMessages() dispatches everything but
+		// WM_QUIT from 100+ call sites, and StartForceRender() pumps and then re-enters a whole
+		// frame via master.RunCustom(). A WM_SIZE through either of those runs this teardown under
+		// recorded work with no error box involved at all.
+		//
+		// Deferring rather than dropping: a resize that arrives at a bad moment is still a resize
+		// the user asked for, so Run() replays it once the frame is finished.
+		static bool gg_inSetWindow = false;
+		if (gg_inSetWindow || gg_in_frame)
+		{
+			gg_resize_pending = true;
+			wilog_warning("SetWindow deferred: called %s. The resize will be applied at the top of "
+				"the next frame.", gg_inSetWindow ? "re-entrantly" : "while a frame was recording");
+			return;
+		}
+		struct GGSetWindowScope
+		{
+			bool& f;
+			GGSetWindowScope(bool& b) : f(b) { f = true; }
+			~GGSetWindowScope() { f = false; }
+		} gg_scope(gg_inSetWindow);
+
+		// A6: remember which thread the message loop lives on, so wi::platform::Exit() called from a
+		// threadpool thread can reach it. SetWindow always runs on the main thread (InitInstance and
+		// WndProc both do).
+		wi::platform::SetMainThread();
+
 		this->window = window;
 
 		// User can also create a graphics device if custom logic is desired, but they must do before this function!
@@ -853,8 +928,17 @@ namespace wi
 		desc.width = canvas.GetPhysicalWidth();
 		desc.height = canvas.GetPhysicalHeight();
 		desc.allow_hdr = allow_hdr;
-		bool success = graphicsDevice->CreateSwapChain(&desc, window, &swapChain);
-		assert(success);
+		// ⚠ GGMAX 3.26: this bool used to be consumed only by an assert, which compiles out under
+		// NDEBUG - so a refused or failed swapchain creation carried straight on into the HDR10
+		// rendertarget reset and then into a frame with no backbuffers.
+		const bool gg_swapchain_ok = graphicsDevice->CreateSwapChain(&desc, window, &swapChain);
+		assert(gg_swapchain_ok);
+		if (!gg_swapchain_ok)
+		{
+			wilog_error("SetWindow: CreateSwapChain failed or was refused; leaving the previous "
+				"swapchain state alone rather than continuing with an invalid one.");
+			return;
+		}
 
 		rendertargetPreHDR10 = {};
 

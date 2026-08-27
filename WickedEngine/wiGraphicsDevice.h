@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "CommonInclude.h"
 #include "wiGraphics.h"
 #include "wiPlatform.h"
@@ -114,6 +114,12 @@ namespace wi::graphics
 
 		// The CPU will wait until all submitted GPU work is finished execution
 		virtual void WaitForGPU() const = 0;
+		// True once the device has been removed. Anything that records, submits, waits on or
+		// recreates GPU objects must check this first - after a removal those calls do not fail
+		// politely, they hand back null objects that the next line dereferences.
+		virtual bool IsDeviceRemoved() const { return false; }
+		// The removal reason, for the one user-facing message. Empty while the device is healthy.
+		virtual std::string GetDeviceRemovedMessage() const { return {}; }
 
 		// GGMAX 1.43: fully quiesce the GPU AND release every deferred-destroyed resource
 		// (buffers, textures, bindless descriptor slots) immediately, instead of over the

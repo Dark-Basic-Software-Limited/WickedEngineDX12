@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 // This file includes platform, os specific libraries and supplies common platform specific resources
 
 #ifdef _WIN32
@@ -49,10 +49,31 @@ namespace wi::platform
 	using error_type = int;
 #endif // _WIN32
 
+#ifdef _WIN32
+	// ★ GGMAX 3.26. The main thread's id, captured once at startup.
+	//
+	// PostQuitMessage posts WM_QUIT to the CALLING thread's queue. OnDeviceRemoved can run on a
+	// threadpool thread (RegisterWaitForSingleObject), and a pool thread has no message loop - so
+	// the quit went nowhere, the main loop never learned to stop, and the app carried on
+	// rendering into a dead device until something else killed it. That is the window the 08-27
+	// crash happened inside.
+	inline unsigned long& main_thread_id() { static unsigned long id = 0; return id; }
+	inline void SetMainThread() { main_thread_id() = GetCurrentThreadId(); }
+#endif // _WIN32
+
 	inline void Exit()
 	{
 #ifdef _WIN32
-		PostQuitMessage(0);
+		const unsigned long gg_main = main_thread_id();
+		if (gg_main != 0 && gg_main != GetCurrentThreadId())
+		{
+			// Cross-thread: PostQuitMessage would be a no-op here.
+			PostThreadMessage(gg_main, WM_QUIT, 0, 0);
+		}
+		else
+		{
+			PostQuitMessage(0);
+		}
 #endif // _WIN32
 #ifdef SDL2
 		SDL_Event quit_event;

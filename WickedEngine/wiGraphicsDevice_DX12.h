@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "CommonInclude.h"
 #include "wiPlatform.h"
 
@@ -24,6 +24,8 @@
 #endif // PLATFORM_XBOX
 
 #include <wrl/client.h> // ComPtr
+#include <atomic>
+#include <string>
 
 #define D3D12MA_D3D12_HEADERS_ALREADY_INCLUDED
 #define __ID3D12Device1_INTERFACE_DEFINED__
@@ -59,7 +61,14 @@ namespace wi::graphics
 
 		wi::vector<GUID> video_decode_profile_list;
 
-		bool deviceRemoved = false;
+		// ★ ATOMIC because it is WRITTEN from a threadpool thread (HandleDeviceRemoved,
+		// registered with RegisterWaitForSingleObject) and READ from the main thread. It was a plain
+		// bool whose only two uses were both inside OnDeviceRemoved - write-only in practice. The
+		// 08-27 crash ran an entire swapchain teardown on a device this flag already knew was dead.
+		std::atomic<bool> deviceRemoved{ false };
+		// Latched once the main thread has told the user, so the dialog never runs on a pool thread.
+		std::atomic<bool> deviceRemovedReported{ false };
+		std::string deviceRemovedMessage;
 		bool tearingSupported = false;
 		bool additionalShadingRatesSupported = false;
 		bool casting_fully_typed_formats = false;
@@ -323,6 +332,16 @@ namespace wi::graphics
 		void OnDeviceRemoved();
 
 		void WaitForGPU() const override;
+		bool IsDeviceRemoved() const override { return deviceRemoved.load(std::memory_order_acquire); }
+		std::string GetDeviceRemovedMessage() const override { return deviceRemovedMessage; }
+		// True the FIRST time it is called after a removal and false thereafter, so the main thread
+		// shows exactly one dialog no matter how many frames notice.
+		bool ClaimDeviceRemovedReport()
+		{
+			if (!deviceRemoved.load(std::memory_order_acquire)) return false;
+			bool expected = false;
+			return deviceRemovedReported.compare_exchange_strong(expected, true);
+		}
 		uint64_t FlushDeferredDestroys() override; // GGMAX 1.43
 		void ClearPipelineStateCache() override;
 		size_t GetActivePipelineCount() const override { return pipelines_global.size(); }

@@ -2992,6 +2992,8 @@ std::mutex queue_locker;
 			ComPtr<ID3D12InfoQueue> d3dInfoQueue;
 			if (SUCCEEDED(device.As(&d3dInfoQueue)))
 			{
+				// GGMAX 3.26a: keep it, so gg_DrainValidationMessages can read the layer in Release.
+				gg_infoQueue = d3dInfoQueue;
 #ifdef _DEBUG
 				d3dInfoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, TRUE);
 				d3dInfoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, TRUE);
@@ -6089,6 +6091,38 @@ std::mutex queue_locker;
 
 		return cmd;
 	}
+	// ★★ GGMAX 3.26a: pull whatever the debug layer has to say into the log, in ANY build.
+	//
+	// Wicked only ever read the info queue under #if defined(_DEBUG). We never ship or test a
+	// Debug build (it exits 3), so in practice the validation layer has never been readable here:
+	// -debugdevice turned it on and its messages went nowhere. Six DXGI_ERROR_INVALID_CALL device
+	// removals since 08-07 could each have named themselves in one line.
+	//
+	// Called on a Close() failure and on device removal - not per frame; draining is cheap but not
+	// free, and the queue is empty unless the layer is on.
+	void GraphicsDevice_DX12::gg_DrainValidationMessages(const char* context)
+	{
+		if (gg_infoQueue == nullptr)
+			return;
+		const UINT64 count = gg_infoQueue->GetNumStoredMessages();
+		if (count == 0)
+			return;
+		wilog_error("---- D3D12 validation layer: %llu message(s) at [%s] ----",
+			(unsigned long long)count, context ? context : "?");
+		for (UINT64 i = 0; i < count; ++i)
+		{
+			SIZE_T len = 0;
+			if (FAILED(gg_infoQueue->GetMessage(i, nullptr, &len)) || len == 0)
+				continue;
+			std::vector<uint8_t> storage(len);
+			D3D12_MESSAGE* msg = reinterpret_cast<D3D12_MESSAGE*>(storage.data());
+			if (FAILED(gg_infoQueue->GetMessage(i, msg, &len)) || msg->pDescription == nullptr)
+				continue;
+			wilog_error("  [D3D12 sev %d id %d] %s", (int)msg->Severity, (int)msg->ID, msg->pDescription);
+		}
+		gg_infoQueue->ClearStoredMessages();
+	}
+
 	void GraphicsDevice_DX12::SubmitCommandLists()
 	{
 #ifdef PLATFORM_XBOX
@@ -6105,6 +6139,24 @@ std::mutex queue_locker;
 		{
 			uint32_t cmd_last = cmd_count;
 			cmd_count = 0;
+
+			// ★★★ GGMAX 3.26a - THE ONE MEASUREMENT THAT SETTLES IT.
+			//
+			// Close() returning E_INVALIDARG has TWO readings and the old log could not choose: a
+			// recording-scope error in the list, or a device that is already gone (this driver
+			// returns exactly the same HRESULT for every Close once removed - see CopyAllocator's
+			// Close at :2179 failing identically three lines after the removal in Lee's 08-27 log).
+			// A static audit of every recording surface in both repos found nothing, so guessing
+			// again is not the move. Ask the device.
+			//
+			//   not S_OK here  -> the Close failures are CONSEQUENCES; the cause is upstream of
+			//                     SubmitCommandLists and the scope hypothesis is dead.
+			//   S_OK here      -> the device was alive going in, so a malformed list really did kill
+			//                     it, and the failing-set line below names which ones.
+			const HRESULT gg_removedBefore = device->GetDeviceRemovedReason();
+			uint32_t gg_closeFailed = 0;
+			HRESULT gg_firstCloseFail = S_OK;
+			std::string gg_closeFailList;
 			for (uint32_t cmd = 0; cmd < cmd_last; ++cmd)
 			{
 				CommandList_DX12& commandlist = *commandlists[cmd].get();
@@ -6138,16 +6190,19 @@ std::mutex queue_locker;
 
 				if (FAILED(gg_closeResult))
 				{
-					// ⚠ NAME the list. The old log said only "Close() failed" six times, which
-					// narrows nothing down - a count of failures is not an identification of them.
-					wilog_error("SubmitCommandLists: command list %u of %u (queue %u) failed to Close() "
-						"with %s. NOT submitting it - a list that cannot close is malformed, and "
-						"submitting one removes the device. This is a RECORDING-SCOPE error: an "
-						"unmatched RenderPassBegin/End, an open query or event scope, or a double "
-						"Close. Re-run with -debugdevice to have the runtime name it.",
-						cmd, cmd_last, (uint32_t)commandlist.queue,
-						wi::helper::GetPlatformErrorString(gg_closeResult).c_str());
+					// ⚠ ACCUMULATE, do not log per list. The old code emitted six near-identical
+					// lines that said only "Close() failed", which narrows nothing down - a count of
+					// failures is not an identification of them, and six lines read as six problems.
+					// One line naming the SET is both shorter and strictly more informative, because
+					// "6 of 6" and "6 of 14" mean completely different things (see the summary below).
+					if (gg_closeFailed == 0) gg_firstCloseFail = gg_closeResult;
+					gg_closeFailed++;
 					gg_close_failures.fetch_add(1, std::memory_order_relaxed);
+					if (!gg_closeFailList.empty()) gg_closeFailList += ", ";
+					gg_closeFailList += std::to_string(cmd);
+					gg_closeFailList += "(q";
+					gg_closeFailList += std::to_string((uint32_t)commandlist.queue);
+					gg_closeFailList += ")";
 					// Only the SUBMISSION below is skipped; the dependency and worker-pipeline
 					// bookkeeping still has to run or the frame's semaphores leak.
 				}
@@ -6208,6 +6263,28 @@ std::mutex queue_locker;
 					}
 				}
 				commandlist.pipelines_worker.clear();
+			}
+			// ★★★ GGMAX 3.26a: ONE line that answers the question, instead of six that pose it.
+			if (gg_closeFailed > 0)
+			{
+				const bool gg_wasAlive = (gg_removedBefore == S_OK);
+				wilog_error("SubmitCommandLists: %u of %u command lists failed to Close() with %s. "
+					"Indices: %s. Device state BEFORE the close loop: %s. VERDICT: %s",
+					gg_closeFailed, cmd_last,
+					wi::helper::GetPlatformErrorString(gg_firstCloseFail).c_str(),
+					gg_closeFailList.c_str(),
+					gg_wasAlive ? "ALIVE (GetDeviceRemovedReason == S_OK)"
+						: wi::helper::GetPlatformErrorString(gg_removedBefore).c_str(),
+					gg_wasAlive
+						? ((gg_closeFailed == cmd_last)
+							? "device was alive but EVERY list failed - suspect a global/shared state "
+							  "problem, not one bad recorder"
+							: "device was alive and only SOME lists failed - those specific lists are "
+							  "malformed; this IS a recording-scope bug and the indices above name it")
+						: "the device was ALREADY REMOVED before any Close - these failures are "
+						  "CONSEQUENCES, not the cause. Look upstream of SubmitCommandLists.");
+				// If the validation layer is on, it can usually name the exact scope error.
+				gg_DrainValidationMessages("command list Close() failure");
 			}
 			gg_submit_lists = cmd_last; // GGMAX 1.48a
 			{
@@ -6630,6 +6707,8 @@ std::mutex queue_locker;
 		// Two threads racing to raise modal dialogs about the same event is the actual defect. Log
 		// from wherever we are; the MAIN thread owns the one dialog and the exit (wiApplication.cpp).
 		wilog_error("%s", message.c_str());
+		// GGMAX 3.26a: whatever the validation layer saw in the run-up, into the log.
+		gg_DrainValidationMessages("device removal");
 #endif // PLATFORM_WINDOWS_DESKTOP
 	}
 

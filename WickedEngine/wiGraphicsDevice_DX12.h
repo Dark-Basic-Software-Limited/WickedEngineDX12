@@ -69,6 +69,13 @@ namespace wi::graphics
 		// Latched once the main thread has told the user, so the dialog never runs on a pool thread.
 		std::atomic<bool> deviceRemovedReported{ false };
 		std::string deviceRemovedMessage;
+		// ★ GGMAX 3.26a: kept so validation messages can be drained in a RELEASE build.
+		// The debug layer's message retrieval was #if defined(_DEBUG), so -debugdevice in Release
+		// switched the layer ON and then threw away everything it said. That is why three weeks of
+		// INVALID_CALL removals never named themselves.
+		Microsoft::WRL::ComPtr<ID3D12InfoQueue> gg_infoQueue;
+		// Drains the validation queue into the backlog. Safe to call when the layer is off (no-op).
+		void gg_DrainValidationMessages(const char* context);
 		bool tearingSupported = false;
 		bool additionalShadingRatesSupported = false;
 		bool casting_fully_typed_formats = false;

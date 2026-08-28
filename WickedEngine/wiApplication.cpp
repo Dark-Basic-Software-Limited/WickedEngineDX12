@@ -127,12 +127,17 @@ namespace wi
 
 		// A5: from here to the end of SubmitCommandLists we are recording. Anything that would
 		// destroy the swapchain in this window must defer.
-		gg_in_frame = true;
+		// ★★★ SAVE AND RESTORE, not set-and-clear. Run() genuinely nests in this codebase:
+		// StartForceRender pumps the message queue and then calls RunCustom(), which re-enters this
+		// function, from five call sites. A guard that clears to false on inner exit would strip the
+		// flag off the OUTER frame and leave its second half unguarded - exactly the window the
+		// guard exists to close.
 		struct GGFrameScope
 		{
 			bool& f;
-			GGFrameScope(bool& b) : f(b) {}
-			~GGFrameScope() { f = false; }
+			const bool prev;
+			GGFrameScope(bool& b) : f(b), prev(b) { f = true; }
+			~GGFrameScope() { f = prev; }
 		} gg_frame_scope(gg_in_frame);
 
 		wi::font::UpdateAtlas(canvas.GetDPIScaling());
@@ -807,8 +812,9 @@ namespace wi
 		struct GGSetWindowScope
 		{
 			bool& f;
-			GGSetWindowScope(bool& b) : f(b) { f = true; }
-			~GGSetWindowScope() { f = false; }
+			const bool prev;
+			GGSetWindowScope(bool& b) : f(b), prev(b) { f = true; }
+			~GGSetWindowScope() { f = prev; }   // save/restore, same reason as GGFrameScope
 		} gg_scope(gg_inSetWindow);
 
 		// A6: remember which thread the message loop lives on, so wi::platform::Exit() called from a

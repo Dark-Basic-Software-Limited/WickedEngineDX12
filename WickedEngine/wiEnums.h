@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "shaders/ShaderInterop_Renderer.h"
 
 namespace wi::enums
@@ -162,6 +162,12 @@ namespace wi::enums
 		PSTYPE_OBJECT_DEBUG,
 		PSTYPE_OBJECT_PAINTRADIUS,
 		PSTYPE_OBJECT_SIMPLE,
+		// ★★★ GGMAX 3.34: Super Quick Objects - three rungs of a cut-down OPAQUE MAIN pixel
+		// shader, all compiled from objectPS.hlsl with one extra define each (GG_SQ_FLAT /
+		// GG_SQ_AMBIENT / GG_SQ_LIT). See the ladder comment at the top of objectHF.hlsli for
+		// what each rung removes and why the gap between two rungs is the measurement.
+		PSTYPE_OBJECT_GG_SUPERQUICK_BEGIN,
+		PSTYPE_OBJECT_GG_SUPERQUICK_END = PSTYPE_OBJECT_GG_SUPERQUICK_BEGIN + 3,
 		PSTYPE_OBJECT_PREPASS,
 		PSTYPE_OBJECT_PREPASS_ALPHATEST,
 		PSTYPE_OBJECT_PREPASS_DEPTHONLY_ALPHATEST,

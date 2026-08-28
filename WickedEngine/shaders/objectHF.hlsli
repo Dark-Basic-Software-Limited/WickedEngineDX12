@@ -11,6 +11,42 @@
 #define DISABLE_ALPHATEST
 #endif // !defined(TRANSPARENT) && !defined(PREPASS) && !defined(ENVMAPRENDERING)
 
+// ★★★ GGMAX 3.34: SUPER QUICK OBJECTS - a three-rung ladder of opaque pixel shaders.
+//
+// The 3.31 version of Super Quick only collapsed exotic material permutations onto base PBR, and
+// on a scene whose materials are all already PBR that is a no-op - which is exactly what Lee
+// measured on the AMD card: the tickbox did nothing. This is the real thing.
+//
+// The rungs are chosen so that the STEPS BETWEEN THEM are the measurement. Each one removes a
+// different suspect, so the delta between two rungs attributes the cost to a named cause:
+//
+//   GG_SQ_FLAT     no texture fetch of any kind. Base colour comes from the vertex/material
+//                  colour (already an interpolant), lit by one cube-mip ambient lookup and one
+//                  N.L against the sun constant. This is the FLOOR - what it costs to put these
+//                  polygons on screen at all. Whatever Opaque Scene still costs here is NOT
+//                  pixel shading, and no shader edit will ever reach it.
+//   GG_SQ_AMBIENT  + the albedo texture. FLAT -> AMBIENT is therefore the price of texture
+//                  bandwidth and filtering, isolated from everything else.
+//   GG_SQ_LIT      + tiled lighting and shadow sampling. AMBIENT -> LIT is the price of the
+//                  lights. Still no normal map, no ORM, no emissive/specular/occlusion maps, no
+//                  decals, no SSAO/SSR/SSGI, no lightmap, no rim, no saturation matrix - so
+//                  LIT -> off is the price of all the remaining per-pixel material work.
+//
+// ★ Only the OPAQUE MAIN pass is touched, and only the PIXEL shader. The vertex shader is left
+// bit-identical to stock on purpose: RENDERPASS_MAIN runs depth-test EQUAL against the Z-prepass
+// (DSSTYPE_DEPTHREADEQUAL, ComparisonFunc::EQUAL), so the two passes' vertex maths is a
+// correctness contract - a differently-scheduled position moves the vertex in world space and the
+// colour fragment then fails the equality test, leaving an unwritten gbuffer that reads BLACK.
+// That failure has already been paid for once in this port. Do not "optimise" the VS here.
+//
+// ⚠ Note DISABLE_ALPHATEST is already in force above for this pass: the prepass did the alpha
+// cutout and EQUAL depth means MAIN can only shade pixels the prepass kept. So the opaque main
+// shader has no cutout to preserve and needs no albedo fetch for one - which is what makes a
+// genuinely zero-texture rung possible at all.
+#if defined(GG_SQ_FLAT) || defined(GG_SQ_AMBIENT) || defined(GG_SQ_LIT)
+#define GG_SUPERQUICK
+#endif
+
 #ifdef PLANARREFLECTION
 #define DISABLE_ENVMAPS
 #define DISABLE_VOXELGI
@@ -548,9 +584,12 @@ float4 main(PixelInput input, in bool is_frontface : SV_IsFrontFace APPEND_COVER
 	float4 uvsets = input.GetUVSets();
 #endif // OBJECTSHADER_USE_UVSETS
 
-#ifdef TILEDFORWARD
+#if defined(TILEDFORWARD) && !defined(GG_SUPERQUICK)
+	// GGMAX 3.34: Super Quick removes this outright. It is a WaveActiveBitOr plus an InterlockedOr
+	// into one dword per material for EVERY covered pixel, so every wave shading the same material
+	// contends on the same address and the cost scales with overdraw. DX11 had no equivalent.
 	write_mipmap_feedback(push.materialIndex, ddx_coarse(uvsets), ddy_coarse(uvsets));
-#endif // TILEDFORWARD
+#endif // TILEDFORWARD && !GG_SUPERQUICK
 
 #ifdef OBJECTSHADER_USE_INSTANCEINDEX
 	ShaderMeshInstance meshinstance = load_instance(input.GetInstanceIndex());
@@ -648,7 +687,9 @@ float4 main(PixelInput input, in bool is_frontface : SV_IsFrontFace APPEND_COVER
 	}
 #endif // PREPASS
 
-#ifndef INTERIORMAPPING
+#if !defined(INTERIORMAPPING) && !defined(GG_SQ_FLAT)
+	// GGMAX 3.34: GG_SQ_FLAT is the no-texture rung and skips this. Nothing downstream of it in
+	// that rung reads a texture either, so the whole sampler path drops out of the shader.
 	[branch]
 #ifdef PREPASS
 	if (material.textures[BASECOLORMAP].IsValid())
@@ -658,7 +699,7 @@ float4 main(PixelInput input, in bool is_frontface : SV_IsFrontFace APPEND_COVER
 	{
 		surface.baseColor *= material.textures[BASECOLORMAP].Sample(sampler_objectshader, uvsets);
 	}
-#endif // INTERIORMAPPING
+#endif // !INTERIORMAPPING && !GG_SQ_FLAT
 	
 #if defined(PREPASS) || defined(TRANSPARENT)
 	[branch]
@@ -674,6 +715,42 @@ float4 main(PixelInput input, in bool is_frontface : SV_IsFrontFace APPEND_COVER
 #ifdef OBJECTSHADER_USE_COLOR
 	surface.baseColor *= input.color;
 #endif // OBJECTSHADER_USE_COLOR
+
+#if defined(GG_SQ_FLAT) || defined(GG_SQ_AMBIENT)
+	// ★★★ GGMAX 3.34: Super Quick rungs 1 and 2 end here.
+	//
+	// GetAmbient is one SampleLevel of the global probe cube at its LAST mip - a 1x1 texel that
+	// every wave in the frame hits, so it is cache-resident after the first pixel. The sun term is
+	// two constant-buffer reads and a dot product. Together they cost a handful of ALU, and they
+	// are what stops the scene being a silhouette: shapes still read, the sky still lights them
+	// from the right side, and the material still has its own colour.
+	//
+	// ★ No fog on the FLAT rung deliberately. ApplyFog is cheap but not free, and FLAT exists to be
+	// the floor - the one number that says how much of Opaque Scene is not pixel shading at all.
+	{
+		// The scale is not free-hand: it mirrors what the real path does to a directional light.
+		// light_directional accumulates light_color * NdotL into direct.diffuse, ApplyLighting then
+		// divides direct.diffuse by PI and multiplies by surface.albedo. Dropping the /PI here made
+		// the first build render pure white - three times over-exposed, plus bloom on top.
+		//
+		// ★ The 0.45 is a real albedo. surface.baseColor on this rung is the material colour with no
+		// texture, and GameGuru materials are overwhelmingly white - a perfect-white diffuse surface
+		// under a real sun is snow, and the scene washes out with no shape left to look at. Real
+		// surfaces sit around 0.2-0.5. This is the one number here that is a judgement rather than a
+		// derivation, and it only affects how the diagnostic rung LOOKS, never what it costs.
+		const half3 gg_ambient = GetAmbient(surface.N);
+		const half gg_ndl = saturate(dot(surface.N, GetSunDirection()));
+		half4 gg_color = surface.baseColor;
+#ifdef GG_SQ_FLAT
+		gg_color.rgb *= 0.45;
+#endif // GG_SQ_FLAT
+		gg_color.rgb *= gg_ambient + GetSunColor() * gg_ndl * (1.0 / PI);
+#ifdef GG_SQ_AMBIENT
+		ApplyFog(dist, surface.V, gg_color);
+#endif // GG_SQ_AMBIENT
+		return saturateMediump(gg_color);
+	}
+#endif // GG_SQ_FLAT || GG_SQ_AMBIENT
 
 #ifndef PREPASS
 	// GGMAX 1.62b tangent-vis: albedo-chain contributors
@@ -695,7 +772,7 @@ float4 main(PixelInput input, in bool is_frontface : SV_IsFrontFace APPEND_COVER
 #endif // PREPASS
 
 #ifndef WATER
-#ifdef OBJECTSHADER_USE_TANGENT
+#if defined(OBJECTSHADER_USE_TANGENT) && !defined(GG_SUPERQUICK) // GGMAX 3.34: no normal mapping on the Super Quick rungs
 	[branch]
 	if (material.textures[NORMALMAP].IsValid())
 	{
@@ -713,26 +790,31 @@ float4 main(PixelInput input, in bool is_frontface : SV_IsFrontFace APPEND_COVER
 
 
 	half4 surfaceMap = 1;
-#ifdef OBJECTSHADER_USE_UVSETS
+	// GGMAX 3.34: Super Quick leaves surfaceMap at 1. The IsUsingSpecularGlossinessWorkflow block
+	// below then multiplies in the material's constant roughness / metalness / reflectance, so the
+	// surface is still described correctly - just uniformly over the mesh instead of per texel.
+#if defined(OBJECTSHADER_USE_UVSETS) && !defined(GG_SUPERQUICK)
 	[branch]
 	if (material.textures[SURFACEMAP].IsValid())
 	{
 		surfaceMap = material.textures[SURFACEMAP].Sample(sampler_objectshader, uvsets);
 	}
-#endif // OBJECTSHADER_USE_UVSETS
+#endif // OBJECTSHADER_USE_UVSETS && !GG_SUPERQUICK
 
 #ifdef OBJECTSHADER_USE_EMISSIVE
 	// Emissive map:
 	surface.emissiveColor = material.GetEmissive();
 
-#ifdef OBJECTSHADER_USE_UVSETS
+	// GGMAX 3.34: constant emissive survives Super Quick (free, and a glowing material that went
+	// black would look broken); only the per-texel emissive mask is dropped.
+#if defined(OBJECTSHADER_USE_UVSETS) && !defined(GG_SUPERQUICK)
 	[branch]
 	if (any(surface.emissiveColor) && material.textures[EMISSIVEMAP].IsValid())
 	{
 		half4 emissiveMap = material.textures[EMISSIVEMAP].Sample(sampler_objectshader, uvsets);
 		surface.emissiveColor *= emissiveMap.rgb * emissiveMap.a;
 	}
-#endif // OBJECTSHADER_USE_UVSETS
+#endif // OBJECTSHADER_USE_UVSETS && !GG_SUPERQUICK
 
 	surface.emissiveColor *= meshinstance.GetEmissive();
 #endif // OBJECTSHADER_USE_EMISSIVE
@@ -823,9 +905,10 @@ float4 main(PixelInput input, in bool is_frontface : SV_IsFrontFace APPEND_COVER
 	ForwardDecals(surface, surfaceMap, sampler_objectshader_clamp);
 #endif // FORWARD
 
-#ifdef TILEDFORWARD
+#if defined(TILEDFORWARD) && !defined(GG_SUPERQUICK)
+	// GGMAX 3.34: decals walk the tile's decal list and sample the decal atlas per pixel.
 	TiledDecals(surface, flat_tile_index, surfaceMap, sampler_objectshader_clamp);
-#endif // TILEDFORWARD
+#endif // TILEDFORWARD && !GG_SUPERQUICK
 #endif // WATER
 #endif // PREPASS
 
@@ -872,13 +955,13 @@ float4 main(PixelInput input, in bool is_frontface : SV_IsFrontFace APPEND_COVER
 
 	half4 specularMap = 1;
 
-#ifdef OBJECTSHADER_USE_UVSETS
+#if defined(OBJECTSHADER_USE_UVSETS) && !defined(GG_SUPERQUICK) // GGMAX 3.34
 	[branch]
 	if (material.textures[SPECULARMAP].IsValid())
 	{
 		specularMap = material.textures[SPECULARMAP].Sample(sampler_objectshader, uvsets);
 	}
-#endif // OBJECTSHADER_USE_UVSETS
+#endif // OBJECTSHADER_USE_UVSETS && !GG_SUPERQUICK
 
 
 	surface.create(material, surface.baseColor, surfaceMap, specularMap);
@@ -896,29 +979,25 @@ float4 main(PixelInput input, in bool is_frontface : SV_IsFrontFace APPEND_COVER
 #endif // OBJECTSHADER_USE_COMMON
 
 
-#ifdef OBJECTSHADER_USE_UVSETS
+#if defined(OBJECTSHADER_USE_UVSETS) && !defined(GG_SUPERQUICK) // GGMAX 3.34
 	// Secondary occlusion map:
 	[branch]
 	if (material.IsOcclusionEnabled_Secondary() && material.textures[OCCLUSIONMAP].IsValid())
 	{
 		surface.occlusion *= material.textures[OCCLUSIONMAP].Sample(sampler_objectshader, uvsets).r;
 	}
-#endif // OBJECTSHADER_USE_UVSETS
+#endif // OBJECTSHADER_USE_UVSETS && !GG_SUPERQUICK
 
 
-#ifndef PREPASS
-#ifndef ENVMAPRENDERING
-#ifndef TRANSPARENT
-#ifndef CARTOON
+#if !defined(PREPASS) && !defined(ENVMAPRENDERING) && !defined(TRANSPARENT) && !defined(CARTOON) && !defined(GG_SUPERQUICK)
+	// GGMAX 3.34: SSAO lookup. The MSAO pass itself still runs and still costs its own row in the
+	// profiler - Super Quick only stops the object shader reading the result.
 	[branch]
 	if (camera.texture_ao_index >= 0)
 	{
 		surface.occlusion *= bindless_textures_half4[descriptor_index(camera.texture_ao_index)].SampleLevel(sampler_linear_clamp, ScreenCoord, 0).r;
 	}
-#endif // CARTOON
-#endif // TRANSPARENT
-#endif // ENVMAPRENDERING
-#endif // PREPASS
+#endif // !PREPASS && !ENVMAPRENDERING && !TRANSPARENT && !CARTOON && !GG_SUPERQUICK
 
 #ifndef PREPASS
 	// GGMAX 1.62b tangent-vis: derived surface parameters (post surface.create)
@@ -1105,9 +1184,9 @@ float4 main(PixelInput input, in bool is_frontface : SV_IsFrontFace APPEND_COVER
 #endif // TRANSPARENT
 
 
-#ifdef OBJECTSHADER_USE_COMMON
+#if defined(OBJECTSHADER_USE_COMMON) && !defined(GG_SUPERQUICK) // GGMAX 3.34
 	LightMapping(meshinstance.lightmap, input.atl, lighting, surface);
-#endif // OBJECTSHADER_USE_COMMON
+#endif // OBJECTSHADER_USE_COMMON && !GG_SUPERQUICK
 
 
 #ifdef PLANARREFLECTION
@@ -1125,10 +1204,8 @@ float4 main(PixelInput input, in bool is_frontface : SV_IsFrontFace APPEND_COVER
 #endif // TILEDFORWARD
 
 
-#ifndef WATER
-#ifndef ENVMAPRENDERING
-#ifndef TRANSPARENT
-#ifndef CARTOON
+#if !defined(WATER) && !defined(ENVMAPRENDERING) && !defined(TRANSPARENT) && !defined(CARTOON) && !defined(GG_SUPERQUICK)
+	// GGMAX 3.34: screen-space reflections and screen-space GI lookups.
 	[branch]
 	if (camera.texture_ssr_index >= 0)
 	{
@@ -1140,10 +1217,7 @@ float4 main(PixelInput input, in bool is_frontface : SV_IsFrontFace APPEND_COVER
 	{
 		surface.ssgi = bindless_textures_half4[descriptor_index(camera.texture_ssgi_index)].SampleLevel(sampler_linear_clamp, ScreenCoord, 0).rgb;
 	}
-#endif // CARTOON
-#endif // TRANSPARENT
-#endif // ENVMAPRENDERING
-#endif // WATER
+#endif // !WATER && !ENVMAPRENDERING && !TRANSPARENT && !CARTOON && !GG_SUPERQUICK
 
 #ifdef WATER
 	[branch]
@@ -1202,10 +1276,10 @@ float4 main(PixelInput input, in bool is_frontface : SV_IsFrontFace APPEND_COVER
 	ApplyLighting(surface, lighting, color);
 
 
-#ifdef OBJECTSHADER_USE_INSTANCEINDEX
+#if defined(OBJECTSHADER_USE_INSTANCEINDEX) && !defined(GG_SUPERQUICK) // GGMAX 3.34: pow() per pixel
 	half4 rimHighlight = meshinstance.GetRimHighlight();
 	color.rgb += rimHighlight.rgb * pow(1 - surface.NdotV, rimHighlight.w);
-#endif // OBJECTSHADER_USE_INSTANCEINDEX
+#endif // OBJECTSHADER_USE_INSTANCEINDEX && !GG_SUPERQUICK
 
 
 #ifdef UNLIT
@@ -1227,7 +1301,9 @@ float4 main(PixelInput input, in bool is_frontface : SV_IsFrontFace APPEND_COVER
 
 	ApplyFog(dist, surface.V, color);
 
-	color.rgb = mul(saturationMatrix(material.GetSaturation()), color.rgb);
+#ifndef GG_SUPERQUICK
+	color.rgb = mul(saturationMatrix(material.GetSaturation()), color.rgb); // GGMAX 3.34: 3x3 mul per pixel
+#endif // !GG_SUPERQUICK
 
 	color = saturateMediump(color);
 

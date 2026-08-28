@@ -1,4 +1,4 @@
-#include "wiRenderPath3D.h"
+﻿#include "wiRenderPath3D.h"
 #include "wiRenderer.h"
 #include "wiImage.h"
 #include "wiHelper.h"
@@ -1130,6 +1130,14 @@ namespace wi
 
 			device->EventBegin("Opaque Z-prepass", cmd);
 			auto range = wi::profiler::BeginRangeGPU("Z-Prepass", cmd);
+			// ★★★ GGMAX 3.34: split the prepass into its two halves.
+			//
+			// "Z-Prepass" is one number covering the object draws AND the GGMAX custom draw
+			// (terrain, trees, grass). Those are completely different code paths with completely
+			// different fixes, and there was no way to tell from the panel which one was costing
+			// the 8.4 ms Lee measured on the AMD card. Nested ranges are safe here: the GPU busy
+			// accounting unions overlapping intervals rather than summing them.
+			auto range_objects = wi::profiler::BeginRangeGPU("  Prepass Objects", cmd);
 
 			Rect scissor = GetScissorInternalResolution();
 			device->BindScissorRects(1, &scissor, cmd);
@@ -1185,14 +1193,18 @@ namespace wi
 				);
 			}
 
+			wi::profiler::EndRange(range_objects); // GGMAX 3.34
+
 			// Custom scene draw (terrain/trees/grass depth prepass):
 			// GGMAX 2.13: state-safe hook boundary (see the transparent hook / game task #120)
 			if (customDraw_Prepass)
 			{
+				auto range_custom = wi::profiler::BeginRangeGPU("  Prepass Terrain/Trees/Grass", cmd); // GGMAX 3.34
 				customDraw_Prepass(&camera->frustum, cmd);
 				device->GG_InvalidateCommandListState(cmd);
 				wi::renderer::BindCameraCB(*camera, camera_previous, camera_reflection, cmd);
 				wi::renderer::BindCommonResources(cmd);
+				wi::profiler::EndRange(range_custom);
 			}
 
 			wi::profiler::EndRange(range);
@@ -1791,6 +1803,18 @@ namespace wi
 			else
 			{
 				auto range = wi::profiler::BeginRangeGPU("Opaque Scene", cmd);
+				// ★★★ GGMAX 3.34: split Opaque Scene into its three parts.
+				//
+				// The single "Opaque Scene" row bundles three unrelated workloads: the object
+				// draws (which Super Quick can cut), the GGMAX custom draw for terrain / trees /
+				// grass (which it cannot - those have their own shaders), and the sky. Lee's
+				// 16.4 ms on the AMD card could have been any mix of the three, and the honest
+				// answer to "why is DX12 slower at drawing these buildings" starts with knowing
+				// how much of that number is even the buildings.
+				//
+				// ★ Two leading spaces in the names so the profiler list reads as an indented breakdown
+				// under its parent - the rows are sorted by name and these sort adjacent to it.
+				auto range_objects = wi::profiler::BeginRangeGPU("  Opaque Objects", cmd);
 
 				// Foreground:
 				vp.min_depth = 1 - foreground_depth_range;
@@ -1815,16 +1839,24 @@ namespace wi
 					cmd,
 					drawscene_flags
 				);
+				wi::profiler::EndRange(range_objects); // GGMAX 3.34
+
 				// Custom scene draw (terrain/trees/grass main opaque):
 				// GGMAX 2.13: state-safe hook boundary (see the transparent hook / game task #120)
 				if (customDraw_Opaque)
 				{
+					auto range_custom = wi::profiler::BeginRangeGPU("  Opaque Terrain/Trees/Grass", cmd); // GGMAX 3.34
 					customDraw_Opaque(&camera->frustum, 0, cmd);
 					wi::graphics::GetDevice()->GG_InvalidateCommandListState(cmd);
 					wi::renderer::BindCameraCB(*camera, camera_previous, camera_reflection, cmd);
 					wi::renderer::BindCommonResources(cmd);
+					wi::profiler::EndRange(range_custom);
 				}
-				wi::renderer::DrawSky(*scene, cmd);
+				{
+					auto range_sky = wi::profiler::BeginRangeGPU("  Opaque Sky", cmd); // GGMAX 3.34
+					wi::renderer::DrawSky(*scene, cmd);
+					wi::profiler::EndRange(range_sky);
+				}
 				wi::profiler::EndRange(range); // Opaque Scene
 			}
 

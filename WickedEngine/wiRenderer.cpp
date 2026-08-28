@@ -698,6 +698,7 @@ union ObjectRenderingVariant
 		uint32_t sample_count : 4;	// 1, 2, 4, 8
 		uint32_t mesh_shader : 1;	// bool
 		uint32_t ggdepthmode : 2;	// GGMAX 2.09: GGDEPTHMODE — DX11 depth-behaviour parity, see below
+		uint32_t ggsuperquick : 2;	// GGMAX 3.34: 0 = stock, 1 = FLAT, 2 = AMBIENT, 3 = LIT
 	} bits;
 	uint32_t value;
 };
@@ -1615,6 +1616,34 @@ void LoadShaders()
 		);
 
 	});
+
+	// ★★★ GGMAX 3.34: SUPER QUICK OBJECTS - the three cut-down opaque pixel shaders.
+	//
+	// Same source file as the stock object PS, one extra define each, so they can never drift out
+	// of signature with the vertex shader they will be paired with. LoadShader mangles the define
+	// into the .cso name (objectPS_GG_SQ_FLAT.cso and friends) and compiles on first use, so these
+	// cost nothing until somebody ticks the box.
+	//
+	// ⚠ These MUST be dispatched on objectps_ctx: the object PSO creation loop waits on exactly that
+	// context before reading shaders[], and a PS still loading when a PSO is built would bake a
+	// null pixel shader into a pipeline that then silently drops every draw.
+	{
+		static const char* gg_sq_defines[3] = { "GG_SQ_FLAT", "GG_SQ_AMBIENT", "GG_SQ_LIT" };
+		for (uint32_t gg_sq = 0; gg_sq < 3; ++gg_sq)
+		{
+			wi::jobsystem::Execute(objectps_ctx, [gg_sq](wi::jobsystem::JobArgs args) {
+				wi::vector<std::string> defines;
+				defines.push_back(gg_sq_defines[gg_sq]);
+				LoadShader(
+					ShaderStage::PS,
+					shaders[PSTYPE_OBJECT_GG_SUPERQUICK_BEGIN + gg_sq],
+					"objectPS.cso",
+					ShaderModel::SM_6_0,
+					defines
+				);
+				});
+		}
+	}
 
 	wi::jobsystem::Wait(ctx);
 
@@ -2676,6 +2705,59 @@ void LoadShaders()
 											SetObjectPSO(variant, pso);
 											});
 										break;
+									}
+
+									// ★★★ GGMAX 3.34: SUPER QUICK OBJECTS - the opaque pipeline ladder.
+									//
+									// A clone of the pipeline just built for this permutation with ONLY the pixel
+									// shader swapped. Everything else - vertex shader, blend, depth-stencil,
+									// rasterizer, topology - is the stock desc, deliberately:
+									//
+									// ★ RENDERPASS_MAIN tests depth EQUAL against the Z-prepass. Reusing the stock VS
+									// is therefore not tidiness, it is the correctness contract; a VS that computes
+									// the same position by a different instruction schedule fails the equality test
+									// and leaves an unwritten gbuffer that reads BLACK. Only the PS may change.
+									//
+									// Built for exactly the permutations RenderMeshes can ask for and no others -
+									// MAIN, opaque blend, base PBR, stock depth mode, no tessellation, no mesh
+									// shader. That gate has to mirror the selection site exactly, because
+									// GetObjectPSO is find-only and an unbuilt variant means a silently dropped
+									// draw (the 2.31 failure mode), while the selection site's fallback to
+									// ggsuperquick = 0 is what keeps a not-yet-compiled rung from doing that.
+									//
+									// ⚠ Base PBR only. UNLIT is already cheaper than anything here; WATER and CARTOON
+									// would stop reading as themselves; TERRAINBLENDED reads the terrain chunk
+									// buffer and has no meaning without it. Those keep their stock shaders, so a
+									// scene made of them will see less from this switch than an ordinary one.
+									if (renderPass == RENDERPASS_MAIN
+										&& blendMode == BLENDMODE_OPAQUE
+										&& shaderType == (uint32_t)MaterialComponent::SHADERTYPE_PBR
+										&& gg_depthmode == GGDEPTHMODE_STOCK
+										&& tessellation == 0
+										&& mesh_shader == 0)
+									{
+										PipelineStateDesc sqdesc = desc;
+										RenderPassInfo renderpass_info;
+										renderpass_info.rt_count = 1;
+										renderpass_info.rt_formats[0] = format_rendertarget_main;
+										renderpass_info.ds_format = format_depthbuffer_main;
+										for (uint32_t gg_sq = 1; gg_sq <= 3; ++gg_sq)
+										{
+											sqdesc.ps = &shaders[PSTYPE_OBJECT_GG_SUPERQUICK_BEGIN + gg_sq - 1];
+											const uint32_t msaa_support[] = { 1,2,4,8 };
+											for (uint32_t msaa : msaa_support)
+											{
+												ObjectRenderingVariant sqvariant = variant;
+												sqvariant.bits.ggsuperquick = gg_sq;
+												sqvariant.bits.sample_count = msaa;
+												renderpass_info.sample_count = msaa;
+												PipelineState pso;
+												device->CreatePipelineState(&sqdesc, &pso, gg_pso_lazy_object ? nullptr : &renderpass_info);
+												wi::eventhandler::Subscribe_Once(wi::eventhandler::EVENT_THREAD_SAFE_POINT, [=](uint64_t userdata) {
+													SetObjectPSO(sqvariant, pso);
+													});
+											}
+										}
 									}
 
 									} // GGMAX 2.09: end gg_depthmode permutation loop
@@ -4032,7 +4114,35 @@ void RenderMeshes(
 					variant.bits.sample_count = renderpass_info.sample_count;
 					variant.bits.mesh_shader = meshShaderRequested;
 
-					pso = GetObjectPSO(variant);
+					// ★★★ GGMAX 3.34: pick the Super Quick rung, if one applies to this draw.
+					//
+					// Opaque MAIN base-PBR only - see the pipeline-build gate in LoadShaders, which this
+					// condition has to mirror exactly. Everything else falls through to stock.
+					//
+					// ★ The fallback is load-bearing. Object PSOs compile lazily at bind time
+					// (gg_pso_lazy_object), so for the first frames after the box is ticked the rung's
+					// pipeline is not valid yet - and a null PSO here does not draw wrong, it drops the
+					// draw SILENTLY (the 2.31 failure mode: no mesh, perfect shadow). Reverting to
+					// ggsuperquick = 0 for those frames costs nothing and cannot show a hole.
+					if (gg_super_quick_objects > 0
+						&& renderPass == RENDERPASS_MAIN
+						&& variant.bits.blendmode == BLENDMODE_OPAQUE
+						&& ggShaderType == (uint32_t)MaterialComponent::SHADERTYPE_PBR
+						&& !meshShaderRequested
+						&& ggTessellation == 0)
+					{
+						variant.bits.ggsuperquick = (uint32_t)std::min(gg_super_quick_objects, 3);
+						pso = GetObjectPSO(variant);
+						if (pso == nullptr || !pso->IsValid())
+						{
+							variant.bits.ggsuperquick = 0;
+							pso = GetObjectPSO(variant);
+						}
+					}
+					else
+					{
+						pso = GetObjectPSO(variant);
+					}
 					// GGMAX 2.09: remember the cull mode as a VALUE, never the PipelineState* .
 					// wi::unordered_map is ska::flat_hash_map (open addressing, wiUnorderedMap.h), so a
 					// later GetObjectPSO whose operator[] rehashes INVALIDATES every element pointer —

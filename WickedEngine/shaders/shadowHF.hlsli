@@ -1,4 +1,4 @@
-#ifndef WI_SHADOW_HF
+﻿#ifndef WI_SHADOW_HF
 #define WI_SHADOW_HF
 #include "globals.hlsli"
 
@@ -157,6 +157,37 @@ inline half3 sample_shadow(float2 uv, float cmp, float4 uv_clamping, half2 radiu
 	Texture2D<half4> texture_shadowatlas_transparent = bindless_textures_half4[descriptor_index(GetFrame().texture_shadowatlas_transparent_index)];
 	
 	half3 shadow = 0;
+	
+	// ★★★ GGMAX 3.31a: Super Quick - one tap instead of sixteen.
+	//
+	// The soft path below samples a 16-point Vogel disk PER LIGHT PER PIXEL. With a dozen point
+	// lights that is around 192 shadow samples on every pixel they reach - the largest single
+	// per-pixel cost in the object shader, and it scales with light count, which is exactly the
+	// superlinear behaviour the owner reported when enabling 12 point lights.
+	//
+	// ⚠ A one-tap path already exists but only as a COMPILE-TIME build (DISABLE_SOFT_SHADOWMAP)
+	// that we do not ship. Branching at runtime on a FRAME-WIDE flag costs nothing measurable:
+	// every pixel of every draw takes the same side, so the wave never diverges - the usual
+	// objection to branching in a pixel shader does not apply.
+	//
+	// The trade is hard shadow edges instead of soft. Everything is still shadowed.
+	if (GetFrame().options & OPTION_BIT_GG_FAST_SHADOWS)
+	{
+		const float2 gg_uv = clamp(uv, uv_clamping.xy, uv_clamping.zw);
+		half3 gg_pcf = texture_shadowatlas.SampleCmpLevelZero(sampler_cmp_depth, gg_uv, cmp).rrr;
+#ifndef DISABLE_TRANSPARENT_SHADOWMAP
+		// mirror the soft path exactly, so a coloured transparent shadow does not vanish the
+		// moment a user ticks a performance box
+		half4 gg_ts = texture_shadowatlas_transparent.SampleLevel(sampler_linear_clamp, gg_uv, 0);
+#ifdef TRANSPARENT_SHADOWMAP_SECONDARY_DEPTH_CHECK
+		if (gg_ts.a > cmp)
+#endif // TRANSPARENT_SHADOWMAP_SECONDARY_DEPTH_CHECK
+		{
+			gg_pcf *= gg_ts.rgb;
+		}
+#endif // DISABLE_TRANSPARENT_SHADOWMAP
+		return gg_pcf;
+	}
 	
 #ifndef DISABLE_SOFT_SHADOWMAP
 	float2 spread = GetFrame().shadow_atlas_resolution_rcp.xy * mad(radius, 8, 2); // remap radius to try to match ray traced shadow result

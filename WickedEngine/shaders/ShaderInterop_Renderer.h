@@ -1,4 +1,4 @@
-#ifndef WI_SHADERINTEROP_RENDERER_H
+﻿#ifndef WI_SHADERINTEROP_RENDERER_H
 #define WI_SHADERINTEROP_RENDERER_H
 #include "ShaderInterop.h"
 #include "ShaderInterop_Weather.h"
@@ -1288,6 +1288,10 @@ enum FRAME_OPTIONS
 	// once when the gun loads; this frame bit is what makes SET_WEAPONSHADOW take effect within
 	// a frame without re-uploading any material (same split as the 2.10 falloff knob).
 	OPTION_BIT_GG_WEAPON_SHADOW = 1 << 29,
+	// GGMAX 3.31a: Super Quick - take the single-tap shadow path instead of the 16-tap Vogel
+	// disk. A frame-wide flag, so the branch in sample_shadow is coherent for every pixel of
+	// every draw and the GPU never diverges on it.
+	OPTION_BIT_GG_FAST_SHADOWS = 1 << 28,
 };
 
 // ---------- Common Constant buffers: -----------------

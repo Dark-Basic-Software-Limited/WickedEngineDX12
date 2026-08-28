@@ -320,6 +320,10 @@ bool CAPSULE_SHADOW_ENABLED = false;
 float CAPSULE_SHADOW_ANGLE = XM_PIDIV4;
 float CAPSULE_SHADOW_FADE = 0.2f;
 bool SHADOW_LOD_OVERRIDE = true;
+// ★★★ GGMAX 3.31: Super Quick Objects. 1 = every expensive material permutation is drawn with
+// the base PBR shader instead, and tessellation is skipped. See the long note at the variant
+// selection in RenderMeshes.
+int gg_super_quick_objects = 0;
 
 Texture shadowMapAtlas;
 Texture shadowMapAtlas_Transparent;
@@ -3984,10 +3988,46 @@ void RenderMeshes(
 				{
 					ObjectRenderingVariant variant = {};
 					variant.bits.renderpass = renderPass;
-					variant.bits.shadertype = material.shaderType;
+
+					// ★★★ GGMAX 3.31: Super Quick Objects.
+					//
+					// Collapse the expensive material permutations onto base PBR. POM raymarches the
+					// heightfield per shaded pixel; planar reflection samples a whole reflection buffer;
+					// anisotropic, clearcoat and cloth each add BRDF lobes. Base PBR keeps the object lit
+					// and textured, so the loss is the effect rather than the surface.
+					//
+					// ★ Base PBR is precompiled by LoadShaders for every renderpass/blend/cull combination,
+					// so this substitution can never miss a PSO or stall on a lazy bind-time compile - the
+					// one thing that would turn an optimisation into a hitch.
+					//
+					// ⚠ UNLIT and WATER are left alone. UNLIT is already CHEAPER than PBR, so forcing it
+					// would be slower AND would light something deliberately unlit; WATER would stop
+					// reading as water. CARTOON and TERRAINBLENDED are art, not cost.
+					uint32_t ggShaderType = material.shaderType;
+					uint32_t ggTessellation = tessellatorRequested;
+					if (gg_super_quick_objects != 0)
+					{
+						switch (ggShaderType)
+						{
+						case MaterialComponent::SHADERTYPE_PBR_PLANARREFLECTION:
+						case MaterialComponent::SHADERTYPE_PBR_PARALLAXOCCLUSIONMAPPING:
+						case MaterialComponent::SHADERTYPE_PBR_ANISOTROPIC:
+						case MaterialComponent::SHADERTYPE_PBR_CLOTH:
+						case MaterialComponent::SHADERTYPE_PBR_CLEARCOAT:
+						case MaterialComponent::SHADERTYPE_PBR_CLOTH_CLEARCOAT:
+						case MaterialComponent::SHADERTYPE_INTERIORMAPPING:
+							ggShaderType = MaterialComponent::SHADERTYPE_PBR;
+							break;
+						default:
+							break;
+						}
+						ggTessellation = 0; // displacement tessellation is pure added vertex work
+					}
+
+					variant.bits.shadertype = ggShaderType;
 					variant.bits.blendmode = material.GetBlendMode();
 					variant.bits.cullmode = (mesh.IsDoubleSided() || material.IsDoubleSided() || (shadowRendering && mesh.IsDoubleSidedShadow())) ? (uint32_t)CullMode::NONE : (uint32_t)CullMode::BACK;
-					variant.bits.tessellation = tessellatorRequested;
+					variant.bits.tessellation = ggTessellation;
 					variant.bits.alphatest = material.IsAlphaTestEnabled() || forceAlphaTestForDithering;
 					variant.bits.sample_count = renderpass_info.sample_count;
 					variant.bits.mesh_shader = meshShaderRequested;
@@ -5422,6 +5462,11 @@ void UpdatePerFrameData(
 	if (gg_dx11_light_falloff)
 	{
 		frameCB.options |= OPTION_BIT_GG_DX11_LIGHT_FALLOFF; // GGMAX 2.10
+	}
+	// GGMAX 3.31a: Super Quick -> single-tap shadow filtering (see shadowHF.hlsli).
+	if (gg_super_quick_objects != 0)
+	{
+		frameCB.options |= OPTION_BIT_GG_FAST_SHADOWS;
 	}
 	if (gg_weapon_shadow)
 	{

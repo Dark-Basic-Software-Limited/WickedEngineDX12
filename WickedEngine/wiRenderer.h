@@ -38,6 +38,11 @@ namespace wi::renderer
 	// how long ANY stale shadow can persist, including causes the moved-caster detector misses.
 	// 0 disables. Default 4.
 	extern int gg_shadow_refresh_floor;
+	// GGMAX 3.31: 1 = draw every expensive material permutation (parallax occlusion mapping,
+	// planar reflection, anisotropic, clearcoat, cloth, interior mapping) with the base PBR shader
+	// and skip tessellation. UNLIT, WATER, CARTOON and TERRAINBLENDED are left alone - see the
+	// note at the variant selection in wiRenderer.cpp.
+	extern int gg_super_quick_objects;
 	constexpr wi::graphics::Format format_depthbuffer_main = wi::graphics::Format::D32_FLOAT_S8X24_UINT;
 	constexpr wi::graphics::Format format_rendertarget_main = wi::graphics::Format::R11G11B10_FLOAT;
 	constexpr wi::graphics::Format format_idbuffer = wi::graphics::Format::R32_UINT;

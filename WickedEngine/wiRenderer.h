@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "CommonInclude.h"
 #include "wiEnums.h"
 #include "wiGraphicsDevice.h"
@@ -26,6 +26,10 @@ namespace wi
 
 namespace wi::renderer
 {
+	// GGMAX 3.29: discrete steps for distance-driven local shadow resolution. 0 = stock continuous
+	// sizing, which re-renders every cached local shadow on every frame the camera translates.
+	// Default 4. See the long note at the quantiser in wiRenderer.cpp's Shadowmap packing.
+	extern int gg_shadow_res_steps;
 	constexpr wi::graphics::Format format_depthbuffer_main = wi::graphics::Format::D32_FLOAT_S8X24_UINT;
 	constexpr wi::graphics::Format format_rendertarget_main = wi::graphics::Format::R11G11B10_FLOAT;
 	constexpr wi::graphics::Format format_idbuffer = wi::graphics::Format::R32_UINT;

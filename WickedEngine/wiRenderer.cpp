@@ -410,6 +410,10 @@ static wi::vector<wi::ecs::Entity> localShadowGrantedPrev; // last frame's grant
 // frame that repopulates the cache. All-or-nothing: a static torch bank converges to 0 re-renders/frame.
 static bool localShadowCachingEnabled = false;      // master switch (game enables it when the cap is active)
 static bool localAtlasFullClear = true;             // this frame: whole atlas clears + all locals re-render
+// GGMAX 3.29: number of discrete steps the per-light shadow resolution may take. 0 = stock
+// continuous sizing, which makes the atlas layout change on EVERY frame the camera translates and
+// therefore re-renders every cached local shadow. See gg_QuantiseShadowAmount below.
+int gg_shadow_res_steps = 4;
 static bool localShadowInvalidate = true;           // settings/level change -> next decision forces a full clear
 static uint64_t localShadowDecisionFrame = ~0ull;   // frame the Phase 2 decision was produced
 // GGMAX 2.07c: dir + cone are part of the key — the spot shadow's content depends on the
@@ -4797,6 +4801,27 @@ void UpdateVisibility(Visibility& vis)
 	if ((IsShadowsEnabled() && (vis.flags & Visibility::ALLOW_SHADOW_ATLAS_PACKING) && !vis.visibleLights.empty()) || vis.scene->weather.rain_amount > 0)
 	{
 		auto range = wi::profiler::BeginRangeCPU("Shadowmap packing");
+		// ★★★ GGMAX 3.29: snap the distance-driven resolution to a few discrete steps.
+		//
+		// Stock sizes every local shadow rect from min(1, range/dist), a CONTINUOUS function of the
+		// camera's distance to the light. The Phase 2 static cache keys on the rect (rw/rh are part
+		// of LocalShadowSlot), so a single texel of change in any rect sets localAtlasFullClear and
+		// re-renders EVERY local shadow that frame. Walking forward therefore costs a full shadow
+		// re-render on every single frame, and stopping instantly returns to nearly zero - which is
+		// precisely the 1.5 -> 3 -> 1.5 ms Lee measured, and 6 -> 25 ms on the old AMD card.
+		//
+		// ★ CEIL, not round: the quantised amount is always >= the continuous one, so no shadow is
+		// ever LOWER resolution than stock would have made it. This buys stability without trading
+		// quality - the cost is slightly larger rects on average, paid once per tier crossing rather
+		// than every frame.
+		auto gg_QuantiseShadowAmount = [](float amount) -> float
+		{
+			const int steps = gg_shadow_res_steps;
+			if (steps <= 0) return amount;              // 0 = stock continuous behaviour
+			if (amount <= 0.0f) return amount;
+			float q = std::ceil(amount * (float)steps) / (float)steps;
+			return (q > 1.0f) ? 1.0f : q;
+		};
 		float iterative_scaling = 1;
 
 		// --- GG Phase 1: cap local shadow casters. Built ONCE (not per iterative_scaling retry).
@@ -4897,7 +4922,11 @@ void UpdateVisibility(Visibility& vis)
 
 				const float dist = wi::math::Distance(vis.camera->Eye, light.position);
 				const float range = light.GetRange();
-				const float amount = std::min(1.0f, range / std::max(0.001f, dist)) * iterative_scaling;
+				// GGMAX 3.29: quantised so the atlas layout is piecewise-constant under camera motion.
+				// iterative_scaling stays outside the quantiser - it is the packer's global retry scale,
+				// not a per-light distance term, and it is already constant across a given pack attempt.
+				const float amount = gg_QuantiseShadowAmount(std::min(1.0f, range / std::max(0.001f, dist)))
+					* iterative_scaling;
 
 				wi::rectpacker::Rect rect = {};
 				rect.id = int(lightIndex);

@@ -155,6 +155,42 @@ PUSHCONSTANT(push, ObjectPushConstants);
 #endif // OBJECTSHADER_COMPILE_MS
 #endif // OBJECTSHADER_LAYOUT_SHADOW_TEX
 
+// ★★★ GGMAX 3.35: the Super Quick layout - LAYOUT_COMMON minus TANGENT and minus COMMON.
+//
+// The 3.34 rungs cut the pixel shader down to almost nothing and measured the result: opaque
+// object cost went 3.92 -> 2.39 ms, and the 2.39 that remained did NOT move when the pixel
+// count was cut by 6.25x. The floor is vertex work and draw submission. But a pixel shader
+// alone cannot reach it, because a PS input signature must be a SUBSET of the VS output -
+// so as long as the cut-down pixel shaders kept LAYOUT_COMMON, the vertex shader still had
+// to fetch, transform and EXPORT the tangent, the lightmap atlas UV, the vertex AO and the
+// wetmap that none of them read.
+//
+// This layout drops those three interpolants (TANGENT float4, COMMON half2+float2 = 8
+// components of ~25) and, through the 3.35 gating in VertexSurface::create, the four vertex
+// fetches behind them. It is used by a matched VS/PS pair, so the signatures still agree.
+//
+// ★ OBJECTSHADER_USE_PROVOKING_INDEX_BUFFER is kept deliberately, and it is the one thing in
+// here that must not be dropped for speed. Upstream's own comment on it says the colour pass
+// needs the same PRIMITIVE ORDER as the prepass or the depth comparison fails on Intel. The
+// reorder is a dependent buffer load per vertex and it looks like an obvious saving; it is
+// not, it is the thing that makes ComparisonFunc::EQUAL legal.
+//
+// ⚠ Not having LAYOUT_COMMON also sets DISABLE_SVT (see the top of this file), so these rungs
+// sample textures directly rather than through the virtual-texture indirection. That is the
+// same thing the Z-prepass alpha-test shader already does, and it is a saving rather than a
+// hazard - but it does mean texture streaming has no effect while Super Quick is on.
+#ifdef OBJECTSHADER_LAYOUT_GG_SUPERQUICK
+#define OBJECTSHADER_USE_CLIPPLANE
+#define OBJECTSHADER_USE_UVSETS
+#define OBJECTSHADER_USE_COLOR
+#define OBJECTSHADER_USE_NORMAL
+#define OBJECTSHADER_USE_EMISSIVE
+#define OBJECTSHADER_USE_INSTANCEINDEX
+#ifndef OBJECTSHADER_COMPILE_MS
+#define OBJECTSHADER_USE_PROVOKING_INDEX_BUFFER // primitive order must match the prepass
+#endif // OBJECTSHADER_COMPILE_MS
+#endif // OBJECTSHADER_LAYOUT_GG_SUPERQUICK
+
 #ifdef OBJECTSHADER_LAYOUT_COMMON
 #define OBJECTSHADER_USE_CLIPPLANE
 #define OBJECTSHADER_USE_UVSETS
@@ -306,6 +342,21 @@ struct VertexSurface
 			color *= input.GetVertexColor();
 		}
 
+		// ★★★ GGMAX 3.35d: skip the loads the Super Quick layout has nowhere to put.
+		//
+		// ★ Scoped to that ONE layout on purpose. The first version of this gated on
+		// OBJECTSHADER_USE_COMMON, which also changed the Z-prepass and shadow vertex shaders - and
+		// measured as exactly nothing (Prepass Objects 1.23-1.48 ms either way), because DXC was
+		// already dead-code-eliminating loads whose results those layouts never export. A change
+		// worth zero that alters one half of the depth-EQUAL contract, on hardware I cannot test,
+		// is a bad trade. Here it is worth having only because I would rather not depend on DCE
+		// surviving a future compiler for the one path that exists to be fast.
+		//
+		// Nothing in this block feeds `position`. The chain is
+		//     GetPositionWind() -> mul(instance.transform) -> sample_wind
+		// and SV_Position is `precise`, which is what already lets the prepass VS and the main VS -
+		// two DIFFERENT compiled binaries - agree closely enough for ComparisonFunc::EQUAL.
+#ifndef OBJECTSHADER_LAYOUT_GG_SUPERQUICK
 		[branch]
 		if (material.IsUsingVertexAO())
 		{
@@ -315,22 +366,43 @@ struct VertexSurface
 		{
 			ao = 1;
 		}
+#else
+		ao = 1;
+#endif // !OBJECTSHADER_LAYOUT_GG_SUPERQUICK
 
 		normal = mul(input.GetInstance().transformRaw.GetMatrixAdjoint(), normal);
 		normal = any(normal) ? normalize(normal) : 0;
 
+		// GGMAX 3.35d: the tangent is a float4 fetch plus an adjoint matrix multiply and a
+		// normalize. The Super Quick layout has no TANGENT interpolant and no shader that reads one.
+#ifndef OBJECTSHADER_LAYOUT_GG_SUPERQUICK
 		tangent = input.GetTangent();
 		tangent.xyz = mul(input.GetInstance().transformRaw.GetMatrixAdjoint(), tangent.xyz);
 		tangent.xyz = any(tangent.xyz) ? normalize(tangent.xyz) : 0;
-		
+#else
+		tangent = 0;
+#endif // !OBJECTSHADER_LAYOUT_GG_SUPERQUICK
+
 		uvsets = input.GetUVSets();
 		uvsets.xy = mad(uvsets.xy, material.texMulAdd.xy, material.texMulAdd.zw);
 
+		// GGMAX 3.35d: the lightmap atlas UV. Super Quick has no lightmapping.
+#ifndef OBJECTSHADER_LAYOUT_GG_SUPERQUICK
 		atlas = input.GetAtlasUV();
+#else
+		atlas = 0;
+#endif // !OBJECTSHADER_LAYOUT_GG_SUPERQUICK
 
 		position = mul(input.GetInstance().transform.GetMatrix(), position);
 
+		// GGMAX 3.35d: the wetmap. Note GetWetmap carries an upstream comment about an AMD driver
+		// miscompile, so the shape of the call is left exactly as it is - this only decides whether
+		// it is reached.
+#ifndef OBJECTSHADER_LAYOUT_GG_SUPERQUICK
 		wet = input.GetWetmap();
+#else
+		wet = 0;
+#endif // !OBJECTSHADER_LAYOUT_GG_SUPERQUICK
 
 #ifndef DISABLE_WIND
 		[branch]
@@ -803,10 +875,29 @@ float4 main(PixelInput input, in bool is_frontface : SV_IsFrontFace APPEND_COVER
 
 #ifdef OBJECTSHADER_USE_EMISSIVE
 	// Emissive map:
+	// ★★★ GGMAX 3.35c: Super Quick emits NOTHING. This fixes a defect SHIPPED IN 3.34.
+	//
+	// 3.34 kept the emissive constant and dropped only the emissive MAP, with a comment reasoning
+	// that the constant was free and that "a glowing material that went black would look broken".
+	// That reasoning was exactly backwards. The constant is not the glow - the MAP is. GameGuru
+	// content carries a white emissive constant and a mostly-black emissive map, so keeping one
+	// without the other turned every surface in the level into a full-brightness emitter.
+	//
+	// ApplyLighting adds emissiveColor onto the final colour with nothing to bound it, so the frame
+	// went to a white veil - over the sky and the water too, which is why it read as an exposure or
+	// NaN fault rather than as a material fault.
+	//
+	// ★ Found with debugvis 15 (emissive), which showed the entire scene at 1.0. Two earlier
+	// theories - metalness and then roughness - were both wrong, and both were arrived at by
+	// READING the code. The channel views settled it in one screenshot.
+	//
+	// ⚠ The general rule this belongs to: when a fast path drops a TEXTURE, it must substitute a
+	// sane value for everything that texture supplied - not leave the multiply's identity behind.
+	// The identity of a multiply is the maximum of the range, which is the worst possible default.
+	// Same class of mistake as surfaceMap = 1 below.
+	surface.emissiveColor = 0;
+#ifndef GG_SUPERQUICK
 	surface.emissiveColor = material.GetEmissive();
-
-	// GGMAX 3.34: constant emissive survives Super Quick (free, and a glowing material that went
-	// black would look broken); only the per-texel emissive mask is dropped.
 #if defined(OBJECTSHADER_USE_UVSETS) && !defined(GG_SUPERQUICK)
 	[branch]
 	if (any(surface.emissiveColor) && material.textures[EMISSIVEMAP].IsValid())
@@ -817,6 +908,7 @@ float4 main(PixelInput input, in bool is_frontface : SV_IsFrontFace APPEND_COVER
 #endif // OBJECTSHADER_USE_UVSETS && !GG_SUPERQUICK
 
 	surface.emissiveColor *= meshinstance.GetEmissive();
+#endif // !GG_SUPERQUICK
 #endif // OBJECTSHADER_USE_EMISSIVE
 
 #ifndef PREPASS
@@ -964,7 +1056,44 @@ float4 main(PixelInput input, in bool is_frontface : SV_IsFrontFace APPEND_COVER
 #endif // OBJECTSHADER_USE_UVSETS && !GG_SUPERQUICK
 
 
+#ifdef GG_SUPERQUICK
+	// ★★★ GGMAX 3.35f: substitute for the ORM texture instead of leaving the multiply identity.
+	//
+	// This fixes a defect SHIPPED IN 3.34, and it is the SECOND instance of the same mistake in one
+	// change (the first was emissive, 3.35c above). The rungs skip the ORM fetch, which left
+	// surfaceMap at 1 - and 1 is not a neutral value here, it is the MAXIMUM of every channel:
+	//
+	//     roughness   = surfaceMap.g -> the material constant, Wicked's default 0.2, glossy
+	//     metalness   = surfaceMap.b -> the material constant
+	//     reflectance = surfaceMap.a -> the material constant
+	//     albedo      = baseColor * (1 - max(reflectance, metalness))
+	//
+	// GameGuru content leaves those constants at 1 and lets the ORM map supply the real per-texel
+	// value, so max(reflectance, metalness) came out at 1 and ALBEDO WENT TO ZERO. Interiors, which
+	// are lit almost entirely by indirect diffuse and so have nothing but albedo to show, rendered
+	// BLACK. Outdoors it was less obvious because the content there happens to use lower constants.
+	//
+	// ★ Found with debugvis 23, added for this hunt: indirect diffuse was IDENTICAL between stock
+	// and the rung, which left only albedo, F and occlusion, and no way to look at the first two.
+	// Three theories reached by reading the code - metalness, then roughness, then lightmaps - were
+	// all wrong. One channel view was right.
+	//
+	// The substituted values describe a plain matte dielectric: fully rough, no metal, no
+	// reflectance, no occlusion darkening. f0 then falls out at 0, so there is no specular lobe and
+	// no environment reflection to sample - which is both correct for "no shine detail" and the
+	// cheapest thing the BRDF can do.
+	//
+	// ⚠ THE RULE, paid for twice tonight: when a fast path drops a texture, substitute a sane value
+	// for everything that texture supplied. Never leave the multiply's identity behind - for a
+	// modulation map the identity is the top of the range, which is the worst possible default.
+	surfaceMap = half4(1, 1, 0, 0);
+	specularMap = 1;
+#endif // GG_SUPERQUICK
+
 	surface.create(material, surface.baseColor, surfaceMap, specularMap);
+
+	// GGMAX 3.35f: the roughness override that used to sit here is gone - surfaceMap.g = 1 above
+	// does the same job in the one place that now owns every ORM substitution.
 	
 	
 
@@ -1092,6 +1221,21 @@ float4 main(PixelInput input, in bool is_frontface : SV_IsFrontFace APPEND_COVER
 	surface.screenUV = ScreenCoord;
 
 	surface.update();
+
+#ifndef PREPASS
+	// ★ GGMAX 3.35e: the two DERIVED terms ApplyLighting multiplies everything by. Everything
+	// else in this debug set is either an input to surface.create or an output of the light
+	// loops; albedo and F sit between the two and were invisible. Added while chasing an
+	// interior that went black on a Super Quick rung with an identical indirect-diffuse channel,
+	// which narrowed the cause to exactly these two and left no way to look at either.
+	[branch]
+	switch (GetFrame().gg_debugvis)
+	{
+	case 23: return float4(surface.albedo, 1);   // baseColor * (1 - max(reflectance, metalness))
+	case 24: return float4(surface.F, 1);        // EnvBRDFApprox - diffuse is scaled by (1 - F)
+	default: break;
+	}
+#endif // PREPASS
 
 	half3 ambient = GetAmbient(surface.N);
 	ambient = lerp(ambient, ambient * surface.sss.rgb, saturate(surface.sss.a));

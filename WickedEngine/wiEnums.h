@@ -111,6 +111,7 @@ namespace wi::enums
 		// vertex shaders
 		VSTYPE_OBJECT_DEBUG,
 		VSTYPE_OBJECT_COMMON,
+		VSTYPE_OBJECT_GG_SUPERQUICK, // GGMAX 3.35: reduced layout, see objectVS_gg_superquick.hlsl
 		VSTYPE_OBJECT_SIMPLE,
 		VSTYPE_OBJECT_PREPASS,
 		VSTYPE_OBJECT_PREPASS_ALPHATEST,

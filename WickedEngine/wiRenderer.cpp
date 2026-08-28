@@ -1627,6 +1627,11 @@ void LoadShaders()
 	// ⚠ These MUST be dispatched on objectps_ctx: the object PSO creation loop waits on exactly that
 	// context before reading shaders[], and a PS still loading when a PSO is built would bake a
 	// null pixel shader into a pipeline that then silently drops every draw.
+	wi::jobsystem::Execute(objectps_ctx, [](wi::jobsystem::JobArgs args) {
+		// GGMAX 3.35: the matching reduced-layout vertex shader. Dispatched on objectps_ctx with
+		// the rung pixel shaders, because the object PSO loop waits on exactly that context.
+		LoadShader(ShaderStage::VS, shaders[VSTYPE_OBJECT_GG_SUPERQUICK], "objectVS_gg_superquick.cso");
+		});
 	{
 		static const char* gg_sq_defines[3] = { "GG_SQ_FLAT", "GG_SQ_AMBIENT", "GG_SQ_LIT" };
 		for (uint32_t gg_sq = 0; gg_sq < 3; ++gg_sq)
@@ -2737,6 +2742,13 @@ void LoadShaders()
 										&& mesh_shader == 0)
 									{
 										PipelineStateDesc sqdesc = desc;
+										// GGMAX 3.35: the reduced-layout VS goes with the reduced-layout PS. They are a
+										// PAIR - a PS input signature must be a subset of the VS output signature, so
+										// swapping only one of them is a pipeline validation failure, and swapping
+										// neither leaves the vertex shader exporting attributes nothing reads.
+										sqdesc.vs = &shaders[VSTYPE_OBJECT_GG_SUPERQUICK];
+										sqdesc.hs = nullptr;
+										sqdesc.ds = nullptr;
 										RenderPassInfo renderpass_info;
 										renderpass_info.rt_count = 1;
 										renderpass_info.rt_formats[0] = format_rendertarget_main;

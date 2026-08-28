@@ -405,6 +405,31 @@ uint32_t GG_GetShadowRects(uint32_t* entities, int* widths, int* heights, int* t
 static int localShadowCappedCount = 0;    // local casters denied a slot (rendered fully lit)
 static int localShadowRenderedCount = 0;  // local shadows actually re-rendered this frame
 static wi::vector<wi::ecs::Entity> localShadowGrantedPrev; // last frame's granted set (Phase 1.5 hysteresis)
+// GGMAX 3.30: entities whose cached local shadow must refresh THIS frame because a shadow caster
+// moved inside their range. Empty = every cached shadow is reusable. Rebuilt every frame by the
+// Phase 2 decision and consumed by DrawShadowmaps. Keyed by ENTITY, never by the per-frame light
+// index, which is reused.
+static wi::vector<wi::ecs::Entity> localShadowDirty;
+// ⚠ Both the per-rect CLEAR pass and the render loop call this. They must never disagree: a
+// rect re-rendered without being cleared blends into last frame's depth, and a rect cleared
+// without being re-rendered renders fully lit.
+static bool gg_IsLocalShadowDirty(wi::ecs::Entity e)
+{
+	for (size_t i = 0; i < localShadowDirty.size(); ++i)
+		if (localShadowDirty[i] == e) return true;
+	return false;
+}
+// Master switch, so the all-or-nothing behaviour can be restored in one command if a level ever
+// shows stale shadows. 0 = stock 2.07d behaviour (any moved caster re-renders everything).
+int gg_shadow_perlight_invalidate = 1;
+// ★★★ Frames between forced round-robin refreshes of one cached slot. 0 disables the floor.
+//
+// The moved-caster detector has never been complete - the comment at the decision already admits
+// bone-only animation is invisible to it, and it relied on "masked in practice by rect churn"
+// which 3.29 then removed. Rather than keep extending the detector one user repro at a time,
+// bound the damage: every slot refreshes on a rotation whether or not anything marked it.
+int gg_shadow_refresh_floor = 4;
+static uint32_t localShadowRefreshCursor = 0;
 // Phase 2 static-cache: when the granted local-shadow layout is unchanged, LOAD (persist) the shadow
 // atlas and skip re-rendering the cached local shadows. Any structural change forces one full-render
 // frame that repopulates the cache. All-or-nothing: a static torch bank converges to 0 re-renders/frame.
@@ -5143,11 +5168,23 @@ void UpdateVisibility(Visibility& vis)
 			// by the translation delta so an object that just LEFT the range still invalidates.
 			// Note: bone-only animation (idling character) does not change the object matrix and
 			// is NOT detected here — a known Phase 2 limitation, masked in practice by rect churn.
+			// ★★★ GGMAX 3.30: PER-LIGHT, not all-or-nothing.
+			//
+			// This loop always knew which light the moved caster was near; it just discarded the
+			// answer and set one global flag, so a single turning wheel re-rendered every shadow in
+			// the level for the length of its animation.
+			//
+			// ⚠ The early-exit is deliberately gone: it used to stop at the FIRST intersection, which
+			// is all a global bool needed. A dirty SET has to see them all. The cost is movers x slots
+			// with slots capped by the local-shadow budget (a dozen or so), and it stops early once
+			// every slot is already dirty - the worst case is no worse than the old full re-render it
+			// replaces.
+			localShadowDirty.clear();
 			if (!changed && !cur.empty()
 				&& vis.scene->matrix_objects.size() == vis.scene->objects.GetCount()
 				&& vis.scene->matrix_objects_prev.size() == vis.scene->objects.GetCount())
 			{
-				for (size_t i = 0; i < vis.scene->aabb_objects.size() && !changed; ++i)
+				for (size_t i = 0; i < vis.scene->aabb_objects.size(); ++i)
 				{
 					const ObjectComponent& object = vis.scene->objects[i];
 					if (!object.IsRenderable() || !object.IsCastingShadow())
@@ -5164,14 +5201,38 @@ void UpdateVisibility(Visibility& vis)
 					for (const LocalShadowSlot& s : cur)
 					{
 						Sphere sph(s.pos, s.range + delta);
-						if (sph.intersects(aabb))
-						{
-							changed = true;
-							break;
-						}
+						if (sph.intersects(aabb) && !gg_IsLocalShadowDirty(s.ent))
+							localShadowDirty.push_back(s.ent);
 					}
+					if (localShadowDirty.size() >= cur.size())
+						break; // every slot already dirty - nothing further to learn this frame
 				}
 			}
+			// Switch off the per-light path and a moved caster means what it used to: everything.
+			if (gg_shadow_perlight_invalidate == 0 && !localShadowDirty.empty())
+			{
+				changed = true;
+				localShadowDirty.clear();
+			}
+			// ★ REFRESH FLOOR. Force one slot per rotation regardless of what the detector thinks,
+			// so a shadow that is stale for ANY reason repairs itself in bounded time instead of
+			// persisting. This is what makes the per-light path safe to ship without also proving the
+			// clear pass and the render loop agree on every path - see the long note at the top.
+			if (!changed && !cur.empty() && gg_shadow_refresh_floor > 0)
+			{
+				GraphicsDevice* ggdev = wi::graphics::GetDevice();
+				if (ggdev != nullptr && (ggdev->GetFrameCount() % (uint64_t)gg_shadow_refresh_floor) == 0)
+				{
+					localShadowRefreshCursor = (localShadowRefreshCursor + 1) % (uint32_t)cur.size();
+					const wi::ecs::Entity ggRefresh = cur[localShadowRefreshCursor].ent;
+					if (!gg_IsLocalShadowDirty(ggRefresh))
+						localShadowDirty.push_back(ggRefresh);
+				}
+			}
+			// A structural change re-renders the whole atlas anyway, so a dirty subset is meaningless
+			// and would only cause the clear pass and the render loop to reason about stale entities.
+			if (changed)
+				localShadowDirty.clear();
 			localAtlasFullClear = changed;
 			if (changed)
 			{
@@ -8107,8 +8168,11 @@ void DrawShadowmaps(
 			if (light.IsInactive() || !light.IsCastingShadow() || light.IsStatic())
 				continue;
 			const wi::rectpacker::Rect& r = vis.visibleLightShadowRects[lightIndex];
-			if (light.GetType() != LightComponent::DIRECTIONAL && localCachingActive)
-				continue; // GG Phase 2: cached local shadow -> don't clear (keep last frame's texels)
+			// GGMAX 3.30: a DIRTY local shadow is re-rendered this frame, so its rect must be cleared
+			// first. Same predicate as the render loop below - see the note at gg_IsLocalShadowDirty.
+			if (light.GetType() != LightComponent::DIRECTIONAL && localCachingActive
+				&& !gg_IsLocalShadowDirty(vis.scene->lights.GetEntity(lightIndex)))
+				continue; // cached and clean -> keep last frame's texels
 			switch (light.GetType())
 			{
 			case LightComponent::DIRECTIONAL:
@@ -8150,8 +8214,10 @@ void DrawShadowmaps(
 			continue;
 		if (light.GetType() != LightComponent::DIRECTIONAL)
 		{
-			if (localCachingActive)
-				continue; // GG Phase 2: cached this frame -> reuse atlas texels via LOAD
+			// GGMAX 3.30: only refresh the lights a moving caster actually touched. Same predicate as
+			// the clear pass above.
+			if (localCachingActive && !gg_IsLocalShadowDirty(vis.scene->lights.GetEntity(lightIndex)))
+				continue; // cached and clean -> reuse atlas texels via LOAD
 			localShadowRenderedCount++;
 		}
 
@@ -8602,7 +8668,12 @@ void DrawShadowmaps(
 				);
 			}
 
-			if (!renderQueue.empty() || renderQueue_transparent.empty())
+			// ⚠ GGMAX 3.30a: was `|| renderQueue_transparent.empty()` - a missing '!'. Its two
+			// siblings at the spot and directional cases both read `|| !renderQueue_transparent.empty()`.
+			// A point light whose only casters are transparent therefore skipped its whole render block
+			// while all six faces had already been cleared. Harmless while every frame full-cleared and
+			// re-rendered everything; a permanent blank once slots are allowed to stay clean.
+			if (!renderQueue.empty() || !renderQueue_transparent.empty())
 			{
 				device->BindDynamicConstantBuffer(cb, CBSLOT_RENDERER_CAMERA, cmd);
 				device->BindViewports(arraysize(vp), vp, cmd);

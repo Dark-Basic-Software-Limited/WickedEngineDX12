@@ -30,6 +30,14 @@ namespace wi::renderer
 	// sizing, which re-renders every cached local shadow on every frame the camera translates.
 	// Default 4. See the long note at the quantiser in wiRenderer.cpp's Shadowmap packing.
 	extern int gg_shadow_res_steps;
+	// GGMAX 3.30: 1 = a moving shadow caster refreshes only the lights it is actually near;
+	// 0 = stock, where any moving caster re-renders every cached local shadow. See the note at
+	// the Phase 2 decision in wiRenderer.cpp.
+	extern int gg_shadow_perlight_invalidate;
+	// GGMAX 3.30a: frames between forced round-robin refreshes of one cached local shadow. Bounds
+	// how long ANY stale shadow can persist, including causes the moved-caster detector misses.
+	// 0 disables. Default 4.
+	extern int gg_shadow_refresh_floor;
 	constexpr wi::graphics::Format format_depthbuffer_main = wi::graphics::Format::D32_FLOAT_S8X24_UINT;
 	constexpr wi::graphics::Format format_rendertarget_main = wi::graphics::Format::R11G11B10_FLOAT;
 	constexpr wi::graphics::Format format_idbuffer = wi::graphics::Format::R32_UINT;

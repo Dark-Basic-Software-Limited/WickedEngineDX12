@@ -136,6 +136,11 @@ namespace wi::scene
 		return want;
 	}
 
+	// GGMAX 3.28: consecutive-occluded-frame window for occlusion culling, as a bitmask.
+	// Default 8 frames. Stock Wicked used all 32, which cannot be met while the camera turns -
+	// see the long note at OcclusionResult::IsOccluded() in wiScene.h.
+	uint32_t gg_occlusion_history_mask = 0xFFu;
+
 	void Scene::Update(float dt)
 	{
 		GraphicsDevice* device = wi::graphics::GetDevice();

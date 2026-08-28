@@ -40,6 +40,13 @@ namespace wi::scene
 	// something closing on you head-on than on the same character crossing at distance. Doubling
 	// this both stops any reduction inside 1000 units and halves the skip everywhere beyond it.
 	static constexpr float GG_ANIM_REDUCTION_NEAR_DIST = 1000.0f;
+
+	// GGMAX 3.28: how many of the most recent frames must ALL read occluded before an object
+	// is culled, as a bitmask. Stock Wicked tested the whole 32-bit history, which cannot be
+	// satisfied while the camera turns - see the long note at OcclusionResult::IsOccluded().
+	// Default 8 frames: comfortably longer than the query latency (BufferCount frames behind)
+	// while still short enough to engage during camera motion.
+	extern uint32_t gg_occlusion_history_mask;
 	extern std::atomic<uint32_t> gg_anim_reduction_scale;   // 0 or 1 = off, else 2..100
 	// Per-armature update decision for the current frame, indexed by armature index. Filled by
 	// RunAnimationUpdateSystem, read by the skinning dispatch. Empty = Reduction Scale is off.
@@ -251,13 +258,28 @@ namespace wi::scene
 			// occlusion result history bitfield (32 bit->32 frame history)
 			uint32_t occlusionHistory = ~0u;
 
-			constexpr bool IsOccluded() const
+			bool IsOccluded() const
 			{
-				// Perform a conservative occlusion test:
-				// If it is visible in any frames in the history, it is determined visible in this frame
-				// But if all queries failed in the history, it is occluded.
-				// If it pops up for a frame after occluded, it is visible again for some frames
-				return occlusionHistory == 0;
+				// Conservative occlusion test: visible in ANY frame of the window means visible now;
+				// only if every frame in the window came back occluded is the object culled. That
+				// hysteresis absorbs the query latency (results are BufferCount frames behind) and
+				// stops a marginal query flickering an object in and out.
+				//
+				// ★★★ GGMAX 3.28: the window was the FULL 32 bits, and that made occlusion culling
+				// structurally unable to work while the camera turns.
+				//
+				// A query slot is only allocated inside the frustum-visible branch
+				// (wiRenderer.cpp:4599), so an object OUTSIDE the frustum takes the `query_id < 0`
+				// fail-open path every frame and refills its history with 1s. Re-entering the frustum
+				// it must then collect 32 CONSECUTIVE occluded frames from scratch - 0.7 s at 45 fps.
+				// At 180 deg/s a 60 deg FOV sweeps past in 0.33 s, so the requirement cannot be met and
+				// nothing is ever culled. Measured on TESTPRO2: parked 55 draws/frame, rotating 649,
+				// and rotating-with-occlusion-OFF costs the SAME as rotating-with-it-ON.
+				//
+				// ⚠ Do NOT 'fix' this by allocating queries for out-of-frustum objects. The fail-open
+				// is correct - an object with no fresh result MUST be drawn. The bug is the length of
+				// the window, not the direction of the failure.
+				return (occlusionHistory & gg_occlusion_history_mask) == 0;
 			}
 		};
 		mutable wi::vector<OcclusionResult> occlusion_results_objects;

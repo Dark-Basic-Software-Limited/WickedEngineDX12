@@ -1257,7 +1257,11 @@ static const int impostorCaptureAngles = 36;
 enum FRAME_OPTIONS
 {
 	OPTION_BIT_TEMPORALAA_ENABLED = 1 << 0,
-	//OPTION_BIT_TRANSPARENTSHADOWS_ENABLED = 1 << 1,
+	// GGMAX 3.33: restored. Upstream commented this out, which left the transparent-shadow fetch
+	// gated only at compile time - so with gg_transparent_shadows FALSE (the default) every tap
+	// still sampled a 1x1 white texture and multiplied by 1. Behaviour-identical to skip, and
+	// 16 fetches per light per pixel cheaper.
+	OPTION_BIT_TRANSPARENTSHADOWS_ENABLED = 1 << 1,
 	OPTION_BIT_VXGI_ENABLED = 1 << 2,
 	OPTION_BIT_VXGI_REFLECTIONS_ENABLED = 1 << 3,
 	OPTION_BIT_REALISTIC_SKY = 1 << 6,

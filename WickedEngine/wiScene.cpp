@@ -1023,7 +1023,26 @@ namespace wi::scene
 		shaderscene.geometryCount = (uint)geometryArraySize;
 		shaderscene.materialCount = (uint)materialArraySize;
 		shaderscene.meshletbuffer = device->GetDescriptorIndex(&meshletBuffer, SubresourceType::SRV);
-		shaderscene.texturestreamingbuffer = device->GetDescriptorIndex(&textureStreamingFeedbackBuffer, SubresourceType::UAV);
+		// ★★★ GGMAX 3.31b: Super Quick also switches off the per-pixel streaming feedback.
+		//
+		// objectHF.hlsli calls write_mipmap_feedback for EVERY opaque pixel. It is [branch]-gated on
+		// this index being >= 0 - but the index is assigned unconditionally here, so the gate is
+		// always open and every covered pixel pays a WaveActiveBitOr plus an InterlockedOr into one
+		// dword per material. Every wave shading the same material contends on the same address, so
+		// the cost scales with OVERDRAW rather than object count.
+		//
+		// ⚠ DX11 has no equivalent at all - grep mipmap_feedback over WickedRepo returns nothing.
+		// This is pure DX12-era work that the older build never paid for.
+		//
+		// Setting it to -1 closes the branch. The trade is that texture streaming stops receiving
+		// resolution requests while Super Quick is on, so textures hold whatever mip level they
+		// already have rather than sharpening as you approach - which is the right side of the
+		// bargain for a mode whose whole purpose is to stop paying per pixel.
+		// qualified: the flag lives in wi::renderer, and an extern declared here would create a
+		// separate wi::scene symbol that silently fails to link
+		shaderscene.texturestreamingbuffer = (wi::renderer::gg_super_quick_objects != 0)
+			? -1
+			: device->GetDescriptorIndex(&textureStreamingFeedbackBuffer, SubresourceType::UAV);
 		if (weather.skyMap.IsValid())
 		{
 			shaderscene.globalenvmap = device->GetDescriptorIndex(&weather.skyMap.GetTexture(), SubresourceType::SRV, weather.skyMap.GetTextureSRGBSubresource());

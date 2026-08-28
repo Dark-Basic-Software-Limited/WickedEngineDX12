@@ -5463,6 +5463,12 @@ void UpdatePerFrameData(
 	{
 		frameCB.options |= OPTION_BIT_GG_DX11_LIGHT_FALLOFF; // GGMAX 2.10
 	}
+	// GGMAX 3.33: tell the shader whether the transparent shadow atlas is real. When it is not,
+	// the fetch samples white and multiplies by 1 - pure waste, 16 times per light per pixel.
+	if (gg_transparent_shadows)
+	{
+		frameCB.options |= OPTION_BIT_TRANSPARENTSHADOWS_ENABLED;
+	}
 	// GGMAX 3.31a: Super Quick -> single-tap shadow filtering (see shadowHF.hlsli).
 	if (gg_super_quick_objects != 0)
 	{
@@ -8735,6 +8741,20 @@ void DrawShadowmaps(
 				cb.cameras[0].position = vis.camera->Eye;
 				for (uint32_t shcam = 0; shcam < arraysize(cameras); ++shcam)
 				{
+					// ★★★ GGMAX 3.33: skip cube faces the main camera cannot see.
+					//
+					// The mesh draws above are bounded by camera_count, which counts exactly the faces
+					// whose frustum intersects the main camera. This loop was not, so grass was rendered
+					// into faces nothing ever samples - twelve point lights times six faces times every
+					// visible grass chunk. DX11 drew grass into no shadow map at all.
+					//
+					// ⚠ Bounding the loop by camera_count instead would be WRONG: cb.cameras[0..count) are
+					// COMPACTED visible faces with an output_index remap, while this loop indexes the raw
+					// SHCAM array and derives its viewport from shcam directly. It has to be the same
+					// frustum TEST, not the same bound.
+					if (!cam_frustum.Intersects(cameras[shcam].boundingfrustum))
+						continue;
+
 					XMStoreFloat4x4(&cb.cameras[0].view_projection, cameras[shcam].view_projection);
 					device->BindDynamicConstantBuffer(cb, CBSLOT_RENDERER_CAMERA, cmd);
 

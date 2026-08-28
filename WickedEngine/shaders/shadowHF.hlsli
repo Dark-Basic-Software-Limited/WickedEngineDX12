@@ -178,12 +178,16 @@ inline half3 sample_shadow(float2 uv, float cmp, float4 uv_clamping, half2 radiu
 #ifndef DISABLE_TRANSPARENT_SHADOWMAP
 		// mirror the soft path exactly, so a coloured transparent shadow does not vanish the
 		// moment a user ticks a performance box
+		[branch]
+		if (GetFrame().options & OPTION_BIT_TRANSPARENTSHADOWS_ENABLED)
+		{
 		half4 gg_ts = texture_shadowatlas_transparent.SampleLevel(sampler_linear_clamp, gg_uv, 0);
 #ifdef TRANSPARENT_SHADOWMAP_SECONDARY_DEPTH_CHECK
 		if (gg_ts.a > cmp)
 #endif // TRANSPARENT_SHADOWMAP_SECONDARY_DEPTH_CHECK
 		{
 			gg_pcf *= gg_ts.rgb;
+		}
 		}
 #endif // DISABLE_TRANSPARENT_SHADOWMAP
 		return gg_pcf;
@@ -240,12 +244,18 @@ inline half3 sample_shadow(float2 uv, float cmp, float4 uv_clamping, half2 radiu
 		half3 pcf = texture_shadowatlas.SampleCmpLevelZero(sampler_cmp_depth, sample_uv, cmp).rrr;
 		
 #ifndef DISABLE_TRANSPARENT_SHADOWMAP
+		// ★ GGMAX 3.33: runtime gate. With transparent shadows off (the default) this samples a
+		// 1x1 white texture and multiplies by 1 - identical output, 16 fetches per light per pixel.
+		[branch]
+		if (GetFrame().options & OPTION_BIT_TRANSPARENTSHADOWS_ENABLED)
+		{
 		half4 transparent_shadow = texture_shadowatlas_transparent.SampleLevel(sampler_linear_clamp, sample_uv, 0);
 #ifdef TRANSPARENT_SHADOWMAP_SECONDARY_DEPTH_CHECK
 		if (transparent_shadow.a > cmp)
 #endif // TRANSPARENT_SHADOWMAP_SECONDARY_DEPTH_CHECK
 		{
 			pcf *= transparent_shadow.rgb;
+		}
 		}
 #endif // DISABLE_TRANSPARENT_SHADOWMAP
 

@@ -100,8 +100,14 @@ namespace wi
 		// rather than driving a dead device round the loop again.
 		if (graphicsDevice != nullptr && graphicsDevice->IsDeviceRemoved())
 		{
-			auto* gg_dx12 = dynamic_cast<wi::graphics::GraphicsDevice_DX12*>(graphicsDevice.get());
-			if (gg_dx12 != nullptr && gg_dx12->ClaimDeviceRemovedReport())
+			// ⚠ GGMAX 3.35g: NO dynamic_cast here. This used to be
+			//     auto* gg_dx12 = dynamic_cast<GraphicsDevice_DX12*>(graphicsDevice.get());
+			// and on 2026-08-29 __RTDynamicCast threw out of it, so a device loss that this block
+			// exists to report POLITELY became an unhandled C++ exception and a silent close - the
+			// user got nothing, not even the message naming the log files. ClaimDeviceRemovedReport
+			// is virtual on the base now, so this is plain dispatch through a pointer we have
+			// already successfully called a virtual on one line above.
+			if (graphicsDevice->ClaimDeviceRemovedReport())
 			{
 				wi::helper::messageBox(graphicsDevice->GetDeviceRemovedMessage()
 					+ "\n\nThe graphics device was lost and GameGuru MAX has to close. See Files/log.txt"

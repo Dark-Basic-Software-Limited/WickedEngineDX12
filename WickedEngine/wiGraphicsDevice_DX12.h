@@ -343,7 +343,8 @@ namespace wi::graphics
 		std::string GetDeviceRemovedMessage() const override { return deviceRemovedMessage; }
 		// True the FIRST time it is called after a removal and false thereafter, so the main thread
 		// shows exactly one dialog no matter how many frames notice.
-		bool ClaimDeviceRemovedReport()
+		// GGMAX 3.35g: now an override - see the base declaration for why it must not need a cast.
+		bool ClaimDeviceRemovedReport() override
 		{
 			if (!deviceRemoved.load(std::memory_order_acquire)) return false;
 			bool expected = false;

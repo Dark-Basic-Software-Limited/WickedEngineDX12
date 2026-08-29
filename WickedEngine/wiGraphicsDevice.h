@@ -120,6 +120,19 @@ namespace wi::graphics
 		virtual bool IsDeviceRemoved() const { return false; }
 		// The removal reason, for the one user-facing message. Empty while the device is healthy.
 		virtual std::string GetDeviceRemovedMessage() const { return {}; }
+		// ★★★ GGMAX 3.35g: true the FIRST time it is called after a removal, false thereafter, so
+		// exactly one dialog is shown no matter how many frames notice.
+		//
+		// ⚠ VIRTUAL ON THE BASE ON PURPOSE. 3.26 put this only on GraphicsDevice_DX12 and reached it
+		// with a dynamic_cast from Application::Run. That crashed Lee on 2026-08-29: __RTDynamicCast
+		// threw out of the device-lost handler, so the one path whose entire job is to report a
+		// crash politely became an unhandled C++ exception (0xe06d7363) and a SILENT close.
+		//
+		// A crash path must not depend on RTTI. By the time it runs, the thing it is reasoning about
+		// is already broken - which is exactly when reading a vtable to recover type information is
+		// least likely to work. Virtual dispatch through a pointer we have already called a virtual
+		// on is free and cannot throw.
+		virtual bool ClaimDeviceRemovedReport() { return false; }
 
 		// GGMAX 1.43: fully quiesce the GPU AND release every deferred-destroyed resource
 		// (buffers, textures, bindless descriptor slots) immediately, instead of over the

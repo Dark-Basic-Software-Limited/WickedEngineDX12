@@ -1977,6 +1977,42 @@ namespace wi
 			if (device == nullptr)
 				return 0;
 
+			// ★★★ GGMAX 3.35g: quiesce STREAMING across the rebuild. Without this, a live Texture
+			// Detail change is a race against the streaming thread, and it hung Lee's GPU.
+			//
+			// The streaming thread queues StreamingTextureReplace entries and UpdateStreamingResources
+			// applies them on the main thread with a bare
+			//     replace.resource->texture = replace.texture;
+			// - no retention, the old handle just drops to the deferred destroyer. Meanwhile this
+			// function is swapping resource->texture for the SAME ResourceInternal. If a replacement
+			// was queued against a resource before we rebuilt it, it lands AFTER and overwrites the
+			// freshly divided texture with one built from the pre-divide resource, dropping the new
+			// texture while descriptors still point at it. The next draw reads freed memory.
+			//
+			// Measured, not theorised - DRED named the resource and the fault:
+			//     [DRED] PageFault at VA GPUAddress 14775943168
+			//     [DRED] Recent freed objects with VA ranges that match the faulting VA:
+			//         Name:  (Type: Heap)
+			//         Name: ...\entitybank\Aztec Game Kit\...\alter pillar_surface.dds (Type: Resource)
+			//     [Error] D3D12: device removed, cause: DXGI_ERROR_DEVICE_HUNG
+			// A "_surface" map is an ORM texture - exactly the kind this function rebuilds - and Lee
+			// was toggling Texture Detail back and forth when it went.
+			//
+			// ★ The guard already existed. GGReloadGuardBegin/End was written in 1.44 for the in-place
+			// level reload to prevent this precise hazard: it pauses streaming, JOINS the in-flight
+			// streaming job, drops replacements computed against resources that are about to change,
+			// and releases the shared_ptrs the streaming job was holding. The live divide needed the
+			// same protection and never asked for it.
+			//
+			// ⚠ Restored on EVERY path - the loop below has continues and the function has early
+			// returns, and leaving streaming paused forever would be a subtler bug than the one
+			// being fixed.
+			struct GGStreamQuiesce
+			{
+				GGStreamQuiesce()  { GGReloadGuardBegin(); }
+				~GGStreamQuiesce() { GGReloadGuardEnd(); }
+			} gg_stream_quiesce;
+
 			// Snapshot under the lock and then let go of it - Load() below takes the same lock.
 			struct Entry { std::string name; wi::allocator::shared_ptr<ResourceInternal> res; };
 			wi::vector<Entry> todo;

@@ -1023,26 +1023,22 @@ namespace wi::scene
 		shaderscene.geometryCount = (uint)geometryArraySize;
 		shaderscene.materialCount = (uint)materialArraySize;
 		shaderscene.meshletbuffer = device->GetDescriptorIndex(&meshletBuffer, SubresourceType::SRV);
-		// ★★★ GGMAX 3.31b: Super Quick also switches off the per-pixel streaming feedback.
+		// ★★★ GGMAX 3.35c: REVERTED. 3.31b switched the streaming feedback off under Super
+		// Quick, and that was wrong - it is why Lee saw "Full" texture detail look WORSE than "Half".
 		//
-		// objectHF.hlsli calls write_mipmap_feedback for EVERY opaque pixel. It is [branch]-gated on
-		// this index being >= 0 - but the index is assigned unconditionally here, so the gate is
-		// always open and every covered pixel pays a WaveActiveBitOr plus an InterlockedOr into one
-		// dword per material. Every wave shading the same material contends on the same address, so
-		// the cost scales with OVERDRAW rather than object count.
+		// GameGuru streams MIP LEVELS, and write_mipmap_feedback is how the streamer learns which
+		// mips a material actually needs. Kill the feedback and a full-resolution texture never gets
+		// its high mips - it sits blurred forever. "Half", by contrast, loads a SMALLER texture that
+		// is fully resident, so it looks SHARPER than "Full". Exactly backwards, and from the
+		// user's chair it reads as the Texture Detail dropdown being broken.
 		//
-		// ⚠ DX11 has no equivalent at all - grep mipmap_feedback over WickedRepo returns nothing.
-		// This is pure DX12-era work that the older build never paid for.
+		// ★ The rule: a performance mode may make things cheaper, it may not silently overrule a
+		// setting the user chose. Texture Detail is the user's control over texture resolution, so
+		// Super Quick does not get a private opinion about it.
 		//
-		// Setting it to -1 closes the branch. The trade is that texture streaming stops receiving
-		// resolution requests while Super Quick is on, so textures hold whatever mip level they
-		// already have rather than sharpening as you approach - which is the right side of the
-		// bargain for a mode whose whole purpose is to stop paying per pixel.
-		// qualified: the flag lives in wi::renderer, and an extern declared here would create a
-		// separate wi::scene symbol that silently fails to link
-		shaderscene.texturestreamingbuffer = (wi::renderer::gg_super_quick_objects != 0)
-			? -1
-			: device->GetDescriptorIndex(&textureStreamingFeedbackBuffer, SubresourceType::UAV);
+		// The per-pixel cost this was avoiding (a WaveActiveBitOr plus an InterlockedOr per covered
+		// pixel) is real but small, and it is measured in the 3.35c ladder rather than assumed.
+		shaderscene.texturestreamingbuffer = device->GetDescriptorIndex(&textureStreamingFeedbackBuffer, SubresourceType::UAV);
 		if (weather.skyMap.IsValid())
 		{
 			shaderscene.globalenvmap = device->GetDescriptorIndex(&weather.skyMap.GetTexture(), SubresourceType::SRV, weather.skyMap.GetTextureSRGBSubresource());

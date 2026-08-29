@@ -71,9 +71,15 @@
 #define TEXTURE_SLOT_NONUNIFORM
 #endif // TERRAINBLENDED
 
-#ifndef OBJECTSHADER_LAYOUT_COMMON
+// ⚠ GGMAX 3.35c: the Super Quick layout must NOT disable sparse virtual texturing.
+//
+// DISABLE_SVT is not cosmetic - ShaderInterop_Renderer.h uses it to choose between SampleVirtual
+// (which resolves through the residency map) and a plain tex.Sample. For a genuinely sparse
+// material the plain sample reads the physical TILE ATLAS with virtual UVs, which is not a blurrier
+// picture, it is the wrong texels. The Super Quick rungs sample albedo, so they need the real path.
+#if !defined(OBJECTSHADER_LAYOUT_COMMON) && !defined(OBJECTSHADER_LAYOUT_GG_SUPERQUICK)
 #define DISABLE_SVT
-#endif // OBJECTSHADER_LAYOUT_COMMON
+#endif // !OBJECTSHADER_LAYOUT_COMMON && !OBJECTSHADER_LAYOUT_GG_SUPERQUICK
 
 #include "globals.hlsli"
 #include "brdf.hlsli"
@@ -175,10 +181,12 @@ PUSHCONSTANT(push, ObjectPushConstants);
 // reorder is a dependent buffer load per vertex and it looks like an obvious saving; it is
 // not, it is the thing that makes ComparisonFunc::EQUAL legal.
 //
-// ⚠ Not having LAYOUT_COMMON also sets DISABLE_SVT (see the top of this file), so these rungs
-// sample textures directly rather than through the virtual-texture indirection. That is the
-// same thing the Z-prepass alpha-test shader already does, and it is a saving rather than a
-// hazard - but it does mean texture streaming has no effect while Super Quick is on.
+// ⚠ 3.35c correction: an earlier version of this comment said DISABLE_SVT here was "a saving
+// rather than a hazard" and that texture streaming simply had no effect under Super Quick. Both
+// halves were wrong. DISABLE_SVT switches the sampler off the residency-map path, which on a
+// sparse material returns the WRONG TEXELS, and killing the streaming feedback made "Full"
+// texture detail look worse than "Half". The layout is now explicitly exempted from DISABLE_SVT
+// at the top of this file, and the feedback write is back.
 #ifdef OBJECTSHADER_LAYOUT_GG_SUPERQUICK
 #define OBJECTSHADER_USE_CLIPPLANE
 #define OBJECTSHADER_USE_UVSETS
@@ -656,12 +664,16 @@ float4 main(PixelInput input, in bool is_frontface : SV_IsFrontFace APPEND_COVER
 	float4 uvsets = input.GetUVSets();
 #endif // OBJECTSHADER_USE_UVSETS
 
-#if defined(TILEDFORWARD) && !defined(GG_SUPERQUICK)
-	// GGMAX 3.34: Super Quick removes this outright. It is a WaveActiveBitOr plus an InterlockedOr
-	// into one dword per material for EVERY covered pixel, so every wave shading the same material
-	// contends on the same address and the cost scales with overdraw. DX11 had no equivalent.
+#ifdef TILEDFORWARD
+	// ★★★ GGMAX 3.35c: RESTORED. 3.34 removed this from the Super Quick rungs as a per-pixel
+	// saving, and it cost more than it bought: this write is how the texture streamer learns which
+	// mip levels a material needs. Without it a full-resolution texture never gets its high mips and
+	// stays blurred, which made "Full" look worse than "Half" in the Texture Detail dropdown.
+	//
+	// ★ A performance mode may make things cheaper. It may not quietly overrule a setting the user
+	// chose - and Texture Detail is precisely that setting.
 	write_mipmap_feedback(push.materialIndex, ddx_coarse(uvsets), ddy_coarse(uvsets));
-#endif // TILEDFORWARD && !GG_SUPERQUICK
+#endif // TILEDFORWARD
 
 #ifdef OBJECTSHADER_USE_INSTANCEINDEX
 	ShaderMeshInstance meshinstance = load_instance(input.GetInstanceIndex());

@@ -236,7 +236,7 @@ namespace wi::profiler
 				{
 					gg_trace_gaps_written++;
 					FILE* f = nullptr;
-					fopen_s(&f, "gap_trace.txt", "a");
+					f = fopen(wi::helper::GetDiagnosticPath("gap_trace.txt").c_str(), "a"); // GGMAX 3.35j
 					if (f)
 					{
 						fprintf(f, "GAP #%llu  %.1f ms  (boundary t=%llu us)\n",

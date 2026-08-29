@@ -2648,7 +2648,7 @@ std::mutex queue_locker;
 				if (newpso == nullptr)
 				{
 					FILE* gg_f = nullptr;
-					fopen_s(&gg_f, "gg_pso_fail.txt", "a");
+					gg_f = fopen(wi::helper::GetDiagnosticPath("gg_pso_fail.txt").c_str(), "a"); // GGMAX 3.35j
 					if (gg_f)
 					{
 						const InputLayout* il = pso->desc.il;

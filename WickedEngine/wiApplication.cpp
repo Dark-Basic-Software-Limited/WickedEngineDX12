@@ -110,8 +110,10 @@ namespace wi
 			if (graphicsDevice->ClaimDeviceRemovedReport())
 			{
 				wi::helper::messageBox(graphicsDevice->GetDeviceRemovedMessage()
-					+ "\n\nThe graphics device was lost and GameGuru MAX has to close. See Files/log.txt"
-					  " and dred_report.txt for the post-mortem.", "Graphics device lost");
+					// GGMAX 3.35i: both files sit beside the EXE now, so the advice is finally true.
+					+ "\n\nThe graphics device was lost and GameGuru MAX has to close. See log.txt"
+					  " and dred_report.txt, next to the GameGuruMAX executable, for the post-mortem.",
+					"Graphics device lost");
 				wi::platform::Exit();
 			}
 			return;

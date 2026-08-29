@@ -3300,7 +3300,7 @@ namespace wi::scene
 											XMFLOAT4 gga, ggb;
 											XMStoreFloat4(&gga, aR);
 											XMStoreFloat4(&ggb, bR);
-											FILE* ggf = gg_anim_garbage_file ? fopen("anim_garbage.txt", "a") : nullptr;
+											FILE* ggf = gg_anim_garbage_file ? fopen(wi::helper::GetDiagnosticPath("anim_garbage.txt").c_str(), "a") : nullptr;
 											if (ggf)
 											{
 												fprintf(ggf, "ANIMROT tgt=%u out=(%g,%g,%g,%g) aR=(%g,%g,%g,%g) bR=(%g,%g,%g,%g) t=%g keyL=%d keyR=%d "
@@ -3493,7 +3493,7 @@ namespace wi::scene
 										XMFLOAT4 gga2, ggb2;
 										XMStoreFloat4(&gga2, aR);
 										XMStoreFloat4(&ggb2, bR);
-										FILE* ggf2 = gg_anim_garbage_file ? fopen("anim_garbage.txt", "a") : nullptr;
+										FILE* ggf2 = gg_anim_garbage_file ? fopen(wi::helper::GetDiagnosticPath("anim_garbage.txt").c_str(), "a") : nullptr;
 										if (ggf2)
 										{
 											fprintf(ggf2, "ANIMROT2 tgt=%u path=%d preframe=%d out=(%g,%g,%g,%g) aR=(%g,%g,%g,%g) bR=(%g,%g,%g,%g) t=%g "
@@ -5804,7 +5804,7 @@ namespace wi::scene
 							// one log per entity per process — spam from a single bad entity
 							// must never mask other writers
 							static wi::unordered_set<Entity> gg_seen;
-							FILE* gg_f = (gg_seen.count(entity) == 0 && gg_seen.size() <= 256) ? fopen("corrupt_geometry.txt", "a") : nullptr;
+							FILE* gg_f = (gg_seen.count(entity) == 0 && gg_seen.size() <= 256) ? fopen(wi::helper::GetDiagnosticPath("corrupt_geometry.txt").c_str(), "a") : nullptr;
 							if (gg_f != nullptr)
 							{
 								gg_seen.insert(entity);

@@ -178,7 +178,7 @@ namespace wi::scene
 			const uint32_t evt = gg_garbage_events.fetch_add(1);
 			if (evt == 64)
 			{
-				FILE* fs = gg_applytransform_garbage_file ? fopen("applytransform_garbage.txt", "a") : nullptr;
+				FILE* fs = gg_applytransform_garbage_file ? fopen(wi::helper::GetDiagnosticPath("applytransform_garbage.txt").c_str(), "a") : nullptr;
 				if (fs) { fprintf(fs, "SUPPRESSED: further events this session are counted but not logged\n"); fclose(fs); }
 			}
 			if (evt >= 64)
@@ -187,7 +187,7 @@ namespace wi::scene
 			}
 			void* stack[24];
 			unsigned short frames = RtlCaptureStackBackTrace(0, 24, stack, nullptr);
-			FILE* f = gg_applytransform_garbage_file ? fopen("applytransform_garbage.txt", "a") : nullptr;
+			FILE* f = gg_applytransform_garbage_file ? fopen(wi::helper::GetDiagnosticPath("applytransform_garbage.txt").c_str(), "a") : nullptr;
 			if (f)
 			{
 				fprintf(f, "GARBAGE this=%p rot=(%g,%g,%g,%g) scl=(%g,%g,%g) trn=(%g,%g,%g)\n  world=[%g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g]\n  stack:",

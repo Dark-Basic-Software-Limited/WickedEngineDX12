@@ -195,7 +195,8 @@ namespace wi::helper
 		std::string directory;
 		if (name.empty())
 		{
-			directory = std::filesystem::current_path().string() + "/screenshots";
+			// GGMAX 3.35i: beside the EXE, not the CWD - a file dialog used to move this.
+			directory = GetDirectoryFromPath(GetExecutablePath()) + "screenshots";
 		}
 		else
 		{
@@ -1371,6 +1372,12 @@ namespace wi::helper
 		auto path = std::filesystem::current_path();
 		return FromWString(path.generic_wstring());
 #endif // PLATFORM_PS5
+	}
+
+	std::string GetDiagnosticPath(const std::string& filename)
+	{
+		// GGMAX 3.35i - see the header for why this must not use the current directory.
+		return GetDirectoryFromPath(GetExecutablePath()) + filename;
 	}
 
 	std::string GetExecutablePath()

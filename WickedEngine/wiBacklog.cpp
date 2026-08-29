@@ -71,7 +71,10 @@ namespace wi::backlog
 
 			if (logfile_path.empty() || !wi::helper::DirectoryExists(wi::helper::GetDirectoryFromPath(logfile_path)))
 			{
-				filename = wi::helper::GetCurrentPath() + "/log.txt";
+				// GGMAX 3.35i: beside the EXE, not the CWD. This log moved between Max/ and
+				// Max/Files/ inside a single session, which also made the device-lost dialog's
+				// own "see Files/log.txt" advice wrong about half the time.
+				filename = wi::helper::GetDiagnosticPath("log.txt");
 			}
 			else
 			{

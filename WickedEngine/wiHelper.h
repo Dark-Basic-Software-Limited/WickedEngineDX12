@@ -143,6 +143,22 @@ namespace wi::helper
 	std::string GetCurrentPath();
 	std::string GetExecutablePath();
 
+	// ★★★ GGMAX 3.35i: where a diagnostic/temp file belongs - beside the EXE, never the CWD.
+	//
+	// Returns <directory of the running executable>/<filename>. NOT a build-time constant and NOT
+	// tied to any one machine: GetExecutablePath uses GetModuleFileName, so it resolves at runtime
+	// to wherever the build actually sits, on any drive, on a tester's PC as readily as here.
+	//
+	// ⚠ The thing it exists to avoid is the CURRENT DIRECTORY. GameGuru sets the CWD to Files at
+	// startup, but several editor paths change it again and Windows FILE DIALOGS change it too - so
+	// anything that resolves a relative path at write time lands wherever the last dialog left the
+	// process. Evidence: 8 byte-identical blank screenshots accumulated in the exe root over six
+	// months, and log.txt was observed in two different folders within one session.
+	//
+	// Lee's reason for wanting them all in one place (2026-08-29): every AI-generated temp, script
+	// and debug file then sits together in the root, and shipping means deleting one obvious set.
+	std::string GetDiagnosticPath(const std::string& filename);
+
 	struct FileDialogParams
 	{
 		enum TYPE

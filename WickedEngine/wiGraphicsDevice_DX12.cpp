@@ -4793,6 +4793,22 @@ std::mutex queue_locker;
 
 		pso->desc = *desc;
 
+		// GGMAX: a shader whose load failed or has not completed yet has a null internal_state;
+		// building a PSO from it read through null and crashed a LoadShaders job thread.
+		// Refuse with a named stage instead - the PSO stays invalid and the caller survives.
+		{
+			const Shader* gg_stage_shaders[] = { pso->desc.vs, pso->desc.ps, pso->desc.hs, pso->desc.ds, pso->desc.gs, pso->desc.ms, pso->desc.as };
+			static const char* gg_stage_names[] = { "vs", "ps", "hs", "ds", "gs", "ms", "as" };
+			for (int gg_i = 0; gg_i < 7; ++gg_i)
+			{
+				if (gg_stage_shaders[gg_i] != nullptr && gg_stage_shaders[gg_i]->internal_state == nullptr)
+				{
+					wi::backlog::post(std::string("CreatePipelineState refused: stage '") + gg_stage_names[gg_i] + "' has no loaded shader (load failed or not yet complete)", wi::backlog::LogLevel::Error);
+					return false;
+				}
+			}
+		}
+
 		auto& stream = internal_state->stream;
 		//stream.stream1.Flags |= D3D12_PIPELINE_STATE_FLAG_DYNAMIC_DEPTH_BIAS; // doesn't work on windows 10
 		if (pso->desc.vs != nullptr)

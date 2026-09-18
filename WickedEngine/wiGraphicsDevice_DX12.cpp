@@ -6120,11 +6120,27 @@ std::mutex queue_locker;
 	{
 		if (gg_infoQueue == nullptr)
 			return;
-		const UINT64 count = gg_infoQueue->GetNumStoredMessages();
-		if (count == 0)
+		// GGMAX 3.52: the Get/Get/Clear trio is NOT atomic and other threads keep pushing,
+		// so GetNumStoredMessages can hand back nonsense - observed 18446744073709551602,
+		// which is (UINT64)-14. Looping to that spins ~1.8e19 times and the app goes
+		// "Not Responding" with no crash and no clue. Serialise the drain and CLAMP it:
+		// a diagnostic must never be able to hang the thing it is diagnosing.
+		static std::mutex gg_drain_mutex;
+		std::scoped_lock gg_drain_lock(gg_drain_mutex);
+		const UINT64 GG_DRAIN_CAP = 256;
+		UINT64 stored = gg_infoQueue->GetNumStoredMessages();
+		if (stored == 0)
 			return;
-		wilog_error("---- D3D12 validation layer: %llu message(s) at [%s] ----",
-			(unsigned long long)count, context ? context : "?");
+		const bool gg_bogus = (stored > 1000000ull);   // not a plausible message count
+		UINT64 count = stored;
+		if (count > GG_DRAIN_CAP) count = GG_DRAIN_CAP;
+		if (gg_bogus)
+		{
+			wilog_error("---- D3D12 validation: implausible stored count %llu, reading %llu ----",
+				(unsigned long long)stored, (unsigned long long)count);
+		}
+		wilog_error("---- D3D12 validation layer: %llu message(s)%s at [%s] ----",
+			(unsigned long long)count, (stored > count) ? " (CAPPED)" : "", context ? context : "?");
 		for (UINT64 i = 0; i < count; ++i)
 		{
 			SIZE_T len = 0;
@@ -6439,6 +6455,17 @@ std::mutex queue_locker;
 			if (gg_submit_ms_stall > gg_stall_max_ms) gg_stall_max_ms = gg_submit_ms_stall;
 			gg_stall_frames++;
 			if (gg_submit_ms_stall > 0.05f) gg_stall_nonzero++;
+		}
+
+		// GGMAX 3.52: DRAIN THE VALIDATION LAYER EVERY FRAME (when it is on at all).
+		// It used to drain only on a Close() failure or a device REMOVAL. Lee's 2026-09-18
+		// repro - River Raiders then Island Showdown - corrupts the picture and never removes
+		// the device, so neither trigger fires and the layer's account of what went wrong was
+		// collected and then thrown away. Costs a GetNumStoredMessages() per frame and returns
+		// immediately when the layer is off (gg_infoQueue is null unless -debugdevice).
+		if (gg_infoQueue != nullptr)
+		{
+			gg_DrainValidationMessages("frame");
 		}
 	}
 

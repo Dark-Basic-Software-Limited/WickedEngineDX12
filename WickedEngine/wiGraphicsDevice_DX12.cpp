@@ -5996,6 +5996,10 @@ std::mutex queue_locker;
 		}
 	}
 
+	// GGMAX 3.53: shared by BeginCommandList and SubmitCommandLists - see the notes at both.
+	static std::atomic<int> gg_submit_depth{ 0 };
+	static std::atomic<int> gg_begin_during_submit{ 0 };
+
 	CommandList GraphicsDevice_DX12::BeginCommandList(QUEUE_TYPE queue)
 	{
 		HRESULT hr;
@@ -6006,6 +6010,20 @@ std::mutex queue_locker;
 			queue = QUEUE_GRAPHICS;
 		}
 
+		// GGMAX 3.53: SubmitCommandLists sets cmd_count = 0 as its FIRST act, so a Begin that
+		// lands while a submit is running is handed a list the submit is about to close - and
+		// resets that list's allocator out from under it. That is E_INVALIDARG from
+		// commandList->Reset (seen 20x), a list left CLOSED, every later record failing with
+		// id547, and its Close() failing. Prove or kill it.
+		if (gg_submit_depth.load() > 0)
+		{
+			if (gg_begin_during_submit.fetch_add(1) < 8)
+			{
+				wilog_error("GGMAX 3.53: BeginCommandList DURING SubmitCommandLists - cmd_count=%u, thread=%u",
+					(unsigned)cmd_count,
+					(unsigned)std::hash<std::thread::id>{}(std::this_thread::get_id()));
+			}
+		}
 		cmd_locker.lock();
 		uint32_t cmd_current = cmd_count++;
 		if (cmd_current >= commandlists.size())
@@ -6157,6 +6175,28 @@ std::mutex queue_locker;
 
 	void GraphicsDevice_DX12::SubmitCommandLists()
 	{
+		// GGMAX 3.53: IS RENDERING BEING RE-ENTERED?
+		// gridedit_load_map() pumps whole frames mid-load (Sync() / EmptyMessages(), many times).
+		// If that nested frame submits while an outer frame is still recording, it closes the
+		// outer frame's lists underneath it; the outer code then keeps recording into closed
+		// lists (D3D12 id547) and their Close() fails - which is exactly the contiguous tail
+		// 5..15 the close-failure diagnostic below reports. This says yes or no, once.
+		struct GGSubmitDepth
+		{
+			std::atomic<int>& d;
+			GGSubmitDepth(std::atomic<int>& x) : d(x) { ++d; }
+			~GGSubmitDepth() { --d; }
+		} gg_depth_guard(gg_submit_depth);
+		if (gg_submit_depth.load() > 1)
+		{
+			static std::atomic<int> gg_reentry_reported{ 0 };
+			if (gg_reentry_reported.fetch_add(1) < 8)
+			{
+				wilog_error("GGMAX 3.53: SubmitCommandLists RE-ENTERED, depth=%d, cmd_count=%u, thread=%u",
+					gg_submit_depth.load(), (unsigned)cmd_count,
+					(unsigned)std::hash<std::thread::id>{}(std::this_thread::get_id()));
+			}
+		}
 #ifdef PLATFORM_XBOX
 		std::scoped_lock lock(queue_locker); // queue operations are not thread-safe on XBOX
 #endif // PLATFORM_XBOX

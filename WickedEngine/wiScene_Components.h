@@ -1941,6 +1941,11 @@ namespace wi::scene
 		float fogHeightEnd = 3;
 		float gg_fog_opacity = 0; // GGMAX 1.65: DX11 FogA — scales/steers fog color, see fogHF.hlsli
 		XMFLOAT3 windDirection = XMFLOAT3(0, 0, 0);
+		// GGMAX 3.57: object-path wind scale (tree sway). Feeds ShaderWind::gg_object_space_rcp
+		// / gg_object_amplitude. 1.0/1.0 = stock behaviour. Not serialized, same as gg_fog_opacity
+		// above - GameGuru recomputes it from visuals.tree_wind on every visuals update.
+		float gg_objectWindSpaceRcp = 1.0f;
+		float gg_objectWindAmplitude = 1.0f;
 		float windRandomness = 5;
 		float windWaveSize = 1;
 		float windSpeed = 1;

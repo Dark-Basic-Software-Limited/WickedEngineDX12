@@ -1106,6 +1106,8 @@ namespace wi::scene
 		shaderscene.weather.wind.randomness = weather.windRandomness;
 		shaderscene.weather.wind.wavesize = weather.windWaveSize;
 		shaderscene.weather.wind.direction = weather.windDirection;
+		shaderscene.weather.wind.gg_object_space_rcp = weather.gg_objectWindSpaceRcp;  // GGMAX 3.57
+		shaderscene.weather.wind.gg_object_amplitude = weather.gg_objectWindAmplitude; // GGMAX 3.57
 		shaderscene.weather.atmosphere = weather.atmosphereParameters;
 		shaderscene.weather.volumetric_clouds = weather.volumetricCloudParameters;
 		shaderscene.weather.ocean.water_color = weather.oceanParameters.waterColor;

@@ -416,7 +416,7 @@ struct VertexSurface
 		[branch]
 		if (material.IsUsingWind())
 		{
-			position.xyz += sample_wind(position.xyz, pos_wind.w);
+			position.xyz += sample_wind_object(position.xyz, pos_wind.w); // GGMAX 3.57: GG-scaled object wind
 		}
 #endif // DISABLE_WIND
 	}

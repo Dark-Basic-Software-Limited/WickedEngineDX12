@@ -337,8 +337,14 @@ struct alignas(16) ShaderWind
 
 	float wavesize;
 	float randomness;
-	float padding0;
-	float padding1;
+	// GGMAX 3.57: object-path wind scale, used ONLY by sample_wind_object (see globals.hlsli).
+	// GameGuru is 39.37 world units per metre; stock Wicked wind is authored for 1 unit per
+	// metre, so the raw field gives ~2.5 cm of travel with a ~5 cm spatial period here - shimmer,
+	// not sway. These two scalars stretch the lookup and the amplitude for the object path only.
+	// Both default to 1.0, and bare sample_wind (grass, rain, spring bones) never reads them,
+	// so nothing outside the tree path changes.
+	float gg_object_space_rcp;   // multiply the lookup position by this (1 / wavelength-ish)
+	float gg_object_amplitude;   // multiply the resulting displacement by this, in world units
 };
 
 struct alignas(16) ShaderOcean

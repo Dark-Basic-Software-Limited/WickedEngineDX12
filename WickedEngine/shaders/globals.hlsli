@@ -2103,6 +2103,48 @@ float3 sample_wind_prev(float3 position, float weight)
 	}
 }
 
+// GGMAX 3.57: OBJECT-PATH wind, used by every material with USE_WIND (objectHF + surfaceHF).
+// Differs from bare sample_wind in two deliberate ways, both required at GameGuru world scale:
+//   1. the lookup position is scaled, so the gust field has a usable wavelength instead of the
+//      stock ~5 cm one (the volume mirror-wraps every 1.0 in texcoord space);
+//   2. the wind DIRECTION is normalized and the amplitude comes from gg_object_amplitude, so
+//      tree sway strength is OUR scalar and does not ride on |windDirection| - that vector is
+//      shared with grass, rain and spring bones and must not be inflated to drive trees.
+// With the 1.0/1.0 defaults this still returns a sane (small) displacement, so a material that
+// enables wind before GameGuru sets the scalars degrades quietly rather than exploding.
+float3 gg_wind_direction_unit()
+{
+	const float3 dir = GetWeather().wind.direction;
+	const float len = length(dir);
+	return (len > 1e-6f) ? (dir / len) : float3(1, 0, 0);
+}
+float3 sample_wind_object(float3 position, float weight)
+{
+	[branch]
+	if (weight > 0)
+	{
+		const float n = texture_wind.SampleLevel(sampler_linear_mirror, position * GetWeather().wind.gg_object_space_rcp, 0).r;
+		return n * gg_wind_direction_unit() * weight * GetWeather().wind.gg_object_amplitude;
+	}
+	else
+	{
+		return 0;
+	}
+}
+float3 sample_wind_object_prev(float3 position, float weight)
+{
+	[branch]
+	if (weight > 0)
+	{
+		const float n = texture_wind_prev.SampleLevel(sampler_linear_mirror, position * GetWeather().wind.gg_object_space_rcp, 0).r;
+		return n * gg_wind_direction_unit() * weight * GetWeather().wind.gg_object_amplitude;
+	}
+	else
+	{
+		return 0;
+	}
+}
+
 
 static const float4 halton64[] = {
 	float4(0.5000000000f, 0.3333333333f, 0.2000000000f, 0.1428571429f),

@@ -1084,9 +1084,10 @@ struct Surface
 		[branch]
 		if (material.IsUsingWind())
 		{
-			pre0 += sample_wind_prev(pre0, data0.w);
-			pre1 += sample_wind_prev(pre1, data1.w);
-			pre2 += sample_wind_prev(pre2, data2.w);
+			// GGMAX 3.57: must track objectHF exactly or motion vectors disagree with the raster.
+			pre0 += sample_wind_object_prev(pre0, data0.w);
+			pre1 += sample_wind_object_prev(pre1, data1.w);
+			pre2 += sample_wind_object_prev(pre2, data2.w);
 		}
 		pre = attribute_at_bary(pre0, pre1, pre2, bary);
 #else
@@ -1158,9 +1159,9 @@ struct Surface
 		[branch]
 		if (material.IsUsingWind())
 		{
-			P0 += sample_wind(P0, data0.w);
-			P1 += sample_wind(P1, data1.w);
-			P2 += sample_wind(P2, data2.w);
+			P0 += sample_wind_object(P0, data0.w); // GGMAX 3.57
+			P1 += sample_wind_object(P1, data1.w);
+			P2 += sample_wind_object(P2, data2.w);
 		}
 #endif // SURFACE_LOAD_ENABLE_WIND
 
@@ -1194,9 +1195,9 @@ struct Surface
 		[branch]
 		if (material.IsUsingWind())
 		{
-			P0 += sample_wind(P0, data0.w);
-			P1 += sample_wind(P1, data1.w);
-			P2 += sample_wind(P2, data2.w);
+			P0 += sample_wind_object(P0, data0.w); // GGMAX 3.57
+			P1 += sample_wind_object(P1, data1.w);
+			P2 += sample_wind_object(P2, data2.w);
 		}
 #endif // SURFACE_LOAD_ENABLE_WIND
 

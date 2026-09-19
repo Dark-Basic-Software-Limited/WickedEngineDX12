@@ -1084,10 +1084,24 @@ struct Surface
 		[branch]
 		if (material.IsUsingWind())
 		{
-			// GGMAX 3.57: must track objectHF exactly or motion vectors disagree with the raster.
-			pre0 += sample_wind_object_prev(pre0, data0.w);
-			pre1 += sample_wind_object_prev(pre1, data1.w);
-			pre2 += sample_wind_object_prev(pre2, data2.w);
+			// GGMAX 3.57/3.58b: must track objectHF EXACTLY or motion vectors disagree with the
+			// raster and TAA/FSR smears the canopy. data0.xyz is the object-space position, so the
+			// ramp is the same expression objectHF uses; the mesh does not deform, so using the
+			// current object position for the previous frame's ramp is exact.
+			const float ggMatWind = asfloat(material.userdata.x);
+			const float ggAmp = gg_tree_wind_amplitude(ggMatWind);
+			const float ggScaleY = inst.transformPrev.GetMatrix()[1][1];
+			float ggW0 = data0.w, ggW1 = data1.w, ggW2 = data2.w;
+			[branch]
+			if (ggMatWind > 0)
+			{
+				ggW0 = gg_tree_wind_weight(data0.y, ggScaleY);
+				ggW1 = gg_tree_wind_weight(data1.y, ggScaleY);
+				ggW2 = gg_tree_wind_weight(data2.y, ggScaleY);
+			}
+			pre0 += sample_wind_object_prev(pre0, ggW0, ggAmp);
+			pre1 += sample_wind_object_prev(pre1, ggW1, ggAmp);
+			pre2 += sample_wind_object_prev(pre2, ggW2, ggAmp);
 		}
 		pre = attribute_at_bary(pre0, pre1, pre2, bary);
 #else
@@ -1159,9 +1173,21 @@ struct Surface
 		[branch]
 		if (material.IsUsingWind())
 		{
-			P0 += sample_wind_object(P0, data0.w); // GGMAX 3.57
-			P1 += sample_wind_object(P1, data1.w);
-			P2 += sample_wind_object(P2, data2.w);
+			// GGMAX 3.57/3.58b: same expression as objectHF - see the note in the prev block.
+			const float ggMatWind = asfloat(material.userdata.x);
+			const float ggAmp = gg_tree_wind_amplitude(ggMatWind);
+			const float ggScaleY = inst.transform.GetMatrix()[1][1];
+			float ggW0 = data0.w, ggW1 = data1.w, ggW2 = data2.w;
+			[branch]
+			if (ggMatWind > 0)
+			{
+				ggW0 = gg_tree_wind_weight(data0.y, ggScaleY);
+				ggW1 = gg_tree_wind_weight(data1.y, ggScaleY);
+				ggW2 = gg_tree_wind_weight(data2.y, ggScaleY);
+			}
+			P0 += sample_wind_object(P0, ggW0, ggAmp);
+			P1 += sample_wind_object(P1, ggW1, ggAmp);
+			P2 += sample_wind_object(P2, ggW2, ggAmp);
 		}
 #endif // SURFACE_LOAD_ENABLE_WIND
 
@@ -1195,9 +1221,21 @@ struct Surface
 		[branch]
 		if (material.IsUsingWind())
 		{
-			P0 += sample_wind_object(P0, data0.w); // GGMAX 3.57
-			P1 += sample_wind_object(P1, data1.w);
-			P2 += sample_wind_object(P2, data2.w);
+			// GGMAX 3.57/3.58b: same expression as objectHF - see the note in the prev block.
+			const float ggMatWind = asfloat(material.userdata.x);
+			const float ggAmp = gg_tree_wind_amplitude(ggMatWind);
+			const float ggScaleY = inst.transform.GetMatrix()[1][1];
+			float ggW0 = data0.w, ggW1 = data1.w, ggW2 = data2.w;
+			[branch]
+			if (ggMatWind > 0)
+			{
+				ggW0 = gg_tree_wind_weight(data0.y, ggScaleY);
+				ggW1 = gg_tree_wind_weight(data1.y, ggScaleY);
+				ggW2 = gg_tree_wind_weight(data2.y, ggScaleY);
+			}
+			P0 += sample_wind_object(P0, ggW0, ggAmp);
+			P1 += sample_wind_object(P1, ggW1, ggAmp);
+			P2 += sample_wind_object(P2, ggW2, ggAmp);
 		}
 #endif // SURFACE_LOAD_ENABLE_WIND
 

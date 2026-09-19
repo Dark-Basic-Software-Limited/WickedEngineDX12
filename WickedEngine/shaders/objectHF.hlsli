@@ -416,7 +416,17 @@ struct VertexSurface
 		[branch]
 		if (material.IsUsingWind())
 		{
-			position.xyz += sample_wind_object(position.xyz, pos_wind.w); // GGMAX 3.57: GG-scaled object wind
+			// GGMAX 3.57 GG-scaled object wind; 3.58b per-material variant for entity trees.
+			// pos_wind.xyz is still OBJECT space here (it is transformed at :404 into `position`),
+			// which is what lets the height ramp be computed without a wind-weight vertex stream.
+			const float ggMatWind = asfloat(material.userdata.x);
+			float ggWeight = pos_wind.w;
+			[branch]
+			if (ggMatWind > 0)
+			{
+				ggWeight = gg_tree_wind_weight(pos_wind.y, input.GetInstance().transform.GetMatrix()[1][1]);
+			}
+			position.xyz += sample_wind_object(position.xyz, ggWeight, gg_tree_wind_amplitude(ggMatWind));
 		}
 #endif // DISABLE_WIND
 	}

@@ -2103,6 +2103,44 @@ float3 sample_wind_prev(float3 position, float weight)
 	}
 }
 
+// GGMAX 3.58b: PER-MATERIAL tree sway, for imported tree ENTITIES.
+//
+// DX11 had a second sway path for entity trees: assigning the "Tree Animate Doublesided"
+// material shader baked a per-material "Object Wind" value, and its shader used that value when
+// the global Tree Wind was zero. That is why DX11 levels sway with visuals.tree_wind=0, and why
+// those levels went still in DX12 (that shader path is dead here - it silently compiles against
+// the engine objectHF, not GameGuru's). We reproduce the BEHAVIOUR through the engine wind
+// instead of reviving the shader.
+//
+// The material carries its "Object Wind" in userdata.x as float bits. 0 = not a GG object tree,
+// which is every other material in the game, so the ordinary path is untouched.
+// ⚠ These three constants MUST match the C++ side (GGTrees_part2.cpp AppendTreeVerts for the
+//   pin/ref heights, wickedcalls_part3.cpp GG_TREE_SWAY_AMPLITUDE for the reference amplitude).
+#define GG_TREE_WIND_PIN_HEIGHT 120.0   // DX11: clamp((posy - 120) * 0.35, ...) - trunk base is pinned
+#define GG_TREE_WIND_REF_HEIGHT 480.0   // rise over which the weight reaches 1.0 (600-unit tree tops out)
+#define GG_TREE_WIND_AMP_REF     70.0   // world units of travel at DX11 wind 1.0
+
+// Height ramp computed IN THE SHADER rather than from vertex data, so an imported mesh needs no
+// rebuild and no wind-weight stream. objectSpaceY is scaled by the instance the same way DX11
+// did it (mpos.y *= WORLD[1][1]), so a scaled-up tree gets proportionally more of itself moving.
+float gg_tree_wind_weight(float objectSpaceY, float instanceScaleY)
+{
+	return saturate((objectSpaceY * instanceScaleY - GG_TREE_WIND_PIN_HEIGHT) / GG_TREE_WIND_REF_HEIGHT);
+}
+
+// Reproduces DX11 exactly: the GLOBAL wind wins when non-zero (scaled by the material value), and
+// the material value SQUARES itself when the global is zero. DX11:
+//   baseWind = isZeroWind*param + isNonZeroWind*treeWind;  wind = baseWind * param;
+// Keeping the combination here rather than baking it C++-side is what keeps the Tree Wind
+// Modifier slider live for entity trees too.
+float gg_tree_wind_amplitude(float matWind)
+{
+	const float globalAmp = GetWeather().wind.gg_object_amplitude;
+	if (matWind <= 0) return globalAmp;                       // ordinary vegetation: global only
+	return (globalAmp > 0) ? (globalAmp * matWind)
+	                       : (matWind * matWind * GG_TREE_WIND_AMP_REF);
+}
+
 // GGMAX 3.57: OBJECT-PATH wind, used by every material with USE_WIND (objectHF + surfaceHF).
 // Differs from bare sample_wind in two deliberate ways, both required at GameGuru world scale:
 //   1. the lookup position is scaled, so the gust field has a usable wavelength instead of the
@@ -2118,26 +2156,26 @@ float3 gg_wind_direction_unit()
 	const float len = length(dir);
 	return (len > 1e-6f) ? (dir / len) : float3(1, 0, 0);
 }
-float3 sample_wind_object(float3 position, float weight)
+float3 sample_wind_object(float3 position, float weight, float amplitude)
 {
 	[branch]
 	if (weight > 0)
 	{
 		const float n = texture_wind.SampleLevel(sampler_linear_mirror, position * GetWeather().wind.gg_object_space_rcp, 0).r;
-		return n * gg_wind_direction_unit() * weight * GetWeather().wind.gg_object_amplitude;
+		return n * gg_wind_direction_unit() * weight * amplitude;
 	}
 	else
 	{
 		return 0;
 	}
 }
-float3 sample_wind_object_prev(float3 position, float weight)
+float3 sample_wind_object_prev(float3 position, float weight, float amplitude)
 {
 	[branch]
 	if (weight > 0)
 	{
 		const float n = texture_wind_prev.SampleLevel(sampler_linear_mirror, position * GetWeather().wind.gg_object_space_rcp, 0).r;
-		return n * gg_wind_direction_unit() * weight * GetWeather().wind.gg_object_amplitude;
+		return n * gg_wind_direction_unit() * weight * amplitude;
 	}
 	else
 	{

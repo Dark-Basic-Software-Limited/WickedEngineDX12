@@ -1202,6 +1202,16 @@ namespace wi::renderer
 
 
 
+	// GGMAX 3.66: allow the shadow atlas to shrink ONCE, the next time the packer asks for at most
+	// half of it. The allocation is otherwise grow-only, so one light-heavy level pins its size
+	// (260 MB on the hub demos) for the rest of the process.
+	// Call at a level load. It only sets a flag, so it is safe from anywhere and at any point in
+	// the frame - the resize itself happens where every other atlas resize already happens.
+	// ⚠ Do NOT "improve" this by releasing the atlas at the call site: the rebuild lands in the
+	// same frame, before the incoming level's visuals are applied, and captures the OUTGOING
+	// level's cascade resolution. Reasoning and the trace are at the definition.
+	void GG_ArmShadowAtlasShrink();
+
 	void SetShadowProps2D(int max_resolution);
 	void SetShadowPropsCube(int max_resolution);
 	// GGMAX 2.07: spot/rect shadow resolution knob (was riding SetShadowProps2D = the sun cascade res).

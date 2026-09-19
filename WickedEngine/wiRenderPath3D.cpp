@@ -12,7 +12,6 @@ using namespace wi::ecs;
 
 namespace wi
 {
-	namespace graphics { extern bool gg_dred_armed; } // GGMAX 2.05: defined in wiGraphicsDevice_DX12.cpp
 
 	static constexpr float foreground_depth_range = 0.01f;
 
@@ -43,20 +42,16 @@ namespace wi
 	{
 		RenderPath2D::DeleteGPUResources();
 
-		// GGMAX 2.05 DIAGNOSTIC (standalone-play DEVICE_HUNG hunt, DRED-armed only): keep
-		// every generation of the depth-history chain alive for the process lifetime. The
-		// page-fault VA matched freed depthBuffer_Copy1/rtLinearDepth in 11/11 dumps — if
-		// the hang STOPS with this leak, the faulted resource is one of these (a reader
-		// holds a stale texture_depth_index_prev-style bindless index across the resize);
-		// if it PERSISTS, the depth chain is exonerated. Remove once the hunt closes.
-		if (wi::graphics::gg_dred_armed)
-		{
-			static wi::vector<wi::graphics::Texture> gg_depth_keepalive;
-			if (depthBuffer_Main.IsValid()) gg_depth_keepalive.push_back(depthBuffer_Main);
-			if (depthBuffer_Copy.IsValid()) gg_depth_keepalive.push_back(depthBuffer_Copy);
-			if (depthBuffer_Copy1.IsValid()) gg_depth_keepalive.push_back(depthBuffer_Copy1);
-			if (rtLinearDepth.IsValid()) gg_depth_keepalive.push_back(rtLinearDepth);
-		}
+		// GGMAX 3.66: the GGMAX 2.05 depth-chain keep-alive lived here. It was an explicitly
+		// TEMPORARY diagnostic for the standalone-play DEVICE_HUNG hunt ("Remove once the hunt
+		// closes") that pushed all four depth textures into a static vector on every
+		// DeleteGPUResources and never released them. The hunt closed - the faulted resource was
+		// a terrain material DDS freed at the level-load set swap, not the depth chain, which the
+		// diagnostic itself exonerated - but the leak stayed.
+		// It was gated on gg_dred_armed, so only machines with dred.txt present paid it; that is
+		// every developer machine, including the one all the VRAM baselines were measured on. The
+		// 19-demo census caught it as depthBuffer_Main/_Copy/_Copy1/rtLinearDepth going from 2
+		// live copies each to 4 (+67 MB) across a session.
 
 		rtMain = {};
 		rtMain_render = {};

@@ -327,6 +327,30 @@ int gg_super_quick_objects = 0;
 
 Texture shadowMapAtlas;
 Texture shadowMapAtlas_Transparent;
+// GGMAX 3.66: one-shot permission for the shadow atlas to get SMALLER. See GG_ArmShadowAtlasShrink.
+static bool gg_shadowAtlasShrinkArmed = false;
+static int gg_shadowAtlasShrinkReports = 0; // GGMAX 3.66 DIAG
+
+// GGMAX 3.66 DIAG (temporary - remove with the two GGATLAS call sites). Append+flush to
+// gg_atlas.txt beside the EXE. NOT wi::backlog: that only writes its file from its destructor,
+// which a harness taskkill never reaches, so the first attempt at this trace produced an empty
+// log and looked exactly like instrumentation that had not run.
+static void gg_atlas_trace(const char* msg)
+{
+	// OPT-IN, same convention as dred.txt / leakterraintex.txt: does nothing unless a file named
+	// gg_atlas_trace.txt sits beside the EXE. The shadow-atlas investigation is UNFINISHED (the
+	// packer asks for 12288x4096 for a level that asks for 5120x1024 when loaded cold, stable
+	// across the whole settle), so this stays in the tree ready to arm rather than being deleted
+	// and rewritten from scratch next time.
+	static const bool armed =
+		wi::helper::FileExists(wi::helper::GetDirectoryFromPath(wi::helper::GetExecutablePath()) + "gg_atlas_trace.txt");
+	if (!armed) return;
+	FILE* f = fopen(wi::helper::GetDiagnosticPath("gg_atlas.txt").c_str(), "a");
+	if (f == nullptr) return;
+	fprintf(f, "%s\n", msg);
+	fflush(f);
+	fclose(f);
+}
 
 // GGMAX: does ANYTHING actually render into the transparent shadow atlas? The atlas is an
 // RGBA16F render target sized with the shadow packer — measured at 512 MB on four hub demos,
@@ -5231,8 +5255,65 @@ void UpdateVisibility(Visibility& vis)
 						d.type = (int)vis.scene->lights[dbg_li].GetType();
 					}
 
-					if ((int)shadowMapAtlas.desc.width < vis.shadow_packer.width || (int)shadowMapAtlas.desc.height < vis.shadow_packer.height)
+					// GGMAX 3.66: this used to be grow-only, and nothing anywhere made the atlas smaller. One
+					// light-heavy level therefore pinned its size for the rest of the process - 16384x4096 =
+					// 260 MB across the hub demos, on levels whose own packer wants 20 MB.
+					// A SHRINK IS THE SAME OPERATION AS A GROW - the identical CreateTexture on the identical
+					// global, at the identical point in the frame - so it carries no risk the grow path does
+					// not already carry every time a level gets heavier.
+					// It is gated twice so it cannot thrash. (a) gg_shadowAtlasShrinkArmed is a ONE-SHOT set
+					// at a level load and consumed by the first shrink, so nothing shrinks while simply flying
+					// around a level; (b) the packer must want at most HALF the current atlas in a dimension,
+					// so a marginal difference is ignored. If a shrink lands too small because it fired during
+					// the load, the ordinary grow path corrects it on the next frame.
+					const bool gg_atlasGrow = (int)shadowMapAtlas.desc.width < vis.shadow_packer.width
+						|| (int)shadowMapAtlas.desc.height < vis.shadow_packer.height;
+					const bool gg_atlasShrink = !gg_atlasGrow && gg_shadowAtlasShrinkArmed
+						&& ((int)shadowMapAtlas.desc.width >= vis.shadow_packer.width * 2
+							|| (int)shadowMapAtlas.desc.height >= vis.shadow_packer.height * 2);
+					// Report the first evaluation after arming and then every ~1500 frames, up to 8 times: the
+					// number that matters is the packer size once the level has SETTLED, which is tens of
+					// seconds after the arm, and a one-shot report only ever showed the arm-time value.
+					const bool gg_reportNow = gg_shadowAtlasShrinkArmed && !gg_atlasGrow && !gg_atlasShrink
+						&& gg_shadowAtlasShrinkReports < 8
+						&& (gg_shadowAtlasShrinkReports == 0 || (device->GetFrameCount() % 1500) == 0);
+					if (gg_reportNow)
 					{
+						gg_shadowAtlasShrinkReports++;
+						char gg_msg[224];
+						snprintf(gg_msg, sizeof(gg_msg),
+							"GGATLAS noshrink: atlas %ux%u packer %dx%d (need packer*2 <= atlas) rects=%d frame=%llu",
+							shadowMapAtlas.desc.width, shadowMapAtlas.desc.height,
+							vis.shadow_packer.width, vis.shadow_packer.height,
+							(int)vis.shadow_packer.rects.size(), (unsigned long long)device->GetFrameCount());
+						gg_atlas_trace(gg_msg);
+					}
+					if (gg_atlasGrow || gg_atlasShrink)
+					{
+						if (gg_atlasShrink) gg_shadowAtlasShrinkArmed = false;
+						// NOTE on the shadow caches (localShadowCacheAtlasW/H below, and the sun's
+						// delayedShadowState): both key on the atlas DIMENSIONS rather than on texture identity,
+						// and that stays correct here BY CONSTRUCTION - a grow requires the atlas to be smaller
+						// than the packer and a shrink requires it to be at least twice as large, so either way
+						// the new dimensions differ from the old and both caches notice. (An earlier attempt at
+						// this fix released the atlas outright, which made same-dimension recreation reachable and
+						// would have needed both caches invalidated by hand.)
+						// GGMAX 3.66 DIAG (temporary): name what drives the atlas size. Prints the outgoing size,
+						// the packer size that forced the new one, how many shadow rects packed and how many lights
+						// were visible - so a release immediately undone by the OUTGOING level's lights is
+						// distinguishable from a level that genuinely needs a big atlas.
+						{
+							int gg_packed = 0;
+							for (auto& rr : vis.shadow_packer.rects) if (rr.was_packed) gg_packed++;
+							char gg_msg[256];
+							snprintf(gg_msg, sizeof(gg_msg),
+								"GGATLAS create: %ux%u -> %dx%d  packedrects=%d/%d visiblelights=%d frame=%llu",
+								shadowMapAtlas.desc.width, shadowMapAtlas.desc.height,
+								vis.shadow_packer.width, vis.shadow_packer.height,
+								gg_packed, (int)vis.shadow_packer.rects.size(),
+								(int)vis.visibleLights.size(), (unsigned long long)device->GetFrameCount());
+							gg_atlas_trace(gg_msg);
+						}
 						TextureDesc desc;
 						desc.width = uint32_t(vis.shadow_packer.width);
 						desc.height = uint32_t(vis.shadow_packer.height);
@@ -8187,6 +8268,34 @@ void DrawLensFlares(
 	device->EventEnd(cmd);
 }
 
+
+// GGMAX 3.66: arm a ONE-SHOT shrink of the shadow atlas, for the next level.
+//
+// THE ALLOCATION IS GROW-ONLY (see UpdateVisibility): nothing anywhere ever made the atlas
+// smaller, so one light-heavy level pinned its size for the rest of the process - 16384x4096 =
+// 260 MB across the hub demos, on levels whose own packer wants 20 MB.
+//
+// ⚠ THE OBVIOUS IMPLEMENTATION IS WRONG AND I SHIPPED IT FIRST. Releasing the atlas here does
+// not work: the caller runs in the game-logic Update phase and the atlas is REBUILT IN THE SAME
+// FRAME, while the scene still holds the OUTGOING level's state - in particular
+// max_shadow_resolution_2D, which the incoming level's visuals have not been applied to yet. The
+// new atlas therefore captures the previous level's cascade resolution and, being grow-only,
+// keeps it. Traced: releasing at a level load produced "release was 12288x4096" and "create ->
+// 12288x4096" on the SAME frame, for a level whose settled sun rect is 512x512.
+// The order cannot be fixed by moving the call, because "after the new level's visuals have been
+// applied" is not a point the loader exposes.
+//
+// So: do not release, ARM. The allocation is allowed to shrink once, whenever the packer next
+// asks for at most half the current atlas - which happens naturally after the new level's visuals
+// land and its own, smaller, shadow rects are packed. Order-independent by construction.
+// A shrink is the same CreateTexture on the same global at the same point in the frame as the
+// grow the engine already does whenever a level gets heavier, so it adds no new risk.
+void GG_ArmShadowAtlasShrink()
+{
+	gg_shadowAtlasShrinkArmed = true;
+	gg_shadowAtlasShrinkReports = 0;
+	gg_atlas_trace("GGATLAS arm: shrink armed");
+}
 
 void SetShadowProps2D(int resolution)
 {

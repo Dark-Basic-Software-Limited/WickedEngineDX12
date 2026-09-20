@@ -6678,19 +6678,26 @@ std::mutex queue_locker;
 					contextStrings.clear();
 					// GGMAX 2.03: array slots are not op indices — scan ALL contexts, the map
 					// keyed by BreadcrumbIndex does the range selection
-					for (uint32_t breadcrumbContext = 0; breadcrumbContext < pNode->BreadcrumbContextsCount; ++breadcrumbContext)
+					// GGMAX 3.69: pBreadcrumbContexts can be NULL while BreadcrumbContextsCount is non-zero
+					// (the driver kept breadcrumbs but no context strings). Reading it unguarded is the
+					// likeliest source of the 2026-09-16 AV recorded inside this very function.
+					if (pNode->pBreadcrumbContexts != nullptr)
 					{
-						const D3D12_DRED_BREADCRUMB_CONTEXT& context = pNode->pBreadcrumbContexts[breadcrumbContext];
-						contextStrings[context.BreadcrumbIndex] = context.pContextString;
+						for (uint32_t breadcrumbContext = 0; breadcrumbContext < pNode->BreadcrumbContextsCount; ++breadcrumbContext)
+						{
+							const D3D12_DRED_BREADCRUMB_CONTEXT& context = pNode->pBreadcrumbContexts[breadcrumbContext];
+							contextStrings[context.BreadcrumbIndex] = context.pContextString;
+						}
 					}
 
-					for (int op = firstOp; op <= lastOp; ++op)
+					// GGMAX 3.69: pCommandHistory can be null on a partially populated node.
+					for (int op = (pNode->pCommandHistory != nullptr ? firstOp : lastOp + 1); op <= lastOp; ++op)
 					{
 						D3D12_AUTO_BREADCRUMB_OP breadcrumbOp = pNode->pCommandHistory[op];
 
 						std::string contextString;
 						auto it = contextStrings.find(op);
-						if (it != contextStrings.end())
+						if (it != contextStrings.end() && it->second != nullptr) // GGMAX 3.69: null context string
 						{
 							wi::helper::StringConvert(it->second, contextString);
 						}

@@ -328,7 +328,11 @@ int gg_super_quick_objects = 0;
 Texture shadowMapAtlas;
 Texture shadowMapAtlas_Transparent;
 // GGMAX 3.66: one-shot permission for the shadow atlas to get SMALLER. See GG_ArmShadowAtlasShrink.
+// GGMAX 3.69: and the condition must HOLD for a run of frames before the arm is spent, so the
+// shrink lands on the settled level rather than on the one-light load transient.
 static bool gg_shadowAtlasShrinkArmed = false;
+static int gg_shadowAtlasShrinkStreak = 0;            // GGMAX 3.69: consecutive qualifying frames
+static constexpr int GG_SHADOW_SHRINK_SETTLE = 90;    // ~1.5 s at 60 fps
 static int gg_shadowAtlasShrinkReports = 0; // GGMAX 3.66 DIAG
 
 // GGMAX 3.66 DIAG (temporary - remove with the two GGATLAS call sites). Append+flush to
@@ -5295,9 +5299,14 @@ void UpdateVisibility(Visibility& vis)
 					// the load, the ordinary grow path corrects it on the next frame.
 					const bool gg_atlasGrow = (int)shadowMapAtlas.desc.width < vis.shadow_packer.width
 						|| (int)shadowMapAtlas.desc.height < vis.shadow_packer.height;
-					const bool gg_atlasShrink = !gg_atlasGrow && gg_shadowAtlasShrinkArmed
+					// GGMAX 3.69: qualifying is not enough - it has to keep qualifying. During a level load
+					// only the sun is visible for a few frames, which qualifies trivially and would spend the
+					// one-shot arm on a size the level is about to outgrow.
+					const bool gg_shrinkWanted = !gg_atlasGrow && gg_shadowAtlasShrinkArmed
 						&& ((int)shadowMapAtlas.desc.width >= vis.shadow_packer.width * 2
 							|| (int)shadowMapAtlas.desc.height >= vis.shadow_packer.height * 2);
+					if (gg_shrinkWanted) gg_shadowAtlasShrinkStreak++; else gg_shadowAtlasShrinkStreak = 0;
+					const bool gg_atlasShrink = gg_shrinkWanted && gg_shadowAtlasShrinkStreak >= GG_SHADOW_SHRINK_SETTLE;
 					// Report the first evaluation after arming and then every ~1500 frames, up to 8 times: the
 					// number that matters is the packer size once the level has SETTLED, which is tens of
 					// seconds after the arm, and a one-shot report only ever showed the arm-time value.
@@ -5309,10 +5318,12 @@ void UpdateVisibility(Visibility& vis)
 						gg_shadowAtlasShrinkReports++;
 						char gg_msg[224];
 						snprintf(gg_msg, sizeof(gg_msg),
-							"GGATLAS noshrink: atlas %ux%u packer %dx%d (need packer*2 <= atlas) rects=%d frame=%llu",
+							"GGATLAS noshrink: atlas %ux%u packer %dx%d (need packer*2 <= atlas) rects=%d streak=%d/%d frame=%llu",
 							shadowMapAtlas.desc.width, shadowMapAtlas.desc.height,
 							vis.shadow_packer.width, vis.shadow_packer.height,
-							(int)vis.shadow_packer.rects.size(), (unsigned long long)device->GetFrameCount());
+							(int)vis.shadow_packer.rects.size(),
+							gg_shadowAtlasShrinkStreak, GG_SHADOW_SHRINK_SETTLE,
+							(unsigned long long)device->GetFrameCount());
 						gg_atlas_trace(gg_msg);
 					}
 					if (gg_atlasGrow || gg_atlasShrink)
@@ -8320,6 +8331,7 @@ void DrawLensFlares(
 // grow the engine already does whenever a level gets heavier, so it adds no new risk.
 void GG_ArmShadowAtlasShrink()
 {
+	gg_shadowAtlasShrinkStreak = 0; // GGMAX 3.69: a new level starts its settle run afresh
 	gg_shadowAtlasShrinkArmed = true;
 	gg_shadowAtlasShrinkReports = 0;
 	gg_atlas_trace("GGATLAS arm: shrink armed");

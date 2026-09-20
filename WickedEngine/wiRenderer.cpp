@@ -414,10 +414,10 @@ static int localShadowGrantedCount = 0;   // local casters granted a shadow slot
 // GGMAX 2.06: shadow-pack diagnostics (pose-dependent spot-shadow flicker hunt) — the
 // final pack scale and each packed light's rect, readable via GG_GetShadowRects below.
 float gg_dbg_shadow_pack_scale = 1.0f;
-struct GGShadowRectDbg { uint32_t entity; int w; int h; int type; };
+struct GGShadowRectDbg { uint32_t entity; int w; int h; int type; int slices; };
 GGShadowRectDbg gg_dbg_shadow_rects[64];
 uint32_t gg_dbg_shadow_rect_count = 0;
-uint32_t GG_GetShadowRects(uint32_t* entities, int* widths, int* heights, int* types, uint32_t maxn, float* scale)
+uint32_t GG_GetShadowRects(uint32_t* entities, int* widths, int* heights, int* types, uint32_t maxn, float* scale, int* slices)
 {
 	if (scale) *scale = gg_dbg_shadow_pack_scale;
 	uint32_t n = std::min(gg_dbg_shadow_rect_count, maxn);
@@ -427,6 +427,7 @@ uint32_t GG_GetShadowRects(uint32_t* entities, int* widths, int* heights, int* t
 		widths[i] = gg_dbg_shadow_rects[i].w;
 		heights[i] = gg_dbg_shadow_rects[i].h;
 		types[i] = gg_dbg_shadow_rects[i].type;
+		if (slices) slices[i] = gg_dbg_shadow_rects[i].slices;
 	}
 	return n;
 }
@@ -5110,9 +5111,26 @@ void UpdateVisibility(Visibility& vis)
 			localShadowGrantedPrev.clear();
 		}
 
+		// GGMAX 3.68: the shadow packer's containing size was a SESSION HIGH-WATER MARK, and the
+		// atlas faithfully allocated it. wi::rectpacker::State::clear() deliberately does NOT reset
+		// width/height (its own comment says so), add_rect() only ever grows them, and pack() starts
+		// from the current size and only ever DOUBLES - it never searches downward. vis.shadow_packer
+		// lives inside RenderPath3D::visibility_main, i.e. for the whole process, and
+		// Visibility::Clear() never touches it. So once ONE light-heavy level pushed the bound to
+		// 16384x4096, every later level allocated a 260 MB atlas for rects that wanted 20 MB, and it
+		// also made 3.66's shrink unreachable: the packer is structurally incapable of reporting a
+		// size smaller than the atlas it already caused.
+		// Reset it HERE, per pack attempt (the iterative_scaling retry must recompute from scratch too).
+		// NOT in State::clear(): State has exactly two users and the other, wiFont.cpp's glyph atlas,
+		// legitimately wants the ratchet.
+		int gg_packerRetainedW = 0, gg_packerRetainedH = 0; // trace only: the bound we just discarded
 		while (iterative_scaling > 0.03f)
 		{
 			vis.shadow_packer.clear();
+			gg_packerRetainedW = std::max(gg_packerRetainedW, vis.shadow_packer.width);
+			gg_packerRetainedH = std::max(gg_packerRetainedH, vis.shadow_packer.height);
+			vis.shadow_packer.width = 0;
+			vis.shadow_packer.height = 0;
 			if (vis.scene->weather.rain_amount > 0)
 			{
 				// Rain blocker:
@@ -5250,9 +5268,18 @@ void UpdateVisibility(Visibility& vis)
 						uint32_t dbg_li = uint32_t(dbg_rect.id);
 						GGShadowRectDbg& d = gg_dbg_shadow_rects[gg_dbg_shadow_rect_count++];
 						d.entity = (uint32_t)vis.scene->lights.GetEntity(dbg_li);
-						d.w = vis.visibleLightShadowRects[dbg_li].w; // slice multiplier already removed
-						d.h = vis.visibleLightShadowRects[dbg_li].h;
+						// GGMAX 3.68: record the PACKED rect, not visibleLightShadowRects[] - the slice
+						// multiplier has been divided out of that one by now, so DUMP_SHADOWRECTS was
+						// printing the sun's per-cascade width and could never be reconciled against the
+						// packer's containing width. Report the packed rect plus the slice count.
+						d.w = dbg_rect.w;
+						d.h = dbg_rect.h;
 						d.type = (int)vis.scene->lights[dbg_li].GetType();
+						d.slices = 1;
+						if (d.type == (int)LightComponent::DIRECTIONAL)
+							d.slices = int(vis.scene->lights[dbg_li].cascade_distances.size() + vis.scene->character_dedicated_shadows.size());
+						else if (d.type == (int)LightComponent::POINT)
+							d.slices = 6;
 					}
 
 					// GGMAX 3.66: this used to be grow-only, and nothing anywhere made the atlas smaller. One
@@ -5305,11 +5332,12 @@ void UpdateVisibility(Visibility& vis)
 						{
 							int gg_packed = 0;
 							for (auto& rr : vis.shadow_packer.rects) if (rr.was_packed) gg_packed++;
-							char gg_msg[256];
+							char gg_msg[320];
 							snprintf(gg_msg, sizeof(gg_msg),
-								"GGATLAS create: %ux%u -> %dx%d  packedrects=%d/%d visiblelights=%d frame=%llu",
+								"GGATLAS create: %ux%u -> %dx%d (3.68 discarded retained bound %dx%d) packedrects=%d/%d visiblelights=%d frame=%llu",
 								shadowMapAtlas.desc.width, shadowMapAtlas.desc.height,
 								vis.shadow_packer.width, vis.shadow_packer.height,
+								gg_packerRetainedW, gg_packerRetainedH,
 								gg_packed, (int)vis.shadow_packer.rects.size(),
 								(int)vis.visibleLights.size(), (unsigned long long)device->GetFrameCount());
 							gg_atlas_trace(gg_msg);

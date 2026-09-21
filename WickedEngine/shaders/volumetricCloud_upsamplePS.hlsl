@@ -71,6 +71,7 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
 		// large error, calculate weight and color depending on depth difference with gaussian configuration
 		half4 color = 0;
 		float weightSum = 0; // Note: weights need full precision on Nvidia Vulkan!
+		float nearestTapSurface = FLT_MAX;   // GGMAX 3.76, see the fallback below
 				
 		[unroll]
 		for (int y = -UPSAMPLE_SAMPLE_RADIUS; y <= UPSAMPLE_SAMPLE_RADIUS; y++)
@@ -88,6 +89,10 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
 				// to +inf beyond 65504 units (1.66 real km here), zeroing every tap weight at
 				// distance and leaving un-clouded holes along depth edges.
 				float cloudDepth = cloud_depth_current[neighborReprojectionCoord].g;
+				// GGMAX 3.76: .g is the distance to the GEOMETRY that tap's ray hit (FLT_MAX for
+				// sky). Keep the closest one - the fallback below needs to know whether every
+				// rejected tap was looking PAST this pixel's own surface.
+				nearestTapSurface = min( nearestTapSurface, cloudDepth );
 				
 				float spatialWeight = Gaussian(length(float2(offset)), GAUSSIAN_SIGMA_SPATIAL);
 				float rangeWeight = Gaussian(abs(tToDepthBuffer - cloudDepth), GAUSSIAN_SIGMA_RANGE);
@@ -106,7 +111,30 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Target
 		{
 			// GGMAX 1.66: never emit a hard zero (an un-clouded hole) when every tap was
 			// rejected — fall back to the bilinear sample like the small-error path.
-			result = cloud_current.SampleLevel(sampler_linear_clamp, uv, 0);
+			//
+			// ★★★ GGMAX 3.76: ...UNLESS EVERY TAP WAS LOOKING PAST US.
+			//
+			// "Rejected" has two causes and they want opposite answers. A tap that saw a surface
+			// NEARER than this pixel found cloud genuinely in front of us, and 1.66's fallback is
+			// right. A tap that saw one FARTHER found cloud BEHIND our own surface, and painting
+			// that is how a distant tree billboard ends up wearing a sky cloud.
+			//
+			// It FLICKERS, which is why it matters more than it reads. The raymarch is a
+			// quarter-res checkerboard (volumetricCloud_renderCS.hlsl: subPixelIndex =
+			// volumetricclouds_frame % 4), so one occluder sample covers 4x4 full-res pixels and
+			// WHICH pixel it lands on rotates every frame. Along a thin silhouette the taps flip
+			// between hitting the tree and seeing sky past it, so the fallback fires on some
+			// frames and not others - which reads as shimmer, the worst kind of wrong.
+			//
+			// The 1% margin keeps float equality on a same-surface tap out of the behind case.
+			if ( nearestTapSurface > tToDepthBuffer * 1.01 )
+			{
+				result = 0;   // all taps' cloud is behind our surface - contribute nothing
+			}
+			else
+			{
+				result = cloud_current.SampleLevel(sampler_linear_clamp, uv, 0);
+			}
 		}
 	}
 

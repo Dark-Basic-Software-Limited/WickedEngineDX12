@@ -13642,6 +13642,7 @@ void CreateVisibilityResources(VisibilityResources& res, XMUINT2 resolution, boo
 void Visibility_Prepare(
 	const VisibilityResources& res,
 	const Texture& input_primitiveID, // can be MSAA
+	const Texture& input_customDepth, // GGMAX 3.77: depth for ID-less draws
 	CommandList cmd
 )
 {
@@ -13679,6 +13680,9 @@ void Visibility_Prepare(
 		const bool msaa = input_primitiveID.GetDesc().sample_count > 1;
 
 		device->BindResource(&input_primitiveID, 0, cmd);
+		// GGMAX 3.77: prepass RT1. A zero PrimitiveID means "nothing wrote an ID here", which
+		// is NOT the same as sky - the GG customDraw passes write real depth and no ID.
+		device->BindResource(&input_customDepth, 1, cmd);
 
 		GPUResource unbind;
 

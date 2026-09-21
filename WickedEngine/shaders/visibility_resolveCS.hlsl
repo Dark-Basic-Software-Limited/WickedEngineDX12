@@ -5,8 +5,10 @@
 
 #ifdef VISIBILITY_MSAA
 Texture2DMS<uint> input_primitiveID : register(t0);
+Texture2DMS<float> input_customDepth : register(t1);   // GGMAX 3.77
 #else
 Texture2D<uint> input_primitiveID : register(t0);
+Texture2D<float> input_customDepth : register(t1);     // GGMAX 3.77
 #endif // VISIBILITY_MSAA
 
 groupshared uint local_bin_mask;
@@ -88,8 +90,19 @@ void main(uint2 Gid : SV_GroupID, uint groupIndex : SV_GroupIndex)
 		}
 		else
 		{
-			// sky:
-			depth = 0;
+			// ★★★ GGMAX 3.77: a zero PrimitiveID means "nothing wrote an ID here". That is NOT
+			// the same as sky, and treating it as sky is what made every GG customDraw invisible
+			// to this buffer - and therefore to volumetric clouds, SSAO, SSR, aerial perspective
+			// and everything else that samples texture_depth, which IS the texture this shader
+			// writes. Those draws have no meshlet so they cannot pack an id; they write their
+			// real post-projection depth into prepass RT1 instead, cleared to 0 for "nobody here".
+			#ifdef VISIBILITY_MSAA
+			const float customDepth = input_customDepth.Load(pixel, 0);
+			#else
+			const float customDepth = input_customDepth[pixel];
+			#endif // VISIBILITY_MSAA
+			// reversed Z: 0 is the far plane, so >0 is a real surface someone rendered.
+			depth = customDepth;
 			bin = SHADERTYPE_BIN_COUNT;
 		}
 		if (groupIndex < 32)

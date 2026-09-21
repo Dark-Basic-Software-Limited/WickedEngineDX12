@@ -86,6 +86,7 @@ namespace wi
 		rtPostprocess = {};
 
 		depthBuffer_Main = {};
+		rtCustomDepth = {};   // GGMAX 3.77
 		depthBuffer_Copy = {};
 		depthBuffer_Copy1 = {};
 		depthBuffer_Reflection = {};
@@ -183,6 +184,42 @@ namespace wi
 			{
 				rtPrimitiveID_render = rtPrimitiveID;
 			}
+		}
+		{
+			// ★★★ GGMAX 3.77: the prepass's depth carrier for ID-less draws.
+			//
+			// texture_depth is depthBuffer_Copy, and its ONLY writer is visibility_resolveCS, which
+			// reconstructs depth from the PrimitiveID buffer and reads a zero ID as SKY. Every GG
+			// customDraw (far-tree billboards, baked terrain) writes real depth into depthBuffer_Main
+			// but has no meshlet and so no ID, and was therefore invisible to every texture_depth
+			// consumer - volumetric clouds most visibly, which drew straight over distant billboards.
+			//
+			// Those draws write SV_TARGET1 here instead. ★ It costs no new synchronisation: it lives
+			// in the SAME render pass as rtPrimitiveID, with the same CLEAR and the same
+			// SHADER_RESOURCE_COMPUTE end state, so the existing prepass->compute fence already
+			// covers it. ⚠ It must NOT join rtPrimitiveID's aliasing group (rtSceneCopy_tmp /
+			// rtPostprocess): it has to survive until Visibility_Prepare reads it.
+			//
+			// Rejected alternatives: an SRV on depthBuffer_Main would fix every consumer at once but
+			// puts a DEPTH_WRITE->SHADER_RESOURCE->DEPTH_WRITE round trip on the hot depth path each
+			// frame (it is bound DEPTH_STENCIL again for the opaque pass) and typically costs depth
+			// compression on AMD - unmeasured, on the target GPU. A synthetic PrimitiveID cannot work:
+			// PrimitiveID::unpack calls load_meshlet BEFORE validating, so a fake id reads out of
+			// bounds rather than failing clean, and pack() leaves no free bit (25-bit meshlet index,
+			// 7-bit primitive index, MESHLET_TRIANGLE_COUNT 124 so bit 31 is genuinely in use).
+			TextureDesc desc;
+			desc.format = Format::R32_FLOAT;
+			desc.bind_flags = BindFlag::RENDER_TARGET | BindFlag::SHADER_RESOURCE;
+			desc.width = internalResolution.x;
+			desc.height = internalResolution.y;
+			// ⚠ Must match rtPrimitiveID_render's sample count - every render target in one
+			// render pass has to agree, and RT0 is MSAA when MSAA is on. Shipping is 1
+			// (master_part0.cpp setMSAASampleCount(1)), but a mismatch here would be an
+			// invalid render pass the moment anyone turned MSAA on.
+			desc.sample_count = getMSAASampleCount();
+			desc.layout = ResourceState::SHADER_RESOURCE_COMPUTE;
+			device->CreateTexture(&desc, nullptr, &rtCustomDepth);
+			device->SetName(&rtCustomDepth, "rtCustomDepth");
 		}
 		{
 			TextureDesc desc;
@@ -1120,6 +1157,15 @@ namespace wi
 					ResourceState::SHADER_RESOURCE_COMPUTE,
 					ResourceState::SHADER_RESOURCE_COMPUTE
 				),
+				// GGMAX 3.77: RT1, depth for ID-less draws. CLEARed to 0 = "nobody wrote here"; the
+				// engine's own prepass PS declares no SV_TARGET1 so it never touches this.
+				RenderPassImage::RenderTarget(
+					&rtCustomDepth,
+					RenderPassImage::LoadOp::CLEAR,
+					RenderPassImage::StoreOp::STORE,
+					ResourceState::SHADER_RESOURCE_COMPUTE,
+					ResourceState::SHADER_RESOURCE_COMPUTE
+				),
 			};
 			device->RenderPassBegin(rp, arraysize(rp), cmd);
 
@@ -1255,6 +1301,7 @@ namespace wi
 			wi::renderer::Visibility_Prepare(
 				visibilityResources,
 				rtPrimitiveID_render,
+				rtCustomDepth,   // GGMAX 3.77
 				cmd
 			);
 

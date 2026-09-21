@@ -513,6 +513,7 @@ namespace wi::renderer
 	void Visibility_Prepare(
 		const VisibilityResources& res,
 		const wi::graphics::Texture& input_primitiveID, // can be MSAA
+		const wi::graphics::Texture& input_customDepth, // GGMAX 3.77: depth for ID-less draws
 		wi::graphics::CommandList cmd
 	);
 	void Visibility_Surface(

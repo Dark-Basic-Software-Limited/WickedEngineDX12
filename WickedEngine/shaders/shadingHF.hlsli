@@ -32,7 +32,29 @@ inline half3 PlanarReflection(in Surface surface, in half2 bumpColor)
 		float4 reflectionUV = mul(GetCamera().reflection_view_projection, float4(surface.P, 1));
 		reflectionUV.xy /= reflectionUV.w;
 		reflectionUV.xy = clipspace_to_uv(reflectionUV.xy);
-		return bindless_textures_half4[descriptor_index(GetCamera().texture_reflection_index)].SampleLevel(sampler_linear_clamp, reflectionUV.xy + bumpColor, 0).rgb;
+		// ★★★ GGMAX 3.80: DO NOT ADD bumpColor TO THE REFLECTION UV.
+		//
+		// The reprojection above is exact - it maps this pixel's WORLD position through the
+		// reflection camera, so the reflection lands precisely under the object that casts it.
+		// Adding bumpColor then displaces it again, and a normal map whose average is not exactly
+		// flat carries a DC bias, so the displacement has a CONSTANT component: the whole
+		// reflection slides. Lee's test is the crate's strut where it meets the puddle, and it
+		// did not meet its own reflection.
+		//
+		// ★ The DX11 build does not have this defect, and its source says why - the same line in
+		// WickedRepo/WickedEngine/shaders/objectHF.hlsli:673 reads:
+		//     ...SampleLevel(sampler_linear_clamp, reflectionUV.xy/* + bumpColor*normalMapStrength*/,
+		//         0).rgb; // bumpColor is causing an incorrect shift in the reflection
+		// i.e. GameGuru diagnosed this and commented the term out YEARS ago. The DX12 port carried
+		// the line across but not the fix - the stock upstream form came back. Restoring parity.
+		//
+		// ⚠ The WATER path is a DIFFERENT shader path (objectHF.hlsli, #ifdef WATER) and still adds
+		// its own distortion deliberately, exactly as DX11 does - ripples on an ocean SHOULD break
+		// up the reflection. This is the flat PLANARREFLECTION path only.
+		//
+		// bumpColor is left in the signature: callers pass it, and the DX11 comment is only
+		// meaningful next to the argument it refers to.
+		return bindless_textures_half4[descriptor_index(GetCamera().texture_reflection_index)].SampleLevel(sampler_linear_clamp, reflectionUV.xy /* + bumpColor: see above */, 0).rgb;
 	}
 	return 0;
 }

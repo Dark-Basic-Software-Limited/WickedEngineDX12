@@ -2309,6 +2309,8 @@ namespace wi::scene
 	// dispatch in wiRenderer - one decision, so the parts of a character cannot disagree.
 	wi::vector<uint8_t> gg_anim_armature_update;
 	uint32_t gg_anim_armatures_skipped = 0;   // diagnostic: armatures held this frame
+	uint32_t gg_anim_groups = 0;              // GGMAX 3.93: pivot groups decided this frame
+	uint32_t gg_anim_group_largest = 0;       // GGMAX 3.93: armatures in the biggest group
 	std::atomic<uint32_t> gg_anim_meshes_held{ 0 };   // GGMAX 3.92, see wiScene.h
 	// Armatures posed at least once since the level loaded. An armature NOT in here must be
 	// updated regardless of its phase - see the long note above. Cleared by gg_ResetAnimReduction.
@@ -2393,11 +2395,33 @@ namespace wi::scene
 	{
 		auto range = wi::profiler::BeginRangeCPU("Animations");
 
-		// ---- GGMAX 3.25n: one Reduction Scale decision per ARMATURE, for this frame ----------
-		// Single-threaded and cheap (one pass over objects), and it must happen before the jobs
-		// below read it. See the long note by gg_anim_armature_update for why the armature is the
-		// only correct unit: a character is several objects sharing one armature, and two meshes
-		// posed from different frames of the same armature is literally a second head.
+		// ---- GGMAX 3.93: one Reduction Scale decision per CHARACTER, for this frame ----------
+		// Single-threaded and cheap, and it must happen before the jobs below read it.
+		//
+		// ⚠⚠ CORRECTION TO THE 3.25n NOTE THAT STOOD HERE, WHICH WAS FACTUALLY WRONG:
+		// a GameGuru character is NOT several meshes sharing one armature. The GAME creates ONE
+		// ARMATURE PER SKINNED MESH by construction - Guru-WickedMAX/wickedcalls_part0.cpp:922,
+		// "we need one armature per 'mesh with bones' (as bone count differs for each mesh)" -
+		// so a Character Creator character is SIX objects with SIX armatures: body, head, legs,
+		// feet, hair, glasses. Measured on testpro2level with DUMP_SKIN: 285 skinned objects, 280
+		// armatures, and 0 of 45 part-clusters sharing an armature.
+		//
+		// So keying the phase on the armature index put head, body, legs and feet on FOUR
+		// DIFFERENT phases, and because each part's own AABB centre fed its own period they could
+		// land in different PERIODS too. Lee photographed exactly that at Reduction Scale 100.
+		// ★ A fix verified against the wrong premise looks like a fix: 3.25n was confirmed by eye
+		// at scale 50 and by a held-armature census, and neither could see that the unit it chose
+		// was not the unit a character is assembled from.
+		//
+		// THE GROUP KEY IS THE ARMATURE'S OWN WORLD PIVOT, and it needs NO quantisation, so there
+		// is no cell seam to tune: each armature is attached to its part object
+		// (Component_Attach, wickedcalls_part0.cpp:973) and all six parts of one character are
+		// PLACED at the same world position - only their geometry differs, which is why their AABB
+		// centres differ (head y=120, feet y=64) while their pivots do not. The engine already
+		// treats that transform as the character-space origin (RunArmatureUpdateSystem, :4869).
+		// Measured: 280 armatures collapse to 94 distinct pivots, every multi-part group is one
+		// coherent character, and the within-character pivot span is 0.0. The tolerance below is
+		// insurance against a future placement being re-derived per part - NOT rounding.
 		{
 			const uint32_t redScale = gg_anim_reduction_scale.load(std::memory_order_relaxed);
 			const size_t armCount = armatures.GetCount();
@@ -2409,10 +2433,16 @@ namespace wi::scene
 			if (redScale > 1 && armCount > 0 && gg_anim_reduction_grace <= 0.0f)
 			{
 				gg_anim_armature_update.resize(armCount, 1);
-				// nearest distance of any object driven by each armature - one number per
-				// character, so every part of it lands in the same period.
+				// nearest distance of any object driven by each armature.
 				wi::vector<float> nearest;
 				nearest.resize(armCount, FLT_MAX);
+				// How many objects drive each armature. An armature driven by MORE THAN ONE object is an
+				// instanced template: its pivot is one placement while its objects are somewhere else
+				// (this level parks weapon templates at 100,000 while the live copy is in the player's
+				// hands). It has no single world position, so it is never grouped and keeps exactly
+				// today's per-armature behaviour.
+				wi::vector<uint8_t> objcount;
+				objcount.resize(armCount, 0);
 				const XMFLOAT3& eye = GetCamera().Eye;
 				const size_t objCount = objects.GetCount();
 				for (size_t oi = 0; oi < objCount; ++oi)
@@ -2423,22 +2453,123 @@ namespace wi::scene
 					const size_t ai = armatures.GetIndex(m->armatureID);
 					if (ai >= armCount) continue;
 					if (oi >= aabb_objects.size()) continue;
+					if (objcount[ai] < 255) objcount[ai]++;
 					const XMFLOAT3 c = aabb_objects[oi].getCenter();
 					const float dx = c.x - eye.x, dy = c.y - eye.y, dz = c.z - eye.z;
 					const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
 					if (d < nearest[ai]) nearest[ai] = d;
 				}
+
+				// ---- group the armatures that share a world pivot --------------------------------
+				// group[] is a union-find over armature indices. An armature that cannot be grouped
+				// leads itself, which IS today's behaviour.
+				constexpr float GG_ANIM_GROUP_TOL = 0.25f;   // 0.006 m - insurance, see the note above
+				wi::vector<uint32_t> group;
+				group.resize(armCount);
+				for (uint32_t gi = 0; gi < (uint32_t)armCount; ++gi) group[gi] = gi;
+				wi::vector<XMFLOAT3> pivot;
+				pivot.resize(armCount, XMFLOAT3(0, 0, 0));
+				wi::vector<uint32_t> order;
+				order.reserve(armCount);
+				for (uint32_t gi = 0; gi < (uint32_t)armCount; ++gi)
+				{
+					if (nearest[gi] == FLT_MAX || objcount[gi] != 1) continue;
+					const TransformComponent* pt = transforms.GetComponent(armatures.GetEntity(gi));
+					if (pt == nullptr) continue;   // RunArmatureUpdateSystem skips these too (:4871)
+					pivot[gi] = XMFLOAT3(pt->world._41, pt->world._42, pt->world._43);
+					order.push_back(gi);
+				}
+				std::sort(order.begin(), order.end(), [&pivot](uint32_t a, uint32_t b) {
+					if (pivot[a].x != pivot[b].x) return pivot[a].x < pivot[b].x;
+					if (pivot[a].y != pivot[b].y) return pivot[a].y < pivot[b].y;
+					return pivot[a].z < pivot[b].z;
+				});
+				auto gfind = [&group](uint32_t a) -> uint32_t {
+					while (group[a] != a) { group[a] = group[group[a]]; a = group[a]; }
+					return a;
+				};
+				auto gunite = [&group, &gfind](uint32_t a, uint32_t b) {
+					a = gfind(a); b = gfind(b);
+					if (a == b) return;
+					if (a < b) group[b] = a; else group[a] = b;
+				};
+				// 1) runs of EXACTLY equal pivots. This is the real case and it is seam-free.
+				wi::vector<uint32_t> reps;
+				reps.reserve(order.size());
+				for (size_t k = 0; k < order.size(); ++k)
+				{
+					const uint32_t ai2 = order[k];
+					if (k > 0)
+					{
+						const uint32_t pv = order[k - 1];
+						if (pivot[ai2].x == pivot[pv].x && pivot[ai2].y == pivot[pv].y && pivot[ai2].z == pivot[pv].z)
+						{
+							gunite(pv, ai2);
+							continue;
+						}
+					}
+					reps.push_back(ai2);
+				}
+				// 2) insurance only: merge DISTINCT pivots agreeing within the tolerance. Nothing in
+				//    testpro2level needs this - all 39 multi-part characters are exactly equal. reps
+				//    are sorted by x, so the inner loop breaks immediately in normal content.
+				for (size_t a = 0; a < reps.size(); ++a)
+				{
+					const XMFLOAT3 pa = pivot[reps[a]];
+					for (size_t b = a + 1; b < reps.size(); ++b)
+					{
+						const XMFLOAT3 pb = pivot[reps[b]];
+						if (pb.x - pa.x > GG_ANIM_GROUP_TOL) break;
+						if (std::fabs(pb.y - pa.y) <= GG_ANIM_GROUP_TOL && std::fabs(pb.z - pa.z) <= GG_ANIM_GROUP_TOL)
+							gunite(reps[a], reps[b]);
+					}
+				}
+
+				// ---- ONE period, ONE phase and ONE force flag per group --------------------------
+				wi::vector<float> groupDist;              // MIN over the group: can only hold LESS
+				wi::vector<uint32_t> groupSize;
+				wi::vector<uint8_t> groupForce;           // any member unposed -> pose the character
+				wi::vector<wi::ecs::Entity> groupLead;    // LOWEST ENTITY, not index - Entity_Remove is
+				                                          // swap-with-last, so an index-keyed phase pops
+				groupDist.resize(armCount, FLT_MAX);
+				groupSize.resize(armCount, 0);
+				groupForce.resize(armCount, 0);
+				groupLead.resize(armCount, wi::ecs::INVALID_ENTITY);
+				gg_anim_groups = 0;
+				gg_anim_group_largest = 0;
+				for (uint32_t gi = 0; gi < (uint32_t)armCount; ++gi)
+				{
+					if (nearest[gi] == FLT_MAX) continue;
+					const uint32_t g = gfind(gi);
+					const wi::ecs::Entity ae2 = armatures.GetEntity(gi);
+					if (groupSize[g] == 0) gg_anim_groups++;
+					groupSize[g]++;
+					if (groupSize[g] > gg_anim_group_largest) gg_anim_group_largest = groupSize[g];
+					if (nearest[gi] < groupDist[g]) groupDist[g] = nearest[gi];
+					if (gg_anim_posed_once.count(ae2) == 0) groupForce[g] = 1;
+					if (groupLead[g] == wi::ecs::INVALID_ENTITY || ae2 < groupLead[g]) groupLead[g] = ae2;
+				}
+
 				const uint32_t frame = gg_anim30fps_frame.load(std::memory_order_relaxed);
 				gg_anim_forced_first_pose = 0;
 				for (size_t ai = 0; ai < armCount; ++ai)
 				{
 					if (nearest[ai] == FLT_MAX) continue;   // no object drives it - leave it alone
 					const wi::ecs::Entity ae = armatures.GetEntity(ai);
+					const uint32_t g = gfind((uint32_t)ai);
 					// ★ An armature that has never been posed has no valid bounds, and culling and
-					// LOD read those bounds. Force its first pose whatever the phase says.
+					// LOD read those bounds. Force its first pose whatever the phase says - and force
+					// its whole CHARACTER with it, or one part poses a frame ahead of the rest.
 					const bool posed = gg_anim_posed_once.count(ae) != 0;
-					const uint32_t period = gg_anim_reduction_period(nearest[ai], redScale);
-					const bool go = !posed || (period <= 1) || (((frame + (uint32_t)ai * 7u) % period) == 0);
+					const uint32_t period = gg_anim_reduction_period(groupDist[g], redScale);
+					// ⚠ The old key was `ai * 7u`, and 7 shares a factor with common periods: at
+					// period 21 it reached only 3 phases, at period 7 exactly ONE - every armature in
+					// that band firing on the same frame. Hash the LEADER ENTITY instead: full phase
+					// coverage at every period, and the id does not move when an unrelated armature is
+					// removed (Entity_Remove is swap-with-last, so indices do).
+					uint64_t gh = (uint64_t)groupLead[g] * 0x9E3779B97F4A7C15ull;
+					gh ^= gh >> 29;
+					const bool go = groupForce[g] != 0 || (period <= 1) || (((frame + (uint32_t)gh) % period) == 0);
 					gg_anim_armature_update[ai] = go ? 1 : 0;
 					if (go)
 					{

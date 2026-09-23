@@ -53,6 +53,12 @@ namespace wi::scene
 	extern wi::vector<uint8_t> gg_anim_armature_update;
 	extern uint32_t gg_anim_armatures_skipped;
 	extern uint32_t gg_anim_forced_first_pose;
+	// GGMAX 3.93: how many PIVOT GROUPS the prologue decided this frame, and the largest.
+	// 280 armatures collapse to ~94 groups on testpro2level. ★ If content ever breaks the
+	// premise that a character's parts share a pivot, this climbs toward the armature count -
+	// which is the wobbly head showing up as a NUMBER instead of a photograph.
+	extern uint32_t gg_anim_groups;
+	extern uint32_t gg_anim_group_largest;
 	// Seconds of full-rate animation still owed after a level load / test-game entry; while it is
 	// above zero nothing is held. The GAME counts it down, because it owns the frame delta.
 	extern float gg_anim_reduction_grace;

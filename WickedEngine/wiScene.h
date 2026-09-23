@@ -722,6 +722,22 @@ namespace wi::scene
 
 	};
 
+	// ★ GGMAX 3.92: is this armature being HELD this frame by Reduction Scale?
+	//
+	// THE CANONICAL PREDICATE. 3.25n's whole lesson was that the parts of a character must
+	// read ONE decision rather than each compute its own, so a third hand-rolled copy of
+	// `gg_anim_armature_update[armatures.GetIndex(id)] == 0` is exactly the drift this family
+	// grows from. New readers call this. The two existing readers - the animation skip at
+	// wiScene.cpp:2522 and the skinning dispatch at wiRenderer.cpp:6810 - still have their own
+	// inline copies and should be migrated to this when someone is next in there; they are
+	// left alone here only to keep this fix to the defect.
+	bool gg_anim_armature_held(const Scene& scene, wi::ecs::Entity armatureID);
+
+	// GGMAX 3.92 diagnostic: skinned meshes whose streamout ping-pong was suppressed this
+	// frame. 0 while Reduction Scale is off or during the post-load grace. Printed by
+	// DUMP_ANIMREDUCTION - it is the number that proves the gate is live.
+	extern std::atomic<uint32_t> gg_anim_meshes_held;
+
 	// Returns skinned vertex position
 	//	N : normal (out, optional)
 	XMVECTOR SkinVertex(const MeshComponent& mesh, const wi::vector<ShaderTransform>& boneData, uint32_t index, XMVECTOR* N = nullptr);

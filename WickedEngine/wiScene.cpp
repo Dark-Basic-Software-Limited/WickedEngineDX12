@@ -2309,6 +2309,7 @@ namespace wi::scene
 	// dispatch in wiRenderer - one decision, so the parts of a character cannot disagree.
 	wi::vector<uint8_t> gg_anim_armature_update;
 	uint32_t gg_anim_armatures_skipped = 0;   // diagnostic: armatures held this frame
+	std::atomic<uint32_t> gg_anim_meshes_held{ 0 };   // GGMAX 3.92, see wiScene.h
 	// Armatures posed at least once since the level loaded. An armature NOT in here must be
 	// updated regardless of its phase - see the long note above. Cleared by gg_ResetAnimReduction.
 	wi::unordered_set<wi::ecs::Entity> gg_anim_posed_once;
@@ -4942,12 +4943,40 @@ namespace wi::scene
 	}
 	void Scene::RunMeshUpdateSystem(wi::jobsystem::context& ctx)
 	{
+		gg_anim_meshes_held.store(0, std::memory_order_relaxed);   // GGMAX 3.92
 		wi::jobsystem::Dispatch(ctx, (uint32_t)meshes.GetCount(), small_subtask_groupsize, [&](wi::jobsystem::JobArgs args) {
 
 			Entity entity = meshes.GetEntity(args.jobIndex);
 			MeshComponent& mesh = meshes[args.jobIndex];
 
-			if (mesh.so_pos.IsValid() && mesh.so_pre.IsValid())
+			// ★★★ GGMAX 3.92: DO NOT ADVANCE THE PING-PONG ON A FRAME WHOSE SKINNING
+			// DISPATCH WAS SKIPPED.
+			//
+			// so_pos and so_pre are the two halves of ONE streamoutBuffer. The draw below
+			// publishes the POST-swap half (vb_pos_wind = mesh.so_pos), and the skinning
+			// dispatch WRITES the post-swap half (wiRenderer.cpp:6829). Stock Wicked dispatches
+			// every skinned mesh every frame, so the swap is always matched and invisible.
+			//
+			// GGMAX 3.25's Reduction Scale skips that dispatch for a held armature
+			// (wiRenderer.cpp:6811), and the comment there states the false premise outright:
+			// "the dispatch would recompute vertices already in the streamout buffer". That is
+			// true of ONE buffer. There are two, and the one left alone is not the one being
+			// drawn - so a "held" mesh alternated between two poses ONE PERIOD APART, every
+			// frame. Lee at scale 100: "flicking between two animation frames rapidly... around
+			// 30 times in one second", with the head and feet visibly out of position.
+			//
+			// ⚠ Worse at EVEN periods: every go-frame then lands on the same parity, so the
+			// other half is never rewritten after the reduction engages and freezes at an
+			// ancient pose while the written half advances. The gap grows without bound.
+			//
+			// ★ FOURTH INSTANCE OF A FAMILY THIS ENGINE ALREADY FIXED ONCE: GGMAX 1.37b gated
+			// the hair/grass ping-pong for exactly this reason (wiHairParticle.cpp:484-490,
+			// "swapping across skipped frames broke write/read parity"). The skinning
+			// ping-pong never got the same treatment. ANY double-buffer whose producer can be
+			// skipped needs its swap gated on the SAME condition as the producer.
+			const bool gg_held = gg_anim_armature_held(*this, mesh.armatureID);
+			if (gg_held) gg_anim_meshes_held.fetch_add(1, std::memory_order_relaxed);
+			if (mesh.so_pos.IsValid() && mesh.so_pre.IsValid() && !gg_held)
 			{
 				std::swap(mesh.so_pos, mesh.so_pre);
 			}
@@ -5012,7 +5041,11 @@ namespace wi::scene
 				geometry.vb_col = mesh.vb_col.descriptor_srv;
 				geometry.vb_uvs = mesh.vb_uvs.descriptor_srv;
 				geometry.vb_atl = mesh.vb_atl.descriptor_srv;
-				geometry.vb_pre = mesh.so_pre.descriptor_srv;
+				// GGMAX 3.92: a held mesh did not swap, so so_pre names the half from BEFORE the last
+				// dispatch - a stale pose, which would read as a large constant vertex velocity on a
+				// character that is not moving. Point previous at current instead: zero motion, which
+				// is the truth for a held pose. Same follow-on as GGMAX 1.37d for the hair ping-pong.
+				geometry.vb_pre = gg_held ? mesh.so_pos.descriptor_srv : mesh.so_pre.descriptor_srv;
 				if (wi::renderer::IsMeshShaderAllowed())
 				{
 					geometry.vb_clu = mesh.vb_clu.descriptor_srv;
@@ -9947,6 +9980,14 @@ namespace wi::scene
 		locker.lock();
 		waterRipples.push_back(img);
 		locker.unlock();
+	}
+
+	bool gg_anim_armature_held(const Scene& scene, wi::ecs::Entity armatureID)
+	{
+		// Empty vector = Reduction Scale off, or the post-load grace is still running.
+		if (gg_anim_armature_update.empty() || armatureID == wi::ecs::INVALID_ENTITY) return false;
+		const size_t ai = scene.armatures.GetIndex(armatureID);
+		return (ai < gg_anim_armature_update.size() && gg_anim_armature_update[ai] == 0);
 	}
 
 	XMVECTOR SkinVertex(const MeshComponent& mesh, const wi::vector<ShaderTransform>& boneData, uint32_t index, XMVECTOR* N)

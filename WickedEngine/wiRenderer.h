@@ -43,6 +43,13 @@ namespace wi::renderer
 	// and skip tessellation. UNLIT, WATER, CARTOON and TERRAINBLENDED are left alone - see the
 	// note at the variant selection in wiRenderer.cpp.
 	extern int gg_super_quick_objects;
+	// GGMAX 3.89: Water Reflection Size. Width in pixels of the planar reflection render
+	// target. 0 = stock, which is GetInternalResolution() / 4 in each axis - 384x200 on a
+	// 1536x801 window, confirmed with the harness DUMP_REFLECTION. >0 sets the WIDTH and the
+	// height follows the internal resolution's aspect. Read at exactly one site,
+	// RenderPath3D::setReflectionsEnabled, so every path that re-creates the reflection
+	// targets picks it up for free - including ResizeBuffers and the game's own callers.
+	extern int gg_reflection_width;
 	constexpr wi::graphics::Format format_depthbuffer_main = wi::graphics::Format::D32_FLOAT_S8X24_UINT;
 	constexpr wi::graphics::Format format_rendertarget_main = wi::graphics::Format::R11G11B10_FLOAT;
 	constexpr wi::graphics::Format format_idbuffer = wi::graphics::Format::R32_UINT;

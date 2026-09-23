@@ -3440,8 +3440,22 @@ namespace wi
 			desc.sample_count = 4;
 			desc.bind_flags = BindFlag::RENDER_TARGET;
 			desc.format = wi::renderer::format_rendertarget_main;
-			desc.width = internalResolution.x / 4;
-			desc.height = internalResolution.y / 4;
+			// GGMAX 3.89: Water Reflection Size. 0 reproduces the stock quarter-res target BIT
+			// FOR BIT, integer truncation included - 801/4 = 200, which is exactly where the
+			// refl aspect 1.9200 against the main's 1.9176 in DUMP_REFLECTION comes from. >0
+			// sets the WIDTH and the height follows the internal resolution's aspect. This is
+			// the ONLY site that sizes the four reflection targets, so every re-create path
+			// honours it.
+			if (wi::renderer::gg_reflection_width > 0)
+			{
+				desc.width = (uint32_t)wi::renderer::gg_reflection_width;
+				desc.height = std::max(1u, (uint32_t)(((uint64_t)desc.width * internalResolution.y) / internalResolution.x));
+			}
+			else
+			{
+				desc.width = internalResolution.x / 4;
+				desc.height = internalResolution.y / 4;
+			}
 			desc.misc_flags = ResourceMiscFlag::TRANSIENT_ATTACHMENT;
 			desc.layout = ResourceState::RENDERTARGET;
 			device->CreateTexture(&desc, nullptr, &rtReflection);

@@ -70,7 +70,11 @@ float4 main(PSIn input) : SV_TARGET
 		[branch]
 		if(GetCamera().texture_reflection_depth_index >=0)
 		{
-			float reflectiveDepth = bindless_textures[descriptor_index(GetCamera().texture_reflection_depth_index)].SampleLevel(sampler_point_clamp, reflectionUV, 0).r;
+			// GGMAX 3.90: sampler_point_clamp -> sampler_linear_clamp. This depth drives a hard
+			// exp() blend, so a point tap snaps between adjacent quarter-res texels. Inert on a
+			// level whose Water Base Color alpha is 0 (GG's default - the lerp becomes exp(0)=1),
+			// which is why this is a rider and not the fix. Twin: objectHF.hlsli.
+			float reflectiveDepth = bindless_textures[descriptor_index(GetCamera().texture_reflection_depth_index)].SampleLevel(sampler_linear_clamp, reflectionUV, 0).r;
 			float3 reflectivePosition = reconstruct_position(reflectionUV, reflectiveDepth, GetCamera().reflection_inverse_view_projection);
 			float water_depth = -dot(float4(reflectivePosition, 1), water_plane);
 			water_depth += texture_ocean_displacementmap.SampleLevel(sampler_linear_wrap, reflectivePosition.xz * xOceanPatchSizeRecip, 0).z; // texture contains xzy!

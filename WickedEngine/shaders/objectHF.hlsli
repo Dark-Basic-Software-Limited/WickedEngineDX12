@@ -1301,7 +1301,10 @@ float4 main(PixelInput input, in bool is_frontface : SV_IsFrontFace APPEND_COVER
 		[branch]
 		if(camera.texture_reflection_depth_index >= 0)
 		{
-			float reflectiveDepth = bindless_textures[descriptor_index(camera.texture_reflection_depth_index)].SampleLevel(sampler_point_clamp, reflectionUV.xy, 0).r;
+			// GGMAX 3.90: twin of the oceanSurfacePS.hlsl change - point -> linear on a depth that
+			// drives a hard blend. This #ifdef WATER block is DEAD in GG (no SHADERTYPE_WATER),
+			// but it is a family member and diverging twins are how this codebase grows bugs.
+			float reflectiveDepth = bindless_textures[descriptor_index(camera.texture_reflection_depth_index)].SampleLevel(sampler_linear_clamp, reflectionUV.xy, 0).r;
 			float3 reflectivePosition = reconstruct_position(reflectionUV.xy, reflectiveDepth, camera.reflection_inverse_view_projection);
 			float4 water_plane = camera.reflection_plane;
 			float water_depth = -dot(float4(reflectivePosition, 1), water_plane);

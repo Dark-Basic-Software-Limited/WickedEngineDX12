@@ -1681,6 +1681,30 @@ namespace wi
 
 				device->RenderPassEnd(cmd);
 
+				// ★★ GGMAX 3.90: WATER REFLECTION BLUR.
+				//
+				// Lee's flat-water swim is content aliasing in this 384x200 rasterisation, magnified
+				// ~4x by the water. His own sweep settled it: much reduced at 768 wide, ZERO at 2048.
+				// Blur substitutes for that resolution - both attack under-sampling - at a fraction of
+				// the cost, and diffuse reflections are the look he asked for.
+				//
+				// Blurred HERE, once over 76,800 texels, rather than multi-tapping in the water shader,
+				// which would pay per water pixel - up to ~1.2M of them - for the same image, and would
+				// have to be duplicated into shadingHF.hlsli and objectHF.hlsli.
+				//
+				// ⚠ FAMILY: there is ONE shared reflection target, so at blur > 0 this also softens
+				// the flat planar mirrors that shadingHF.hlsli:57 reads (the 3.80 crate-and-puddle
+				// case), not only water. At 0 nothing changes, so there is no regression by default.
+				// ⚠ The reflection DEPTH buffer is deliberately NOT filtered - it is bound as
+				// camera_reflection.texture_depth_index as well, i.e. it is scene depth, not an image.
+				if (wi::renderer::gg_reflection_blur > 0)
+				{
+					auto blurrange = wi::profiler::BeginRangeGPU("Reflection Blur", cmd);
+					for (int i = 0; i < wi::renderer::gg_reflection_blur; ++i)
+						wi::renderer::Postprocess_Blur_Gaussian(rtReflection_resolved, rtReflection_blur_tmp, rtReflection_resolved, cmd);
+					wi::profiler::EndRange(blurrange);
+				}
+
 				wi::profiler::EndRange(range); // Planar Reflections
 				device->EventEnd(cmd);
 			});
@@ -3471,9 +3495,16 @@ namespace wi
 
 			desc.sample_count = 1;
 			desc.format = wi::renderer::format_rendertarget_main;
-			desc.bind_flags = BindFlag::RENDER_TARGET | BindFlag::SHADER_RESOURCE;
+			// GGMAX 3.90: UNORDERED_ACCESS so Water Reflection Blur can write this in place, and a
+			// matching temp for the separable pass. Created HERE, at the one sizing site, so both
+			// follow the 3.89 Water Reflection Size re-create automatically.
+			desc.bind_flags = BindFlag::RENDER_TARGET | BindFlag::SHADER_RESOURCE | BindFlag::UNORDERED_ACCESS;
 			device->CreateTexture(&desc, nullptr, &rtReflection_resolved);
 			device->SetName(&rtReflection_resolved, "rtReflection_resolved");
+
+			desc.bind_flags = BindFlag::SHADER_RESOURCE | BindFlag::UNORDERED_ACCESS;
+			device->CreateTexture(&desc, nullptr, &rtReflection_blur_tmp);
+			device->SetName(&rtReflection_blur_tmp, "rtReflection_blur_tmp");
 
 			desc.format = Format::R16_UNORM;
 			desc.bind_flags = BindFlag::UNORDERED_ACCESS | BindFlag::SHADER_RESOURCE;

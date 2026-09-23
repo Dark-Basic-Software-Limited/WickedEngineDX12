@@ -475,6 +475,9 @@ int gg_shadow_res_steps = 4;
 // GGMAX 3.89: Water Reflection Size. 0 = stock internal-resolution/4 for the planar
 // reflection target. See wiRenderer.h and the only consumer, setReflectionsEnabled.
 int gg_reflection_width = 0;
+// GGMAX 3.90: Water Reflection Blur - passes of the separable Gaussian over the resolved
+// planar reflection. 0 = off. See wiRenderer.h and the consumer in wiRenderPath3D.cpp.
+int gg_reflection_blur = 0;
 static bool localShadowInvalidate = true;           // settings/level change -> next decision forces a full clear
 static uint64_t localShadowDecisionFrame = ~0ull;   // frame the Phase 2 decision was produced
 // GGMAX 2.07c: dir + cone are part of the key — the spot shadow's content depends on the

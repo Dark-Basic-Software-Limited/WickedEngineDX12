@@ -107,6 +107,12 @@ namespace wi
 		wi::graphics::Texture rtVelocity; // optional R16G16_FLOAT
 		wi::graphics::Texture rtReflection; // contains the scene rendered for planar reflections, MSAA
 		wi::graphics::Texture rtReflection_resolved; // contains the scene rendered for planar reflections, single sample
+		// GGMAX 3.90: ping-pong target for Water Reflection Blur. Created beside
+		// rtReflection_resolved in setReflectionsEnabled so it always tracks the 3.89 size, and
+		// given the SAME lifetime - deliberately NOT added to DeleteGPUResources and NOT cleared
+		// by the off-branch, because rtReflection_resolved is not either. Matching it is what
+		// keeps the two from diverging on a resize path.
+		wi::graphics::Texture rtReflection_blur_tmp;
 		wi::graphics::Texture rtRaytracedDiffuse; // raytraced diffuse screen space texture
 		wi::graphics::Texture rtSSR; // standard screen-space reflection results
 		wi::graphics::Texture rtSSGI; // standard screen-space GI results

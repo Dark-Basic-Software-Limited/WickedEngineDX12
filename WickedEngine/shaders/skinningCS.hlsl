@@ -74,11 +74,17 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThreadID)
 		pos_wind = bindless_buffers_float4[descriptor_index(push.vb_pos_wind)][vertexID];
 	}
 	
-	half3 nor = 0;
+	// ★★★ GGMAX 3.98: the skinned NORMAL is carried in FLOAT, like 1.64 did for the tangent's w.
+	// In half, a normal of EXACTLY (0,0,-1) came out of this shader as zero - the pistol-ammo box's
+	// cartridge face (6 vertices, all (0,0,-1)) then drew with normalize(0) = NaN, which every
+	// light turns into nothing: black in the library preview AND in the level. (0,1,0) and every
+	// near-axis normal survived, which is why only that one face showed it. DX11 skinned in full
+	// float in the vertex shader and never had this. Cost: a few ALU per skinned vertex.
+	float3 nor = 0;
 	[branch]
 	if (push.vb_nor >= 0)
 	{
-		nor = bindless_buffers_half4[descriptor_index(push.vb_nor)][vertexID].xyz;
+		nor = bindless_buffers_float4[descriptor_index(push.vb_nor)][vertexID].xyz;
 	}
 	
 	half4 tan = 0;
@@ -132,8 +138,8 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThreadID)
 	{
 		ByteAddressBuffer boneBuffer = bindless_buffers[descriptor_index(push.vb_bon)];
 		float4 p = 0;
-		half3 n = 0;
-		half3 t = 0;
+		float3 n = 0;	// GGMAX 3.98: float, see nor
+		float3 t = 0;
 		half weisum = 0;
 		for (uint influence = 0; influence < push.influence_div4; ++influence)
 		{
@@ -163,15 +169,15 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThreadID)
 					half weight = wei[i];
 
 					p += mul(m, float4(pos.xyz, 1)) * weight;
-					n += half3(mul((half3x3)m, nor.xyz)) * weight;
-					t += half3(mul((half3x3)m, tan.xyz)) * weight;
+					n += mul((float3x3)m, nor.xyz) * weight;
+					t += mul((float3x3)m, (float3)tan.xyz) * weight;
 					weisum += weight;
 				}
 			}
 		}
 		pos.xyz = p.xyz;
 		nor.xyz = normalize(n.xyz);
-		tan.xyz = normalize(t.xyz);
+		tan.xyz = (half3)normalize(t.xyz);
 	}
 
 	// Store data:

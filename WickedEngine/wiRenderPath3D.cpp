@@ -28,6 +28,22 @@ namespace wi
 	// false = stock list structure.
 	bool gg_render_merge_lists = true;
 
+	// GGMAX 3.97: per-camera frame constants for render_to_texture cameras.
+	//
+	// Every render_to_texture camera draws with the SAME FrameCB as the main view - one ambient,
+	// one sun, one fog, one global probe, one set of local probes, one wind. That is right for a
+	// security-camera screen inside the level and wrong for GameGuru's Object Library live
+	// preview, which is a product shot that must look the same whatever level is loaded behind it
+	// (a 0.608 level ambient turned a building pure white; notes 3.97). The main view cannot be
+	// changed for the preview's sake - it is visible around the library window the whole time.
+	//
+	// So: when set, this is called from each camera's job with a copy of this frame's FrameCB, and
+	// if it returns true that camera draws (and tile-culls) with the edited copy instead. The copy
+	// lives in per-command-list upload memory, so it is visible to that camera's list only.
+	// ⚠ dst is WRITE-COMBINED upload memory: read from src, only write to dst.
+	// The engine holds no policy here - what gets isolated is decided by the game.
+	bool (*gg_rtt_frame_override)(wi::ecs::Entity cameraEntity, const FrameCB& src, FrameCB& dst) = nullptr;
+
 	// GGMAX 1.48c: lean-async (knob defined in wiGraphicsDevice_DX12.cpp; see comment there).
 	// When true, the four tiny helper lists (VT copy-pages, ocean sim + readback, VT
 	// tile-request + writeback) run on QUEUE_GRAPHICS instead of async COPY/COMPUTE —
@@ -3071,6 +3087,18 @@ namespace wi
 					camera,
 					cmd
 				);
+				// GGMAX 3.97: see gg_rtt_frame_override. Bound BEFORE the prepass so the tiled light
+				// culling and both draws all read the same constants.
+				if (gg_rtt_frame_override != nullptr)
+				{
+					GraphicsDevice::GPUAllocation gg_alloc = device->AllocateGPU(sizeof(FrameCB), cmd);
+					FrameCB* gg_dst = (FrameCB*)gg_alloc.data;
+					std::memcpy(gg_dst, &frameCB, sizeof(FrameCB));
+					if (gg_rtt_frame_override(scene->cameras.GetEntity(i), frameCB, *gg_dst))
+					{
+						device->BindConstantBuffer(&gg_alloc.buffer, CBSLOT_RENDERER_FRAME, cmd, gg_alloc.offset);
+					}
+				}
 				Rect scissor;
 				scissor.right = (int32_t)camera.render_to_texture.depthstencil.desc.width;
 				scissor.bottom = (int32_t)camera.render_to_texture.depthstencil.desc.height;

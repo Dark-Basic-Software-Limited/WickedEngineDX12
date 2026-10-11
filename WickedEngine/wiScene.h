@@ -737,12 +737,26 @@ namespace wi::scene
 	// wiScene.cpp:2522 and the skinning dispatch at wiRenderer.cpp:6810 - still have their own
 	// inline copies and should be migrated to this when someone is next in there; they are
 	// left alone here only to keep this fix to the defect.
+	// GGMAX 3.107: the skinning dispatch no longer reads the armature vector at all - it reads
+	// MeshComponent::gg_skin_held, the per-mesh decision RunMeshUpdateSystem made from this
+	// predicate plus the fresh-streamout guard.
 	bool gg_anim_armature_held(const Scene& scene, wi::ecs::Entity armatureID);
 
 	// GGMAX 3.92 diagnostic: skinned meshes whose streamout ping-pong was suppressed this
 	// frame. 0 while Reduction Scale is off or during the post-load grace. Printed by
 	// DUMP_ANIMREDUCTION - it is the number that proves the gate is live.
 	extern std::atomic<uint32_t> gg_anim_meshes_held;
+
+	// GGMAX 3.107: fresh-streamout guard - a mesh whose streamout has never been written is never
+	// held (wiScene.cpp RunMeshUpdateSystem). gg_skin_fresh_guard is the harness A/B lever
+	// (SET_SKINFRESHGUARD); gg_skin_fresh_report prints the event count and the last 8 events.
+	extern bool gg_skin_fresh_guard;
+	extern std::atomic<uint32_t> gg_skin_fresh_total;
+	extern uint32_t gg_skin_drawn_garbage;     // render-side truth: held meshes drawn from an unwritten half
+	extern uint32_t gg_skin_drawn_stale;       // ... drawn from a written half that is not the newest pose
+	extern uint32_t gg_skin_sameframe_updates; // scene updates that were not the first of their frame
+	void gg_skin_fresh_note(wi::ecs::Entity mesh, wi::ecs::Entity armature);
+	int gg_skin_fresh_report(char* out, int size);
 
 	// Returns skinned vertex position
 	//	N : normal (out, optional)

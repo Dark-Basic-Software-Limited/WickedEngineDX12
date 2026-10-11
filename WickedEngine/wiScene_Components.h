@@ -781,6 +781,24 @@ namespace wi::scene
 		BufferView so_nor;
 		BufferView so_tan;
 		BufferView so_pre;
+		// ★ GGMAX 3.107: which streamout HALVES a skinning dispatch has really written - bit 0 =
+		// the half so_pos started on, bit 1 = the other (matched by offset, because the two swap).
+		// streamoutBuffer is created UNINITIALISED, so a half whose bit is clear holds garbage and
+		// must never be drawn. Set by the dispatch (wiRenderer.cpp, through a const ref, hence
+		// mutable); cleared whenever the buffer is (re)created. Runtime only - NOT serialized on
+		// purpose: a loaded or duplicated mesh gets a fresh buffer and must start at 0.
+		mutable uint8_t gg_so_written = 0;
+		mutable uint8_t gg_so_last_bit = 0;      // the half the most recent dispatch wrote (newest pose)
+		uint64_t gg_so_half0_offset = 0;
+		uint8_t gg_so_bit(const BufferView& v) const { return v.offset == gg_so_half0_offset ? 1 : 2; }
+		// GGMAX 3.107 (2): the half the LAST RENDER left as so_pos, captured on the first scene
+		// update of each rendered frame (device frame count), so extra mid-frame Update(0) calls
+		// re-derive the same swap instead of swapping again.
+		uint64_t gg_so_frame = ~0ull;
+		uint8_t gg_so_base = 1;
+		// GGMAX 3.107: THE hold decision for this mesh this frame, made once in RunMeshUpdateSystem
+		// and read by the skinning dispatch, so the ping-pong swap and the dispatch cannot disagree.
+		bool gg_skin_held = false;
 		uint32_t geometryOffset = 0;
 		uint32_t meshletCount = 0;
 		uint32_t active_morph_count = 0;

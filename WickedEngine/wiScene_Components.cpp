@@ -711,6 +711,7 @@ namespace wi::scene
 		so_nor = {};
 		so_tan = {};
 		so_pre = {};
+		gg_so_written = 0;   // GGMAX 3.107
 		BLASes.clear();
 		for (MorphTarget& morph : morph_targets)
 		{
@@ -1592,6 +1593,10 @@ namespace wi::scene
 		so_pre.subresource_uav = device->CreateSubresource(&streamoutBuffer, SubresourceType::UAV, so_pre.offset, so_pre.size, &Vertex_POS32W::FORMAT); // UAV can't have RGB32_F format!
 		so_pre.descriptor_srv = device->GetDescriptorIndex(&streamoutBuffer, SubresourceType::SRV, so_pre.subresource_srv);
 		so_pre.descriptor_uav = device->GetDescriptorIndex(&streamoutBuffer, SubresourceType::UAV, so_pre.subresource_uav);
+
+		// GGMAX 3.107: a fresh buffer is garbage in BOTH halves until a dispatch writes them.
+		gg_so_written = 0;
+		gg_so_half0_offset = so_pos.offset;
 
 		if (vb_nor.IsValid())
 		{

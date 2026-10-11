@@ -2314,7 +2314,10 @@ namespace wi::scene
 	std::atomic<uint32_t> gg_anim_meshes_held{ 0 };   // GGMAX 3.92, see wiScene.h
 	// Armatures posed at least once since the level loaded. An armature NOT in here must be
 	// updated regardless of its phase - see the long note above. Cleared by gg_ResetAnimReduction.
-	wi::unordered_set<wi::ecs::Entity> gg_anim_posed_once;
+	// GGMAX 3.107: the value is the DEVICE FRAME of that first pose, so the fresh-streamout
+	// instrument can tell "posed by a render-less update in this same frame" from "posed long ago"
+	// (being IN the set says nothing - every held armature is in it by construction).
+	wi::unordered_map<wi::ecs::Entity, uint64_t> gg_anim_posed_once;
 	uint32_t gg_anim_forced_first_pose = 0;   // diagnostic: armatures forced this frame
 	// Seconds of full-rate animation still owed after a level load or a test-game entry. While
 	// this is above zero NOTHING is held. Counted down by the game, which owns the frame delta.
@@ -2573,7 +2576,7 @@ namespace wi::scene
 					gg_anim_armature_update[ai] = go ? 1 : 0;
 					if (go)
 					{
-						if (!posed) { gg_anim_posed_once.insert(ae); gg_anim_forced_first_pose++; }
+						if (!posed) { gg_anim_posed_once.emplace(ae, GetDevice()->GetFrameCount()); gg_anim_forced_first_pose++; }
 					}
 					else gg_anim_armatures_skipped++;
 				}
@@ -5075,6 +5078,13 @@ namespace wi::scene
 	void Scene::RunMeshUpdateSystem(wi::jobsystem::context& ctx)
 	{
 		gg_anim_meshes_held.store(0, std::memory_order_relaxed);   // GGMAX 3.92
+		{
+			// GGMAX 3.107 instrument: was this NOT the first scene update of the rendered frame?
+			static uint64_t gg_lastUpdateFrame = ~0ull;
+			const uint64_t gg_fc = GetDevice()->GetFrameCount();
+			if (gg_fc == gg_lastUpdateFrame) gg_skin_sameframe_updates++;
+			gg_lastUpdateFrame = gg_fc;
+		}
 		wi::jobsystem::Dispatch(ctx, (uint32_t)meshes.GetCount(), small_subtask_groupsize, [&](wi::jobsystem::JobArgs args) {
 
 			Entity entity = meshes.GetEntity(args.jobIndex);
@@ -5105,12 +5115,88 @@ namespace wi::scene
 			// "swapping across skipped frames broke write/read parity"). The skinning
 			// ping-pong never got the same treatment. ANY double-buffer whose producer can be
 			// skipped needs its swap gated on the SAME condition as the producer.
-			const bool gg_held = gg_anim_armature_held(*this, mesh.armatureID);
-			if (gg_held) gg_anim_meshes_held.fetch_add(1, std::memory_order_relaxed);
-			if (mesh.so_pos.IsValid() && mesh.so_pre.IsValid() && !gg_held)
+			bool gg_held = gg_anim_armature_held(*this, mesh.armatureID);
+
+			// ★★★ GGMAX 3.107: NEVER HOLD A MESH WHOSE STREAMOUT HAS NEVER BEEN WRITTEN.
+			//
+			// A hold means "draw the pose already in the buffer". The buffer is created
+			// UNINITIALISED (CreateStreamoutRenderData), so until one dispatch has written the
+			// half being drawn there is no pose in it - only garbage, which rasterises as
+			// polygons splayed across the screen. Lee, tester report #4: placing a Christmas
+			// Zombie in the editor showed it "splayed out and corrupt" for a frame or so, every
+			// placement. Harness burst: 4 consecutive frames of a sheet from the zombie to the sky.
+			//
+			// 3.25's first-pose force (gg_anim_posed_once) did not save it, and the reason is
+			// the second defect below. The placed zombie's armatures ARE brand new - but placing
+			// it deletes the old cursor object, and WickedCall_RemoveObject runs a full
+			// Scene::Update(0) (wickedcalls_part0.cpp:2397) BEFORE the frame's real Update(dt).
+			// That render-less update gives the new armatures their forced first pose and records
+			// them in gg_anim_posed_once, but no render follows it, so no dispatch ever writes
+			// the buffer. The real update then sees "posed" and holds them on their normal phase,
+			// and the empty buffer is drawn until the next go-frame - up to a whole period.
+			// A held armature is ALWAYS already posed (that is what lets the prologue hold it), so a
+			// fix keyed on gg_anim_posed_once could never fire - which is exactly why 3.25's force
+			// missed this. The guard is keyed on the BUFFER, which is the thing that is actually
+			// empty. SET_SKINFRESHGUARD prints firstPosedFramesAgo per event: 0 = posed by a
+			// render-less update in the same frame, the mechanism above.
+			//
+			// Safe to dispatch a held mesh: RunArmatureUpdateSystem uploads every armature's bone
+			// matrices every frame, held or not - a held armature's are just unchanged.
+			//
+			// ★★★ GGMAX 3.107 (2): THE PING-PONG ADVANCES AT MOST ONCE PER RENDERED FRAME.
+			//
+			// Scene::Update(0) is also run mid-frame by the editor's pick refresh on EVERY frame
+			// the mouse or camera moves (WickedCall_UpdateSceneForPick, wickedcalls_part2.cpp:881).
+			// Each Update swapped again, but only ONE skinning dispatch follows, in the render. The
+			// mid-frame update still reads LAST frame's phase counter (the game publishes it after
+			// its logic), so a distant character that went on frame N-1 swapped again in Update(0)
+			// - onto the half holding the pose one period older - and the real Update then held it
+			// there with no dispatch: an old pose for the whole hold, every period, whenever the
+			// mouse moved. The 3.92 two-pose flick, back through a side door.
+			// Fixed by deciding from the half the LAST RENDER left (gg_so_base, captured on the
+			// first update of a frame): every update in a frame re-derives the same answer from
+			// the same base, so the last one before the render - the one the dispatch obeys
+			// through gg_skin_held - wins, however many ran.
+			// gg_skin_fresh_guard = false restores the pre-3.107 behaviour of BOTH, for A/B.
+			if (mesh.so_pos.IsValid() && mesh.so_pre.IsValid())
 			{
-				std::swap(mesh.so_pos, mesh.so_pre);
+				if (gg_skin_fresh_guard)
+				{
+					const uint64_t gg_fc = GetDevice()->GetFrameCount();
+					if (mesh.gg_so_frame != gg_fc)
+					{
+						mesh.gg_so_frame = gg_fc;
+						mesh.gg_so_base = mesh.gg_so_bit(mesh.so_pos);
+					}
+					// (1) a hold draws the base half - refuse it if no dispatch ever wrote that half
+					if (gg_held && (mesh.gg_so_written & mesh.gg_so_base) == 0)
+					{
+						gg_skin_fresh_note(entity, mesh.armatureID);
+						gg_held = false;
+					}
+					// (2) held = stay on the base half; advancing = the other half, which the dispatch
+					// is about to write
+					const uint8_t gg_want = gg_held ? mesh.gg_so_base : (uint8_t)(3 - mesh.gg_so_base);
+					if (mesh.gg_so_bit(mesh.so_pos) != gg_want)
+					{
+						std::swap(mesh.so_pos, mesh.so_pre);
+					}
+				}
+				else
+				{
+					// pre-3.107: count the event, keep the hold, swap on every update
+					if (gg_held && (mesh.gg_so_written & mesh.gg_so_bit(mesh.so_pos)) == 0)
+					{
+						gg_skin_fresh_note(entity, mesh.armatureID);
+					}
+					if (!gg_held)
+					{
+						std::swap(mesh.so_pos, mesh.so_pre);
+					}
+				}
 			}
+			mesh.gg_skin_held = gg_held;
+			if (gg_held) gg_anim_meshes_held.fetch_add(1, std::memory_order_relaxed);
 
 			mesh._flags &= ~MeshComponent::TLAS_FORCE_DOUBLE_SIDED;
 
@@ -5176,7 +5262,10 @@ namespace wi::scene
 				// dispatch - a stale pose, which would read as a large constant vertex velocity on a
 				// character that is not moving. Point previous at current instead: zero motion, which
 				// is the truth for a held pose. Same follow-on as GGMAX 1.37d for the hair ping-pong.
-				geometry.vb_pre = gg_held ? mesh.so_pos.descriptor_srv : mesh.so_pre.descriptor_srv;
+				// GGMAX 3.107: likewise a previous half no dispatch has written yet (the first frame of
+				// a fresh buffer) is garbage - report zero motion rather than a random velocity.
+				geometry.vb_pre = (gg_held || (mesh.gg_so_written & mesh.gg_so_bit(mesh.so_pre)) == 0) ?
+					mesh.so_pos.descriptor_srv : mesh.so_pre.descriptor_srv;
 				if (wi::renderer::IsMeshShaderAllowed())
 				{
 					geometry.vb_clu = mesh.vb_clu.descriptor_srv;
@@ -10111,6 +10200,70 @@ namespace wi::scene
 		locker.lock();
 		waterRipples.push_back(img);
 		locker.unlock();
+	}
+
+	// ---- GGMAX 3.107: fresh-streamout guard instrument (see RunMeshUpdateSystem) -------------
+	// Every time a held mesh is found with an unwritten streamout half, the event is counted and
+	// kept in a small ring - with how many rendered frames ago its ARMATURE got its first pose.
+	// 0 = in this same frame, i.e. by a render-less Scene::Update - the mechanism the fix's
+	// comment names, printed as a number. (A bare "was it posed" flag is useless here: a held
+	// armature is always already posed, by construction - the 3.107 review caught exactly that.)
+	// gg_skin_fresh_guard = false is the harness A/B lever: the event is still counted but the
+	// mesh stays held, i.e. the pre-3.107 behaviour.
+	bool gg_skin_fresh_guard = true;
+	std::atomic<uint32_t> gg_skin_fresh_total{ 0 };
+	uint32_t gg_skin_drawn_garbage = 0;
+	uint32_t gg_skin_drawn_stale = 0;
+	uint32_t gg_skin_sameframe_updates = 0;
+	struct GGSkinFreshEvent { uint32_t frame; wi::ecs::Entity mesh; wi::ecs::Entity armature; uint32_t posedAgo; uint8_t guard; };
+	static GGSkinFreshEvent gg_skin_fresh_ring[8];
+	static uint32_t gg_skin_fresh_ring_n = 0;
+	static wi::SpinLock gg_skin_fresh_lock;
+	void gg_skin_fresh_note(wi::ecs::Entity mesh, wi::ecs::Entity armature)
+	{
+		gg_skin_fresh_total.fetch_add(1, std::memory_order_relaxed);
+		// gg_anim_posed_once is only written in RunAnimationUpdateSystem, which has finished
+		// (and been waited on) before RunMeshUpdateSystem runs - concurrent reads are safe.
+		const uint64_t fc = GetDevice()->GetFrameCount();
+		const auto it = gg_anim_posed_once.find(armature);
+		const uint32_t posedAgo = (it == gg_anim_posed_once.end()) ? 0xFFFFFFFFu : (uint32_t)(fc - it->second);
+		GGSkinFreshEvent e = { (uint32_t)fc, mesh, armature, posedAgo, (uint8_t)(gg_skin_fresh_guard ? 1 : 0) };
+		gg_skin_fresh_lock.lock();
+		gg_skin_fresh_ring[gg_skin_fresh_ring_n % 8] = e;
+		gg_skin_fresh_ring_n++;
+		gg_skin_fresh_lock.unlock();
+	}
+	int gg_skin_fresh_report(char* out, int size)
+	{
+		const Scene& scene = GetScene();
+		int w = _snprintf(out, size,
+			"SKIN PING-PONG GUARDS (3.107): guard=%d  (1 = fixed; 0 = pre-3.107 behaviour for A/B)\n"
+			"  freshEvents=%u      held mesh found with an unwritten streamout half (guard 1 skins it anyway)\n"
+			"  drawnGarbage=%u     render truth: held meshes DRAWN from an unwritten half - the splayed character\n"
+			"  drawnStale=%u       render truth: held meshes DRAWN from an older pose than the newest written\n"
+			"  sameFrameUpdates=%u scene updates that were not the first of their frame (editor pick refresh, deletes)\n",
+			gg_skin_fresh_guard ? 1 : 0, gg_skin_fresh_total.load(std::memory_order_relaxed),
+			gg_skin_drawn_garbage, gg_skin_drawn_stale, gg_skin_sameframe_updates);
+		gg_skin_fresh_lock.lock();
+		const uint32_t n = gg_skin_fresh_ring_n;
+		GGSkinFreshEvent ring[8];
+		std::memcpy(ring, gg_skin_fresh_ring, sizeof(ring));
+		gg_skin_fresh_lock.unlock();
+		const uint32_t first = n > 8 ? n - 8 : 0;
+		for (uint32_t i = first; i < n && w > 0 && w < size - 160; ++i)
+		{
+			const GGSkinFreshEvent& e = ring[i % 8];
+			const NameComponent* nm = scene.names.GetComponent(e.mesh);
+			char ago[24];
+			if (e.posedAgo == 0xFFFFFFFFu) _snprintf(ago, sizeof(ago), "never");
+			else _snprintf(ago, sizeof(ago), "%u", e.posedAgo);
+			ago[sizeof(ago) - 1] = 0;
+			w += _snprintf(out + w, size - w, "  frame %u mesh %llu '%s' armature %llu firstPosedFramesAgo=%s guard=%d\n",
+				e.frame, (unsigned long long)e.mesh, nm ? nm->name.c_str() : "?", (unsigned long long)e.armature,
+				ago, e.guard);
+		}
+		if (size > 0) out[size - 1] = 0;
+		return w;
 	}
 
 	bool gg_anim_armature_held(const Scene& scene, wi::ecs::Entity armatureID)

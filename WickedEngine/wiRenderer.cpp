@@ -6806,15 +6806,25 @@ void UpdateRenderData(
 			Entity entity = vis.scene->meshes.GetEntity(i);
 			const MeshComponent& mesh = vis.scene->meshes[i];
 
-			// This mesh's armature was held this frame: its bone matrices are byte-identical to
-			// last frame's, so the dispatch would recompute vertices already in the streamout
-			// buffer. Meshes with no armature (morph-only) are never skipped.
-			if (gg_red_active && mesh.armatureID != wi::ecs::INVALID_ENTITY)
+			// This mesh was held this frame: its armature's bone matrices are unchanged and the
+			// half being drawn already holds that pose. Meshes with no armature (morph-only) are
+			// never held.
+			// ★ GGMAX 3.107: read the PER-MESH decision RunMeshUpdateSystem made (and gated its
+			// ping-pong swap on), not the armature vector - that decision also refuses to hold a
+			// mesh whose streamout has never been written, and the swap and the dispatch must
+			// agree or the drawn half goes stale (3.92).
+			if (gg_red_active && mesh.gg_skin_held)
 			{
-				const size_t gg_ai = vis.scene->armatures.GetIndex(mesh.armatureID);
-				if (gg_ai < wi::scene::gg_anim_armature_update.size() &&
-					wi::scene::gg_anim_armature_update[gg_ai] == 0)
-					continue;
+				// GGMAX 3.107 instrument - what a held mesh REALLY draws this frame: a half no
+				// dispatch ever wrote (garbage: the splayed character) or a written half that is not
+				// the newest (an old pose: the double-swap flick). Both must stay 0 with the guard on.
+				if (mesh.so_pos.IsValid())
+				{
+					const uint8_t gg_b = mesh.gg_so_bit(mesh.so_pos);
+					if ((mesh.gg_so_written & gg_b) == 0) wi::scene::gg_skin_drawn_garbage++;
+					else if (mesh.gg_so_last_bit != 0 && gg_b != mesh.gg_so_last_bit) wi::scene::gg_skin_drawn_stale++;
+				}
+				continue;
 			}
 
 			if (
@@ -6875,6 +6885,8 @@ void UpdateRenderData(
 				device->PushConstants(&push, sizeof(push), cmd);
 
 				device->Dispatch(((uint32_t)mesh.vertex_positions.size() + 63) / 64, 1, 1, cmd);
+				mesh.gg_so_last_bit = mesh.gg_so_bit(mesh.so_pos);   // GGMAX 3.107: this half now holds
+				mesh.gg_so_written |= mesh.gg_so_last_bit;            // the newest pose
 
 				PushBarrier(GPUBarrier::Buffer(&mesh.streamoutBuffer, ResourceState::UNORDERED_ACCESS, ResourceState::SHADER_RESOURCE));
 			}

@@ -1205,6 +1205,7 @@ namespace wi::scene
 			// object _flags are never persisted by MAX (objects are rebuilt from FPE/model
 			// load every level load; the tree pool re-asserts this flag at creation).
 			OCCLUSION_QUERY_DISABLED = 1 << 28,	// GGMAX: opt this object out of per-object GPU occlusion queries (always treated as visible)
+			SHADOW_DISTANCE_FADE = 1 << 27,		// GGMAX 3.108: its sun shadow dissolves with its distance fade instead of cutting off (tree pool)
 		};
 		uint32_t _flags = RENDERABLE | CAST_SHADOW;
 
@@ -1274,6 +1275,12 @@ namespace wi::scene
 		// GGMAX: exclude this object from GPU occlusion queries — it is always considered visible.
 		// Use for huge pools of cheap objects (tree pool) where query bookkeeping costs more than drawing.
 		constexpr void SetOcclusionQueryDisabled(bool value) { if (value) { _flags |= OCCLUSION_QUERY_DISABLED; } else { _flags &= ~OCCLUSION_QUERY_DISABLED; } }
+		// GGMAX 3.108: the object's SUN SHADOW fades out over the same band as the object itself,
+		// [draw_distance, draw_distance + radius], instead of staying solid until the caster is culled.
+		// Stock shadow batches carry distance 0, so the distance dither never ran for shadows - a
+		// tree's mesh shadow vanished in one frame at the end of the tree pool (tester report #5).
+		constexpr void SetShadowDistanceFade(bool value) { if (value) { _flags |= SHADOW_DISTANCE_FADE; } else { _flags &= ~SHADOW_DISTANCE_FADE; } }
+		constexpr bool IsShadowDistanceFade() const { return _flags & SHADOW_DISTANCE_FADE; }
 
 		constexpr bool IsRenderable() const { return (_flags & RENDERABLE) && (GetTransparency() < 0.99f); }
 		constexpr bool IsCastingShadow() const { return _flags & CAST_SHADOW; }

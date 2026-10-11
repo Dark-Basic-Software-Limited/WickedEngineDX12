@@ -373,6 +373,12 @@ std::atomic<unsigned long long> gg_dbg_transparent_shadow_batches{ 0 };
 // every timing number looked healthy while the mechanism under test never ran.
 // Reset each gather so the value is per-frame, not cumulative.
 std::atomic<unsigned int> gg_dbg_shadow_casters{ 0 };
+// GGMAX 3.108: SHADOW_DISTANCE_FADE objects (the tree pool) dissolve their sun shadow with their
+// distance fade. gg_shadow_distance_fade = false restores the stock hard cut (harness
+// SET_SHADOWDISTFADE 0, for A/B); gg_dbg_shadow_fading counts the casters inside their fade band this
+// frame - the executed-check that the dither is actually being asked for.
+bool gg_shadow_distance_fade = true;
+std::atomic<unsigned int> gg_dbg_shadow_fading{ 0 };
 std::atomic<unsigned long long> gg_dbg_transparent_shadow_frames{ 0 };
 
 // GGMAX: skip the transparent shadow DRAWS (harness SET_TRANSPARENTSHADOWS 0). The atlas is
@@ -8589,6 +8595,7 @@ void DrawShadowmaps(
 
 			// GGMAX 2.28: per-frame caster count — the executed-check for gg_shadow_caster_extrude.
 			gg_dbg_shadow_casters.store(0, std::memory_order_relaxed);
+			gg_dbg_shadow_fading.store(0, std::memory_order_relaxed);   // GGMAX 3.108
 
 			for (size_t i = 0; i < vis.scene->aabb_objects.size(); ++i)
 			{
@@ -8645,8 +8652,19 @@ void DrawShadowmaps(
 						// gg_shadow_caster_extrude — that is the whole point of the counter.
 						gg_dbg_shadow_casters.fetch_add(1, std::memory_order_relaxed);
 
+						// ★ GGMAX 3.108: an opted-in object (the tree pool) gets its REAL eye distance - the
+						// same EYE-to-centre value the camera pass uses (DrawScene) - so RenderMeshes computes
+						// the same dither = (distance - fadeDistance) / radius and the shadow dissolves in step
+						// with the visible mesh (shadowPS_alphatest applies it). Stock passes 0: no fade, so
+						// the shadow stayed solid until the hard cull above and then vanished in one frame -
+						// a pine went from self-shadowed to fully lit as the camera backed away (report #5).
+						// Every other object keeps 0 - nothing else changes.
+						const float gg_shadowBatchDist = (gg_shadow_distance_fade && object.IsShadowDistanceFade()) ? std::sqrt(distanceSq) : 0.0f;
+						if (gg_shadowBatchDist > object.fadeDistance && gg_shadowBatchDist > 0.0f)
+							gg_dbg_shadow_fading.fetch_add(1, std::memory_order_relaxed);
+
 						RenderBatch batch;
-						batch.Create(object.mesh_index, uint32_t(i), 0, object.sort_bits, camera_mask, shadow_lod);
+						batch.Create(object.mesh_index, uint32_t(i), gg_shadowBatchDist, object.sort_bits, camera_mask, shadow_lod);
 
 						const uint32_t filterMask = object.GetFilterMask();
 						if (filterMask & FILTER_OPAQUE)

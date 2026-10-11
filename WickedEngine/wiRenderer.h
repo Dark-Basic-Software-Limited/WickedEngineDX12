@@ -98,6 +98,10 @@ namespace wi::renderer
 	// The executed-check for gg_shadow_caster_extrude — VISIBLE_OBJECTS cannot see the effect,
 	// so without this an A/B cannot distinguish "no cost" from "the knob did nothing".
 	extern std::atomic<unsigned int> gg_dbg_shadow_casters;
+	// GGMAX 3.108: sun shadows of SHADOW_DISTANCE_FADE objects dissolve with their distance fade
+	// (false = stock hard cut, for A/B); per-frame count of casters inside their fade band.
+	extern bool gg_shadow_distance_fade;
+	extern std::atomic<unsigned int> gg_dbg_shadow_fading;
 	// GGMAX 2.31: per-MESH draw tracer for the harness WHYNOTDRAWN command. Set gg_dbg_watch_mesh
 	// to a mesh index to arm it (-1 = off, zero cost). Counters are per RENDERPASS, so a mesh that
 	// draws in SHADOW but not in MAIN — the "no mesh, perfect shadow" signature — is visible at a

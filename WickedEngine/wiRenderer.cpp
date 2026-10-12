@@ -8409,6 +8409,33 @@ bool GetShadowFarCascadeCull()
 	return shadowFarCascadeCull;
 }
 
+// ★ GGMAX 3.108/3.108b: the shadow distance fade, shared by the SUN, SPOT and POINT shadow gathers so
+// a SHADOW_DISTANCE_FADE object fades (and stops casting) identically in all three.
+// Writes the RenderBatch distance - the real eye distance, shifted by (fadeDistance -
+// gg_shadow_fade_start) when the shadow is to start fading before the object does, so RenderMeshes'
+// dither = (distance - fadeDistance) / radius reads (d - start) / radius - and returns false once the
+// shadow has fully dissolved (RenderMeshes would skip it at 0.99): no batch, not a caster.
+// Unflagged objects (or the lever off) get 0, the stock behaviour.
+// The shift is applied only while fadeDistance is a real distance: RenderBatch clamps to the half
+// range (65504), so a shift off a huge fadeDistance (harness SET_TREEMESHFADE 0 gives 1e30) would be
+// lost to rounding - the game keeps its hard switch at the slider in that case.
+static inline bool gg_ShadowFadeBatchDistance(const ObjectComponent& object, float distanceSq, float& outDistance)
+{
+	outDistance = 0.0f;
+	if (!gg_shadow_distance_fade || !object.IsShadowDistanceFade())
+		return true;
+	outDistance = std::sqrt(distanceSq);
+	if (object.fadeDistance < 65000.0f)
+	{
+		const float early = object.fadeDistance - object.gg_shadow_fade_start;
+		if (early > 0.0f)
+			outDistance += early;
+	}
+	if (object.radius > 0.0f && (outDistance - object.fadeDistance) / object.radius > 0.99f)
+		return false;
+	return true;
+}
+
 void DrawShadowmaps(
 	const Visibility& vis,
 	CommandList cmd
@@ -8647,11 +8674,6 @@ void DrawShadowmaps(
 						if (camera_mask == 0)
 							continue;
 
-						// GGMAX 2.28: this object survived the cascade cull and WILL be drawn as a shadow
-						// caster. Counted HERE (not at the loop top) so the number responds to
-						// gg_shadow_caster_extrude — that is the whole point of the counter.
-						gg_dbg_shadow_casters.fetch_add(1, std::memory_order_relaxed);
-
 						// ★ GGMAX 3.108: an opted-in object (the tree pool) gets its REAL eye distance - the
 						// same EYE-to-centre value the camera pass uses (DrawScene) - so RenderMeshes computes
 						// the same dither = (distance - fadeDistance) / radius and the shadow dissolves in step
@@ -8659,9 +8681,22 @@ void DrawShadowmaps(
 						// the shadow stayed solid until the hard cull above and then vanished in one frame -
 						// a pine went from self-shadowed to fully lit as the camera backed away (report #5).
 						// Every other object keeps 0 - nothing else changes.
-						const float gg_shadowBatchDist = (gg_shadow_distance_fade && object.IsShadowDistanceFade()) ? std::sqrt(distanceSq) : 0.0f;
-						if (gg_shadowBatchDist > object.fadeDistance && gg_shadowBatchDist > 0.0f)
+						// ★ GGMAX 3.108b: a SHADOW-ONLY fade that starts nearer than the object's own
+						// (gg_shadow_fade_start < fadeDistance - a Tree Shadow LOD Distance below the pool's
+						// reach). RenderMeshes only knows fadeDistance, so the distance is SHIFTED by the
+						// difference: its dither then reads (d - start) / radius, and the shadow dissolves over
+						// [start, start + radius] while the tree itself stays. Lee: "when I set the distance
+						// to 1000 I saw the shadow pop in, no fade transition was evident".
+						float gg_shadowBatchDist = 0.0f;
+						if (!gg_ShadowFadeBatchDistance(object, distanceSq, gg_shadowBatchDist))
+							continue;   // fully dissolved: no batch, not a caster
+						if (gg_shadowBatchDist > object.fadeDistance)
 							gg_dbg_shadow_fading.fetch_add(1, std::memory_order_relaxed);
+
+						// GGMAX 2.28: this object survived the cascade cull and WILL be drawn as a shadow
+						// caster. Counted HERE (not at the loop top) so the number responds to
+						// gg_shadow_caster_extrude — that is the whole point of the counter.
+						gg_dbg_shadow_casters.fetch_add(1, std::memory_order_relaxed);
 
 						RenderBatch batch;
 						batch.Create(object.mesh_index, uint32_t(i), gg_shadowBatchDist, object.sort_bits, camera_mask, shadow_lod);
@@ -8827,8 +8862,14 @@ void DrawShadowmaps(
 							shadow_lod = std::min(shadow_lod, candidate_lod);
 						}
 
+						// GGMAX 3.108b: same shadow distance fade as the sun (review: the tree cast flag now
+						// reaches past the slider, and those trees must not cast solid into local lights)
+						float gg_shadowBatchDist = 0.0f;
+						if (!gg_ShadowFadeBatchDistance(object, distanceSq, gg_shadowBatchDist))
+							continue;
+
 						RenderBatch batch;
-						batch.Create(object.mesh_index, uint32_t(i), 0, object.sort_bits, 0xFF, shadow_lod);
+						batch.Create(object.mesh_index, uint32_t(i), gg_shadowBatchDist, object.sort_bits, 0xFF, shadow_lod);
 
 						const uint32_t filterMask = object.GetFilterMask();
 						if (filterMask & FILTER_OPAQUE)
@@ -8996,8 +9037,13 @@ void DrawShadowmaps(
 						if (camera_mask == 0)
 							continue;
 
+						// GGMAX 3.108b: same shadow distance fade as the sun
+						float gg_shadowBatchDist = 0.0f;
+						if (!gg_ShadowFadeBatchDistance(object, distanceSq, gg_shadowBatchDist))
+							continue;
+
 						RenderBatch batch;
-						batch.Create(object.mesh_index, uint32_t(i), 0, object.sort_bits, camera_mask, shadow_lod);
+						batch.Create(object.mesh_index, uint32_t(i), gg_shadowBatchDist, object.sort_bits, camera_mask, shadow_lod);
 
 						const uint32_t filterMask = object.GetFilterMask();
 						if (filterMask & FILTER_OPAQUE)

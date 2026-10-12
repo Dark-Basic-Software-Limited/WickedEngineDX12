@@ -1239,6 +1239,11 @@ namespace wi::scene
 		XMFLOAT3 center = XMFLOAT3(0, 0, 0);
 		float radius = 0;
 		float fadeDistance = 0;
+		// GGMAX 3.108b: for a SHADOW_DISTANCE_FADE object, the distance at which its sun SHADOW starts
+		// to fade, when that is NEARER than its own fade (fadeDistance) - e.g. a Tree Shadow LOD Distance
+		// below the tree pool's reach. The shadow then dissolves over [start, start + radius] while the
+		// object itself stays. FLT_MAX = no separate start: the shadow fades with the object. Runtime only.
+		float gg_shadow_fade_start = std::numeric_limits<float>::max();
 
 		uint16_t lod = 0;
 		mutable bool wetmap_cleared = false;

@@ -1820,7 +1820,7 @@ struct TerrainVirtualTexturePush
 	int blendmap_texture;
 	uint blendmap_layers;
 	int output_texture;
-	uint gg_tile_share;	// GGMAX 1.53 (was padding0): bits 0..23 = region mip0 resolution, bits 24..31 = tiling share-mip count K (0 = stock)
+	uint gg_tile_share;	// GGMAX 1.53 (was padding0): bits 24..31 = tiling repeat cap, 16..23 = ladder hold; GGMAX 3.113: bit 0 = SPLAT blend
 };
 struct VirtualTextureResidencyUpdateCB
 {

@@ -101,6 +101,15 @@ void main(uint3 DTid : SV_DispatchThreadID)
 		
 		half4 total_color = 0;
 		half accumulation = 0;
+		// GGMAX 3.113: SPLAT blend (push.gg_tile_share bit 0 = wi::terrain::gg_splat_blend). GameGuru writes
+		// DX11 SPLAT weights - they sum to 1, base included - and the stock loop below is a front-to-back
+		// DECAL stack that wants opacities (stock keeps base = 1). Fed splat weights it covered only
+		// 1 - prod(1 - w): blended ground went up to 25% dark and the BC5 normal map (0.5 = flat) collapsed
+		// toward (-1,-1), a consistent tilt. Splat mode = sum(w * c) / sum(w): exact under the bilinear
+		// sampling of the per-vertex blendmap (splat weights interpolate linearly, opacities do not) and
+		// under 8-bit rounding. Spline layers (not used by GameGuru) would need the stock rule.
+		const bool gg_splat = (push.gg_tile_share & 1u) != 0;
+		float gg_splat_weight = 0;
 
 		// Note: blending is front-to back with early exit like decals
 		for(int blendmap_index = push.blendmap_layers - 1; blendmap_index >= 0; blendmap_index--)
@@ -124,6 +133,13 @@ void main(uint3 DTid : SV_DispatchThreadID)
 				half4 baseColorMap = tex.SampleLevel(sampler_linear_wrap, uv2 * ts.xy, ts.z);
 				baseColor *= baseColorMap;
 			}
+			[branch]
+			if (gg_splat) // GGMAX 3.113
+			{
+				total_color += weight * baseColor;
+				gg_splat_weight += weight;
+				continue;
+			}
 			total_color = mad(1 - accumulation, weight * baseColor, total_color);
 			accumulation = mad(1 - weight, accumulation, weight);
 			if(accumulation >= 1)
@@ -131,6 +147,23 @@ void main(uint3 DTid : SV_DispatchThreadID)
 #endif // UPDATE_BASECOLORMAP
 
 #ifdef UPDATE_NORMALMAP
+			[branch]
+			if (gg_splat) // GGMAX 3.113: a layer with no normal map is FLAT here, not absent
+			{
+				half2 normalMap = half2(0.5, 0.5);
+				[branch]
+				if (material.textures[NORMALMAP].IsValid())
+				{
+					Texture2D tex = bindless_textures[descriptor_index(material.textures[NORMALMAP].texture_descriptor)];
+					float2 dim = 0;
+					tex.GetDimensions(dim.x, dim.y);
+					float3 ts = gg_tile_uv_scale_lod(dim);
+					normalMap = tex.SampleLevel(sampler_linear_wrap, uv2 * ts.xy, ts.z).rg;
+				}
+				total_color.rg += weight * normalMap;
+				gg_splat_weight += weight;
+				continue;
+			}
 			[branch]
 			if (material.textures[NORMALMAP].IsValid())
 			{
@@ -158,6 +191,13 @@ void main(uint3 DTid : SV_DispatchThreadID)
 				half4 surfaceMap = tex.SampleLevel(sampler_linear_wrap, uv2 * ts.xy, ts.z);
 				surface *= surfaceMap;
 			}
+			[branch]
+			if (gg_splat) // GGMAX 3.113
+			{
+				total_color += weight * surface;
+				gg_splat_weight += weight;
+				continue;
+			}
 			total_color = mad(1 - accumulation, weight * surface, total_color);
 			accumulation = mad(1 - weight, accumulation, weight);
 			if(accumulation >= 1)
@@ -177,12 +217,22 @@ void main(uint3 DTid : SV_DispatchThreadID)
 				emissiveColor.rgb = emissiveMap.rgb * emissiveMap.a;
 				emissiveColor.a = emissiveMap.a;
 			}
+			[branch]
+			if (gg_splat) // GGMAX 3.113
+			{
+				total_color += weight * emissiveColor;
+				gg_splat_weight += weight;
+				continue;
+			}
 			total_color = mad(1 - accumulation, weight * emissiveColor, total_color);
 			accumulation = mad(1 - weight, accumulation, weight);
 			if(accumulation >= 1)
 				break;
 #endif // UPDATE_EMISSIVEMAP
 		}
+		// GGMAX 3.113: splat = weighted AVERAGE
+		if (gg_splat && gg_splat_weight > 0)
+			total_color /= gg_splat_weight;
 
 #ifdef UPDATE_BASECOLORMAP
 		block_rgb[idx] = ApplySRGBCurve_Fast(total_color.rgb);

@@ -108,6 +108,8 @@ namespace wi::terrain
 	// at 4x4 (BC1 has no smaller block); the caller must create its BC1 destination with the same
 	// count, because BlockCompress pairs source mip N with destination mip N.
 	uint32_t gg_BakeMipCount(uint32_t resolution);
+	// GGMAX 3.113: terrain compositor SPLAT blend - weights are averaged, not stacked as opacities.
+	extern bool gg_splat_blend;
 	// Frees the shared uncompressed bake scratch - ~340 MB at 8192 with mips, so call it once
 	// the bake has finished rather than leaving it resident.
 	void gg_ReleaseBakeScratch();

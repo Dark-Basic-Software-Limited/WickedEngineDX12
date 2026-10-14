@@ -471,6 +471,10 @@ namespace wi::terrain
 	// rings/promotions cannot cause seams or scale pops. 0 = stock (scale cross-fades start at
 	// the camera). Chunk ≈ 5120 in: cap 8 ≈ 16m texture repeat, 16 ≈ 8m, 32 ≈ 4m. Live-tunable:
 	// harness SET_TERRAINTILE <cap> [hold] (queues a fast repaint of resident chunk VTs on change).
+	// GGMAX 3.113: SPLAT blend for the terrain compositor (terrainVirtualTextureUpdateCS / terrainBakeChunkCS,
+	// push.gg_tile_share bit 0): blendmap weights are splat weights summing to 1 and are AVERAGED, instead of
+	// the stock front-to-back opacity stack. GameGuru sets it (its auto-blend writes DX11 splat weights).
+	bool gg_splat_blend = false;
 	uint32_t gg_terrain_tile_share_mips = 32; // USER-TUNED 2026-07-28: "human scaled" underfoot detail (~4m repeat)
 	// GGMAX 1.53c: hold — delays the halving ladder by this many rungs before it descends from
 	// the cap, pushing the FIRST visible scale cross-fade ~1.4x further out per +1 while the
@@ -2618,7 +2622,8 @@ namespace wi::terrain
 		// Same distance-tiling policy as the live terrain, or the baked chunks would disagree
 		// with any still-live chunk on texture scale.
 		push.gg_tile_share = (std::min(gg_terrain_tile_share_mips, 255u) << 24u)
-			| (std::min(gg_terrain_tile_hold_mips, 255u) << 16u);
+			| (std::min(gg_terrain_tile_hold_mips, 255u) << 16u)
+			| (gg_splat_blend ? 1u : 0u); // GGMAX 3.113
 
 		device->EventBegin("GGMAX Terrain Bake Chunk", cmd);
 		wi::renderer::BindCommonResources(cmd);
@@ -2797,7 +2802,8 @@ namespace wi::terrain
 
 				// GGMAX 1.53b/c: tiling repeat cap (bits 24..31; 0 = stock) + ladder hold (bits 16..23)
 				push.gg_tile_share = (std::min(gg_terrain_tile_share_mips, 255u) << 24u)
-					| (std::min(gg_terrain_tile_hold_mips, 255u) << 16u);
+					| (std::min(gg_terrain_tile_hold_mips, 255u) << 16u)
+					| (gg_splat_blend ? 1u : 0u); // GGMAX 3.113
 
 				for (auto& request : vt->update_requests)
 				{

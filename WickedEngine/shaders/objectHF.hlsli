@@ -1438,6 +1438,13 @@ float4 main(PixelInput input, in bool is_frontface : SV_IsFrontFace APPEND_COVER
 	case 18: { float3 c = lighting.direct.specular;   return float4(c / (1 + c), 1); }  // direct specular
 	case 19: { float3 c = lighting.indirect.diffuse;  return float4(c / (1 + c), 1); }  // ambient/GI diffuse
 	case 20: { float3 c = lighting.indirect.specular; return float4(c / (1 + c), 1); }  // reflections/probes
+	// GGMAX 3.113: the three SUMMANDS of ApplyLighting's final colour, unencoded (linear HDR, the same
+	// post-process as a normal frame). The Reinhard views above saturate on a bright sun - 17 read
+	// "baked 0.94 of live" for a term that differed by more - so these compare like with like.
+	// GGTerrainBakePS.hlsl answers the same three, which is what they were added for.
+	case 25: return float4(surface.albedo * lighting.direct.diffuse / PI, 1);                                               // sun/local diffuse share
+	case 26: return float4(surface.albedo * lighting.indirect.diffuse * GetGIBoost() * (1 - surface.F) * surface.occlusion, 1); // ambient diffuse share
+	case 27: return float4(lighting.direct.specular + lighting.indirect.specular * surface.occlusion, 1);                    // specular share
 	default: break;
 	}
 #endif // PREPASS

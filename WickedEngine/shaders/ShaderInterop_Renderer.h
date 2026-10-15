@@ -1296,6 +1296,9 @@ enum FRAME_OPTIONS
 	// disk. A frame-wide flag, so the branch in sample_shadow is coherent for every pixel of
 	// every draw and the GPU never diverges on it.
 	OPTION_BIT_GG_FAST_SHADOWS = 1 << 28,
+	// GGMAX 3.114: fog optical depth over the distance PAST fog.start only - DX11 GG's curve (fogHF.hlsli
+	// GetFogAmount). Off = the stock curve. Frame-wide, so the game's custom draws mirror it exactly.
+	OPTION_BIT_GG_DX11_FOG_CURVE = 1 << 27,
 };
 
 // ---------- Common Constant buffers: -----------------

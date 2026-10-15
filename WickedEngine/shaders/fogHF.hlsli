@@ -46,7 +46,19 @@ inline half GetFogAmount(float distance, float3 O, float3 V)
 	else
 	{
 		// Height fog algorithm (above) reduced with infinity start and end heights:
-		
+
+		// GGMAX 3.114: DX11 GG's fog curve - optical depth over the distance PAST fog.start, which is
+		// what DX11's objectHF ApplyFog and GG's ApplyFogCustom both did (exp((d - near) * 4 / (near
+		// - far)), and GG stores density = 4 / (far - near)). The stock curve integrates from the CAMERA
+		// once past 2 x start, so with a non-zero start every distance was over-fogged: at Lee's
+		// DX12TESTLEVEL (start 40000) the restored horizon mountain sat at 42% fog against DX11's 26%
+		// and read as a pale silhouette. ★ 40000 is the DEFAULT fog start of a GameGuru level
+		// (visuals_resetvalues), so this changes most levels' distant haze - toward DX11. Identical only
+		// at start 0. OPTION_BIT_GG_DX11_FOG_CURVE (setup.ini fogdx11curve=0) restores the stock line.
+		[branch] if (GetFrame().options & OPTION_BIT_GG_DX11_FOG_CURVE)
+		{
+			return 1.0 - exp(-fog.density * max(0, distance - fog.start));
+		}
 		float opticalDepthHeightFog = fog.density * startDistanceFalloff * distance;
 		float transmittanceHeightFog = exp(-opticalDepthHeightFog);
 		

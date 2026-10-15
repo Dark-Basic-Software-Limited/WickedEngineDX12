@@ -310,6 +310,9 @@ bool gg_weapon_shadow = true;
 // diffuse and both specular D terms their own. Revert with setup.ini `lightfalloff=0`, or live
 // with the harness `SET_LIGHTFALLOFF 0` for a same-session A/B.
 bool gg_dx11_light_falloff = true;
+// GGMAX 3.114: OPTION_BIT_GG_DX11_FOG_CURVE (fogHF.hlsli GetFogAmount). The default fog start of a
+// GameGuru level is 40000 (visuals_resetvalues), so this changes the distant haze on most levels.
+bool gg_dx11_fog_curve = true;
 std::atomic<size_t> SHADER_ERRORS{ 0 };
 std::atomic<size_t> SHADER_MISSING{ 0 };
 bool VXGI_ENABLED = false;
@@ -5716,6 +5719,10 @@ void UpdatePerFrameData(
 	if (gg_dx11_light_falloff)
 	{
 		frameCB.options |= OPTION_BIT_GG_DX11_LIGHT_FALLOFF; // GGMAX 2.10
+	}
+	if (gg_dx11_fog_curve)
+	{
+		frameCB.options |= OPTION_BIT_GG_DX11_FOG_CURVE; // GGMAX 3.114
 	}
 	// GGMAX 3.33: tell the shader whether the transparent shadow atlas is real. When it is not,
 	// the fetch samples white and multiplies by 1 - pure waste, 16 times per light per pixel.

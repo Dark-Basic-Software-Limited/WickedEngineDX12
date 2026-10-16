@@ -27,6 +27,9 @@ VertexToPixel main(uint vid : SV_VertexID)
 
 	Out.fade = saturate(distance(position.xyz, GetCamera().position.xyz) / xHairViewDistance);
 	Out.fade = saturate(Out.fade - 0.8f) * 5.0f; // fade will be on edge and inwards 20%
+	// GGMAX 3.117: under the DX11 far field the simulate CS already dissolved the strands (per strand,
+	// L..R); fading the survivors again over 0.8R..R would thin the far band twice.
+	if (xHairFlags & HAIR_FLAG_GG_DX11_FALLOFF) Out.fade = 0;
 
 	Out.pos = float4(position, 1);
 	Out.clip = dot(Out.pos, GetCamera().clip_plane);

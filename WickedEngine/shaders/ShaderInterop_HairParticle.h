@@ -61,6 +61,12 @@ enum HAIR_FLAGS
 	// narrows the defect to the per-type textures themselves being sampled: either one type's
 	// descriptor points at per-frame-changing content, or divergent-resource sampling per se.
 	HAIR_FLAG_GG_DEBUG_UNIFORMCB = 1 << 10,
+	// GGMAX 3.117: DX11 grass FAR-FIELD falloff (GG grass only). Replaces the 1.49b strand LOD AND the
+	// 80%..100% view-distance fade: every strand is drawn at full size out to xHairGGLodStep2Dist (= the
+	// Grass Draw Distance L), then drops at its OWN threshold L + u*(R-L), R = xHairGGLodStep4Dist, u =
+	// mean of three hashed uniforms - DX11 GGGrassPS discarded a pixel when dist > noise*2500 + L with a
+	// bilinear-filtered noise (effective sd ~0.17, 50% at L+1250); Irwin-Hall n=3 has sd 0.167. No widening.
+	HAIR_FLAG_GG_DX11_FALLOFF = 1 << 11,
 	// GGMAX 1.95b: bits 16-23 of xHairFlags carry (forcedType+1); non-zero forces EVERY pixel's
 	// texture lookup to that type — a "FREEZE_TEXTURE for each k". The bisector for the two
 	// worlds above: if some forced type k churns while the others are clean, type k's texture
@@ -139,6 +145,9 @@ CBUFFER(HairParticleCB, CBSLOT_OTHER_HAIRPARTICLE)
 
 	float xHairGravityPower;
 	uint xHairBillboardCount;
+	// GGMAX 3.117: under HAIR_FLAG_GG_DX11_FALLOFF these three fields mean something else - Step2Dist = L
+	// (full size to here; 0 is a valid L = dissolve from the camera), Step4Dist = R (gone by here),
+	// WidthBoost = 1 (unused) - and the flag test comes first, so the 1.49b shape below never runs.
 	// GGMAX 1.49b grass strand LOD (Step2Dist 0 = disabled -> stock behavior). Around
 	// Step2Dist half the strands drop, around Step4Dist half the remainder — each strand at
 	// its own hash-jittered radius (+-15%) so camera motion causes sparse single-blade events,

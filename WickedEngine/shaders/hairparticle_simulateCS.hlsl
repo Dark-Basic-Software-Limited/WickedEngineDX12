@@ -46,8 +46,17 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 Gid : SV_GroupID, uint groupIn
 		
 	ShaderGeometry geometry = HairGetGeometry();
 	
+	// GGMAX 3.117 (review): THE 65536-STRAND SEED COLLISION. RNG::init packs s0 = (id.x << 16) | id.y, so
+	// with the stock (xHairRandomSeed, DTid.x) every strand at or past 65536 OR-ed its high bits into the
+	// seed: with seed 1 (every GG grass system) strands 65536..131071 were bit-identical COPIES of strands
+	// 0..65535 - same triangle, barycentrics, length, billboards. A 98,010-strand chunk (3.116 DX11 density
+	// at the 1500 default) drew 65.5k unique blades; the 3.117 dissolve then dropped each copy on its own,
+	// so the far band read denser than DX11 (L=1500: survival 0.47 vs 0.32). Carry the high bits by ADDING
+	// them to the seed instead: identical to stock whenever (seed & (DTid >> 16)) == 0 - every strand below
+	// 65536 and every one that was already unique keeps its exact placement; only the copies move.
+	const uint2 gg_strand_seed = uint2(xHairRandomSeed + (DTid.x >> 16u), DTid.x & 0xFFFFu);
 	RNG rng;
-	rng.init(uint2(xHairRandomSeed, DTid.x), 0);
+	rng.init(gg_strand_seed, 0);
 	
 	// random triangle on emitter surface:
 	const uint triangleCount = xHairBaseMeshIndexCount / 3;
@@ -270,7 +279,20 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 Gid : SV_GroupID, uint groupIn
 	const float gg_lod_scale = gg_merged ? (gg_viewdist / max(xHairViewDistance, 1.0f)) : 1.0f;
 	const float gg_lod_step2 = xHairGGLodStep2Dist * gg_lod_scale;
 	const float gg_lod_step4 = xHairGGLodStep4Dist * gg_lod_scale;
-	if (gg_lod_step2 > 0)
+	[branch]
+	if (xHairFlags & HAIR_FLAG_GG_DX11_FALLOFF)
+	{
+		// GGMAX 3.117: DX11 far field. Full size to L (step2), then each strand drops at L + u*(R-L) with
+		// u ~ Irwin-Hall(3) from its hashed id - the survival S-curve DX11's noise dissolve produced
+		// (100% to L, 50% at the midpoint, 0 at R). Pure function of (strand id, camera distance):
+		// bit-stable at a parked camera, single-blade events in motion. Survivors are NOT widened.
+		uint h = DTid.x * 2654435761u;
+		h ^= h >> 15; h *= 2246822519u; h ^= h >> 13;
+		const float u = ((float)(h & 1023u) + (float)((h >> 10) & 1023u) + (float)((h >> 20) & 1023u)) / (3.0 * 1023.0);
+		const float gg_dist = sqrt(distsq);
+		gg_lod_dropped = gg_dist > gg_lod_step2 + u * max(gg_lod_step4 - gg_lod_step2, 0.0);
+	}
+	else if (gg_lod_step2 > 0)
 	{
 		uint gg_lod_hash = DTid.x * 2654435761u;
 		gg_lod_hash ^= gg_lod_hash >> 16;
@@ -368,7 +390,7 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 Gid : SV_GroupID, uint groupIn
 
 	// Bottom vertices:
 	half3x3 TBN = half3x3(tangent, normalize(target + bend), binormal);
-	rng.init(uint2(xHairRandomSeed, DTid.x), 1); // reinit random for consistent billboard variation!
+	rng.init(gg_strand_seed, 1); // reinit random for consistent billboard variation! (GGMAX 3.117: unique seed)
 	for (uint billboardID = 0; billboardID < xHairBillboardCount; ++billboardID)
 	{
 		half siz = billboardID == 0 ? 1 : lerp(0.2, 1, rng.next_float());
@@ -593,7 +615,7 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 Gid : SV_GroupID, uint groupIn
 		//draw_line(base, base + normal, float4(0, 1, 0, 1));
 		//draw_line(base, base + binormal, float4(0, 0, 1, 1));
 	
-		rng.init(uint2(xHairRandomSeed, DTid.x), 1); // reinit random for consistent billboard variation!
+		rng.init(gg_strand_seed, 1); // reinit random for consistent billboard variation! (GGMAX 3.117: unique seed)
 		for(uint billboardID = 0; billboardID < xHairBillboardCount; ++billboardID)
 		{
 			half siz = billboardID == 0 ? 1 : lerp(0.2, 1, rng.next_float());

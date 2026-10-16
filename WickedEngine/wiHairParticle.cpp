@@ -46,6 +46,12 @@ namespace wi
 	bool gg_grass_lod = true;
 	float gg_grass_lod_step2_frac = 0.35f;  // fraction of viewDistance where 2x decimation starts
 	float gg_grass_lod_step4_frac = 0.60f;  // fraction of viewDistance where 4x decimation starts
+	// GGMAX 3.117: DX11 far-field falloff for GG grass (HAIR_FLAG_GG_DX11_FALLOFF): 0 off (the 1.49b LOD
+	// below), 1 on, 2 = on with the dissolve pushed out to the view distance (a measuring baseline: every
+	// strand full size to R). gg_grass_dx11_fade_range = DX11's GGGRASS_LOD_TRANSITION (2500). The game
+	// sets these (GGTerrainWicked.cpp).
+	int   gg_grass_dx11_falloff = 0;
+	float gg_grass_dx11_fade_range = 2500.0f;
 	float gg_grass_lod_width_boost = 2.0f;  // widening endpoint per decimation step: 2.0 = exactly
 	                                        // coverage-neutral per halving; <2.0 = deliberate far
 	                                        // thinning (extra perf, visibly sparser far grass)
@@ -669,7 +675,18 @@ namespace wi
 
 			// GGMAX 1.49b: grass strand LOD. Zeroed hcb (= disabled) unless the knob is on
 			// AND this is a GG grass system — upstream/character hair never decimates.
-			if (gg_grass_lod && hair.grass_type != 0)
+			// GGMAX 3.117: the DX11 far field (gg_grass_dx11_falloff, set by the game every frame, default
+			// on) takes PRECEDENCE - while it is on, gg_grass_lod and its fractions/boost are never read.
+			if (gg_grass_dx11_falloff != 0 && hair.grass_type != 0)
+			{
+				// GGMAX 3.117: the DX11 far field - full size to L, then the per-strand dissolve to R.
+				hcb.xHairFlags |= HAIR_FLAG_GG_DX11_FALLOFF;
+				hcb.xHairGGLodStep4Dist = hair.viewDistance;
+				hcb.xHairGGLodStep2Dist = (gg_grass_dx11_falloff == 2) ? hair.viewDistance
+					: std::max(0.0f, hair.viewDistance - gg_grass_dx11_fade_range);
+				hcb.xHairGGLodWidthBoost = 1.0f;
+			}
+			else if (gg_grass_lod && hair.grass_type != 0)
 			{
 				hcb.xHairGGLodStep2Dist = hair.viewDistance * gg_grass_lod_step2_frac;
 				// step4 below step2 would still be continuous but not the documented shape —

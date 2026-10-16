@@ -376,6 +376,10 @@ namespace wi
 		void (*customDraw_Prepass_Reflections)(const wi::primitive::Frustum*, wi::graphics::CommandList) = nullptr;
 		void (*customDraw_Opaque)(const wi::primitive::Frustum*, int mode, wi::graphics::CommandList) = nullptr;
 		void (*customDraw_Transparent)(const wi::primitive::Frustum*, wi::graphics::CommandList) = nullptr;
+		// GGMAX 3.120: a stand-in water surface seen from BELOW, drawn in the ocean's slot (RenderTransparents) - before
+		// the transparent scene, so transparents composite over it as they do over the live ocean. Called only while
+		// the camera is below oceanParameters.waterHeight, inside its own render pass.
+		void (*customDraw_WaterSurface)(const wi::primitive::Frustum*, wi::graphics::CommandList) = nullptr;
 		void (*customDraw_Compose)(wi::graphics::CommandList) = nullptr;
 		// Called after prepass render pass ends (outside any render pass), for virtual texture readback etc.
 		void (*customDraw_AfterPrepass)(const wi::graphics::Texture&, uint32_t sampleCount, wi::graphics::CommandList) = nullptr;

@@ -20378,7 +20378,8 @@ void Postprocess_NormalsFromDepth(
 void Postprocess_Underwater(
 	const Texture& input,
 	const Texture& output,
-	CommandList cmd
+	CommandList cmd,
+	bool gg_opaque_ceiling
 )
 {
 	device->EventBegin("Postprocess_Underwater", cmd);
@@ -20395,6 +20396,10 @@ void Postprocess_Underwater(
 	postprocess.resolution.y = desc.height;
 	postprocess.resolution_rcp.x = 1.0f / postprocess.resolution.x;
 	postprocess.resolution_rcp.y = 1.0f / postprocess.resolution.y;
+	// GGMAX 3.120: params0.x = the GG opaque-ceiling mode (underwaterCS); the struct is uninitialised, so both
+	// params are set explicitly.
+	postprocess.params0 = XMFLOAT4(gg_opaque_ceiling ? 1.0f : 0.0f, 0, 0, 0);
+	postprocess.params1 = XMFLOAT4(0, 0, 0, 0);
 	device->PushConstants(&postprocess, sizeof(postprocess), cmd);
 
 	device->BindResource(&input, 0, cmd);

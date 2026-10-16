@@ -19,6 +19,19 @@ namespace wi
 	// waterline (see the ocean block in RenderPostprocessChain). false = stock always-run.
 	bool gg_skip_underwater_above_water = true;
 
+	// GGMAX 3.120: run the underwater postprocess for a GG stand-in water surface too. GameGuru's Water Bake
+	// turns the ocean OFF (to skip its planar reflection pass), and that also skipped this - so a baked level
+	// had no underwater fog at all. underwaterCS is ANALYTIC (it intersects the water plane along each view
+	// ray and reads GetWeather().ocean, uploaded every frame even with the ocean off; the displacement index is
+	// -1 = the null descriptor) and needs nothing from the ocean. The game re-derives this every frame while
+	// Water Bake is drawing (GGWaterBake.cpp). Default false = stock.
+	bool gg_underwater_without_ocean = false;
+	// GGMAX 3.120: with the ocean off, the GG plane seen from below is an OPAQUE ceiling that is not in
+	// texture_depth, so a ceiling pixel's depth is whatever is ABOVE the water. Stock fogs it by
+	// min(0.1 x that distance, distance to the plane), which lets shore terrain ghost through the ceiling.
+	// true = fog those pixels by exactly the distance to the plane (underwaterCS params0.x). A/B knob.
+	bool gg_underwater_ceiling_exact = true;
+
 	// GGMAX 1.40: merge small command lists to cut submit fragmentation. Each BeginCommandList
 	// is a real allocator+list and every cross-list wait splits the queue submission — ~17 lists
 	// with ~10 waits leave measurable GPU idle bubbles between submits. When true:
@@ -2529,6 +2542,20 @@ namespace wi
 			device->RenderPassEnd(cmd);
 		}
 
+		// GGMAX 3.120: a GG stand-in water surface seen from BELOW (Water Bake's opaque ceiling) draws HERE, in the
+		// ocean's slot: before the transparent scene (transparents composite over it - drawn after them it painted over
+		// no-depth-write hair/foliage and left depth-writing glass showing the world above), and before the mip chain
+		// (refractive transparents see it). Only while the camera is below the water, so no empty pass otherwise.
+		if (customDraw_WaterSurface && camera->Eye.y < scene->weather.oceanParameters.waterHeight)
+		{
+			device->RenderPassBegin(rp, rp_count, cmd);
+			customDraw_WaterSurface(&camera->frustum, cmd);
+			device->RenderPassEnd(cmd);
+			device->GG_InvalidateCommandListState(cmd);
+			wi::renderer::BindCameraCB(*camera, camera_previous, camera_reflection, cmd);
+			wi::renderer::BindCommonResources(cmd);
+		}
+
 		if (visibility_main.IsTransparentsVisible())
 		{
 			RenderSceneMIPChain(cmd);
@@ -2768,19 +2795,24 @@ namespace wi
 				);
 				rt_first = temporalAAResources.GetCurrent();
 			}
-			if (scene->weather.IsOceanEnabled())
+			// GGMAX 3.120: also for a GG stand-in surface with the ocean off (see gg_underwater_without_ocean)
+			const bool gg_uw_no_ocean = !scene->weather.IsOceanEnabled() && gg_underwater_without_ocean;
+			if (scene->weather.IsOceanEnabled() || gg_uw_no_ocean)
 			{
 				// GGMAX 1.39: the underwater postprocess only affects a SUBMERGED camera — skip
 				// the full-screen dispatch (+ClearUAV +barriers) while the eye is safely above the
 				// waterline (margin covers wave displacement). Chain-safe: skipping a stage leaves
 				// rt_first/rt_read for the next consumer exactly like the stage never existed.
-				const float gg_waterline = scene->weather.oceanParameters.waterHeight + 200.0f;
+				// GGMAX 3.120: a flat GG plane has no waves - the only reach above the water is the CS's near point
+				// (clip z 0.2 = about 5 x zNear ahead, at most ~10 x zNear below the eye at wide FOV), so 12 x zNear.
+				const float gg_waterline = scene->weather.oceanParameters.waterHeight + (gg_uw_no_ocean ? 12.0f * camera->zNearP : 200.0f);
 				if (!gg_skip_underwater_above_water || camera->Eye.y <= gg_waterline)
 				{
 					wi::renderer::Postprocess_Underwater(
 						rt_first == nullptr ? *rt_read : *rt_first,
 						*rt_write,
-						cmd
+						cmd,
+						gg_uw_no_ocean && gg_underwater_ceiling_exact
 					);
 
 					rt_first = nullptr;

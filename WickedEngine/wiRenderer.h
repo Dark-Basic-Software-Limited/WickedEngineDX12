@@ -1082,7 +1082,8 @@ namespace wi::renderer
 	void Postprocess_Underwater(
 		const wi::graphics::Texture& input,
 		const wi::graphics::Texture& output,
-		wi::graphics::CommandList cmd
+		wi::graphics::CommandList cmd,
+		bool gg_opaque_ceiling = false   // GGMAX 3.120: GG stand-in ceiling fogs by the plane distance
 	);
 	struct MeshBlendResources
 	{

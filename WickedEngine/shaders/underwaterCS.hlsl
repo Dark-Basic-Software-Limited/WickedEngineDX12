@@ -74,6 +74,13 @@ void main(uint3 DTid : SV_DispatchThreadID)
 		const float distance_from_surface = distance(GetCamera().position, surface_position) * 0.1;
 		float water_depth = ocean_pos.y - surface_position.y;
 		water_depth = max(min(distance_from_surface, ocean_dist), water_depth);
+		// GGMAX 3.120: a GG stand-in OPAQUE ceiling (Water Bake) is not in texture_depth, so a ceiling pixel's
+		// depth is whatever lies ABOVE the water, and the stock min(0.1 x dist, ocean_dist) lets shore terrain
+		// ghost through. An opaque ceiling: the light crossed exactly ocean_dist of water. (V points to the
+		// camera, so V.y < 0 = an upward ray; sky reconstructs at the far plane and gets the same as stock.)
+		[branch]
+		if (postprocess.params0.x > 0 && V.y < 0 && ocean_dist < distance(GetCamera().position, surface_position))
+			water_depth = ocean_dist;
 
 		float waterfog = saturate(exp(-water_depth * uw_density));
 		float3 transmittance = saturate(exp(-water_depth * ocean.extinction_color.rgb * uw_density));

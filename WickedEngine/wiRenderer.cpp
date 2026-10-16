@@ -3940,6 +3940,16 @@ void RenderMeshes(
 
 	RenderPassInfo renderpass_info = device->GetRenderPassInfo(cmd);
 
+	// GGMAX 3.121: Super Quick Objects is a per-LEVEL performance setting. A list drawing with its own frame
+	// constants (GG_SetFrameCBOverride - the Object Library live preview) is a product shot of ONE item and
+	// renders every material in full, whatever the level behind it has ticked.
+	const int gg_sq_objects = GG_HasFrameCBOverride(cmd) ? 0 : gg_super_quick_objects;
+	// GGMAX 3.121: and no distance fade - Object Detail Distance is a per-LEVEL cap written into every
+	// object's draw_distance, and from the preview camera the backdrop sits 21200 units out (a 20000 cap
+	// dithered holes in it, below ~14000 culled it) and a large item ~8800. DrawScene skips its fade cull
+	// for the same list. Transparency still dithers.
+	const bool gg_no_fade = GG_HasFrameCBOverride(cmd);
+
 	const bool tessellation =
 		(flags & DRAWSCENE_TESSELLATION) &&
 		GetTessellationEnabled() &&
@@ -4143,7 +4153,7 @@ void RenderMeshes(
 					// reading as water. CARTOON and TERRAINBLENDED are art, not cost.
 					uint32_t ggShaderType = material.shaderType;
 					uint32_t ggTessellation = tessellatorRequested;
-					if (gg_super_quick_objects != 0)
+					if (gg_sq_objects != 0)
 					{
 						switch (ggShaderType)
 						{
@@ -4180,14 +4190,14 @@ void RenderMeshes(
 					// pipeline is not valid yet - and a null PSO here does not draw wrong, it drops the
 					// draw SILENTLY (the 2.31 failure mode: no mesh, perfect shadow). Reverting to
 					// ggsuperquick = 0 for those frames costs nothing and cannot show a hole.
-					if (gg_super_quick_objects > 0
+					if (gg_sq_objects > 0
 						&& renderPass == RENDERPASS_MAIN
 						&& variant.bits.blendmode == BLENDMODE_OPAQUE
 						&& ggShaderType == (uint32_t)MaterialComponent::SHADERTYPE_PBR
 						&& !meshShaderRequested
 						&& ggTessellation == 0)
 					{
-						variant.bits.ggsuperquick = (uint32_t)std::min(gg_super_quick_objects, 3);
+						variant.bits.ggsuperquick = (uint32_t)std::min(gg_sq_objects, 3);
 						pso = GetObjectPSO(variant);
 						if (pso == nullptr || !pso->IsValid())
 						{
@@ -4470,7 +4480,7 @@ void RenderMeshes(
 			instancedBatch.lod = lod;
 		}
 
-		const float dither = std::max(instance.GetTransparency(), std::max(0.0f, batch.GetDistance() - instance.fadeDistance) / instance.radius);
+		const float dither = gg_no_fade ? instance.GetTransparency() : std::max(instance.GetTransparency(), std::max(0.0f, batch.GetDistance() - instance.fadeDistance) / instance.radius);
 		if (dither > 0.99f)
 		{
 			continue;
@@ -9242,6 +9252,9 @@ void DrawScene(
 	device->BindShadingRate(ShadingRate::RATE_1X1, cmd);
 
 	BindCommonResources(cmd);
+	// GGMAX 3.121: a list with its own frame constants (the Object Library preview) ignores the level's
+	// Object Detail Distance - see RenderMeshes, which skips the matching dither.
+	const bool gg_no_fade = GG_HasFrameCBOverride(cmd);
 
 	if (ocean && !skip_planar_reflection_objects && vis.scene->weather.IsOceanEnabled() && vis.scene->ocean.IsValid())
 	{
@@ -9318,7 +9331,7 @@ void DrawScene(
 			}
 
 			const float distance = wi::math::Distance(vis.camera->Eye, object.center);
-			if (distance > object.fadeDistance + object.radius)
+			if (!gg_no_fade && distance > object.fadeDistance + object.radius)	// GGMAX 3.121: see RenderMeshes
 			{
 				if (ggQ) gg_dbg_watch_q[renderPass][GG_Q_FADE].fetch_add(1, std::memory_order_relaxed);
 				continue;
@@ -13326,9 +13339,43 @@ void RefreshWetmaps(const Visibility& vis, CommandList cmd)
 	device->EventEnd(cmd);
 }
 
+// GGMAX 3.121: see GG_SetFrameCBOverride (wiRenderer.h). One slot per thread: a command list is
+// recorded on one thread, and the override is only ever live for one list at a time on it.
+struct GGFrameCBOverride
+{
+	void* cmd = nullptr;	// CommandList::internal_state of the list it belongs to; nullptr = none
+	GPUBuffer buffer;
+	uint64_t offset = 0;
+};
+static thread_local GGFrameCBOverride gg_framecb_override;
+void GG_SetFrameCBOverride(CommandList cmd, const GPUBuffer& buffer, uint64_t offset)
+{
+	gg_framecb_override.cmd = cmd.internal_state;
+	gg_framecb_override.buffer = buffer;
+	gg_framecb_override.offset = offset;
+	device->BindConstantBuffer(&gg_framecb_override.buffer, CBSLOT_RENDERER_FRAME, cmd, offset);
+}
+void GG_ClearFrameCBOverride(CommandList cmd)
+{
+	if (gg_framecb_override.cmd != cmd.internal_state) return;
+	gg_framecb_override.cmd = nullptr;
+	gg_framecb_override.buffer = {};	// drop the reference: the buffer is per-frame upload memory
+	gg_framecb_override.offset = 0;
+}
+bool GG_HasFrameCBOverride(CommandList cmd)
+{
+	return gg_framecb_override.cmd != nullptr && gg_framecb_override.cmd == cmd.internal_state;
+}
 void BindCommonResources(CommandList cmd)
 {
-	device->BindConstantBuffer(&buffers[BUFFERTYPE_FRAMECB], CBSLOT_RENDERER_FRAME, cmd);
+	if (GG_HasFrameCBOverride(cmd))
+	{
+		device->BindConstantBuffer(&gg_framecb_override.buffer, CBSLOT_RENDERER_FRAME, cmd, gg_framecb_override.offset);
+	}
+	else
+	{
+		device->BindConstantBuffer(&buffers[BUFFERTYPE_FRAMECB], CBSLOT_RENDERER_FRAME, cmd);
+	}
 }
 
 void BindCameraCB(

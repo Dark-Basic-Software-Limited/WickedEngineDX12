@@ -341,6 +341,17 @@ namespace wi::renderer
 
 	// Binds all common constant buffers and samplers that may be used in all shaders
 	void BindCommonResources(wi::graphics::CommandList cmd);
+	// GGMAX 3.121: a per-command-list replacement for the frame constants. While set for cmd,
+	// BindCommonResources(cmd) binds this buffer/offset at CBSLOT_RENDERER_FRAME instead of the shared
+	// frame CB - so DrawScene, DrawSky, the tiled light culling and every other pass that re-binds the
+	// frame constants on entry keep the caller's copy. Binding a copy once was not enough: DrawScene and
+	// DrawSky call BindCommonResources first thing, so the 3.97 render-to-texture override never reached
+	// a single draw. Thread-local and keyed on cmd: set and clear it on the thread that records cmd, and
+	// clear it before that command list is finished. Set also binds it immediately.
+	void GG_SetFrameCBOverride(wi::graphics::CommandList cmd, const wi::graphics::GPUBuffer& buffer, uint64_t offset);
+	void GG_ClearFrameCBOverride(wi::graphics::CommandList cmd);
+	// True while cmd has an override set (3.121: RenderMeshes skips Super Quick for such a list).
+	bool GG_HasFrameCBOverride(wi::graphics::CommandList cmd);
 	// Updates the per camera constant buffer need to call for each different camera that is used when calling DrawScene() and the like
 	//	camera_previous : camera from previous frame, used for reprojection effects.
 	//	camera_reflection : camera that renders planar reflection

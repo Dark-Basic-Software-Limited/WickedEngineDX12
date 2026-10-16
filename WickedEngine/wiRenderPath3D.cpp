@@ -53,6 +53,8 @@ namespace wi
 	// So: when set, this is called from each camera's job with a copy of this frame's FrameCB, and
 	// if it returns true that camera draws (and tile-culls) with the edited copy instead. The copy
 	// lives in per-command-list upload memory, so it is visible to that camera's list only.
+	// ★ 3.121: it is registered with wi::renderer::GG_SetFrameCBOverride for the whole job - binding
+	// it once was undone by the BindCommonResources at the top of DrawScene and DrawSky.
 	// ⚠ dst is WRITE-COMBINED upload memory: read from src, only write to dst.
 	// The engine holds no policy here - what gets isolated is decided by the game.
 	bool (*gg_rtt_frame_override)(wi::ecs::Entity cameraEntity, const FrameCB& src, FrameCB& dst) = nullptr;
@@ -3121,6 +3123,11 @@ namespace wi
 				);
 				// GGMAX 3.97: see gg_rtt_frame_override. Bound BEFORE the prepass so the tiled light
 				// culling and both draws all read the same constants.
+				// ★ GGMAX 3.121: registered as this list's frame-CB override, not bound once. DrawScene and
+				// DrawSky call BindCommonResources on entry, which re-bound the LEVEL's FrameCB over the
+				// 3.97 copy - so from 3.97 to 3.121 the preview drew with the level's fog, sun, ambient
+				// and probes, and only the call counter said otherwise. Cleared at the end of this job.
+				bool gg_frame_overridden = false;
 				if (gg_rtt_frame_override != nullptr)
 				{
 					GraphicsDevice::GPUAllocation gg_alloc = device->AllocateGPU(sizeof(FrameCB), cmd);
@@ -3128,7 +3135,8 @@ namespace wi
 					std::memcpy(gg_dst, &frameCB, sizeof(FrameCB));
 					if (gg_rtt_frame_override(scene->cameras.GetEntity(i), frameCB, *gg_dst))
 					{
-						device->BindConstantBuffer(&gg_alloc.buffer, CBSLOT_RENDERER_FRAME, cmd, gg_alloc.offset);
+						wi::renderer::GG_SetFrameCBOverride(cmd, gg_alloc.buffer, gg_alloc.offset);
+						gg_frame_overridden = true;
 					}
 				}
 				Rect scissor;
@@ -3203,6 +3211,10 @@ namespace wi
 					}
 
 					wi::renderer::GenerateMipChain(camera.render_to_texture.rendertarget_render, wi::renderer::MIPGENFILTER_LINEAR, cmd);
+				}
+				if (gg_frame_overridden)
+				{
+					wi::renderer::GG_ClearFrameCBOverride(cmd);	// GGMAX 3.121: this job's thread runs other lists next
 				}
 				device->EventEnd(cmd);
 			});

@@ -329,9 +329,15 @@ namespace wi
 	void EmittedParticleSystem::UpdateCPU(const TransformComponent& transform, float dt)
 	{
 		this->dt = dt;
+
+		// GG: a paused emitter makes its buffers when it is first resumed. A pooled effect is loaded and parked paused, and
+		// every one made its buffers in the frame after the loads
+		if (IsPaused())
+			return;
+
 		CreateSelfBuffers();
 
-		if (IsPaused() || dt == 0)
+		if (dt == 0)
 			return;
 
 		active_frames <<= 1; // advance next frame
@@ -947,6 +953,8 @@ namespace wi
 	{
 		if (IsInactive())
 			return;
+		if (!particleBuffer.IsValid())
+			return; // GG: paused since it was loaded, so no buffers yet (UpdateCPU) and nothing to draw
 		GraphicsDevice* device = wi::graphics::GetDevice();
 		device->EventBegin("EmittedParticle", cmd);
 

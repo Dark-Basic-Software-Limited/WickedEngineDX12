@@ -1,5 +1,7 @@
 #include "wiScene_Components.h"
 #include <atomic> // GGMAX 2026-08-05: tripwire event cap
+#include <mutex>
+#include <unordered_map>
 #include "wiTextureHelper.h"
 #include "wiResourceManager.h"
 #include "wiPhysics.h"
@@ -1678,6 +1680,58 @@ namespace wi::scene
 			assert(success);
 			device->SetName(&BLASes[lod], std::string("MeshComponent::BLAS[LOD" + std::to_string(lod) + "]").c_str());
 		}
+	}
+	void MeshComponent::GG_BuildBoneClusters() const
+	{
+		static std::mutex gg_cluster_lock;
+		std::lock_guard<std::mutex> lock(gg_cluster_lock);
+		if (gg_bone_clusters_built)
+			return;
+		gg_bone_clusters.clear();
+		if (!vertex_boneindices.empty() && vertex_boneindices.size() == vertex_positions.size() && vertex_boneweights.size() == vertex_positions.size())
+		{
+			std::unordered_map<uint32_t, size_t> slot;
+			uint32_t first_subset = 0;
+			uint32_t last_subset = 0;
+			GetLODSubsetRange(0, first_subset, last_subset);
+			for (uint32_t subsetIndex = first_subset; subsetIndex < last_subset && subsetIndex < 256; ++subsetIndex)
+			{
+				const MeshSubset& subset = subsets[subsetIndex];
+				if (subset.indexCount == 0)
+					continue;
+				const uint32_t triangleCount = subset.indexCount / 3;
+				for (uint32_t triangleIndex = 0; triangleIndex < triangleCount && triangleIndex < 0xFFFFFF; ++triangleIndex)
+				{
+					const uint32_t i0 = indices[subset.indexOffset + triangleIndex * 3 + 0];
+					const uint32_t i1 = indices[subset.indexOffset + triangleIndex * 3 + 1];
+					const uint32_t i2 = indices[subset.indexOffset + triangleIndex * 3 + 2];
+					// the heaviest bone of the first vertex names the group
+					const XMUINT4& ind = vertex_boneindices[i0];
+					const XMFLOAT4& wei = vertex_boneweights[i0];
+					uint32_t bone = ind.x;
+					float best = wei.x;
+					if (wei.y > best) { best = wei.y; bone = ind.y; }
+					if (wei.z > best) { best = wei.z; bone = ind.z; }
+					if (wei.w > best) { best = wei.w; bone = ind.w; }
+					auto it = slot.find(bone);
+					if (it == slot.end())
+					{
+						slot[bone] = gg_bone_clusters.size();
+						gg_bone_clusters.emplace_back();
+						gg_bone_clusters.back().bone = bone;
+						it = slot.find(bone);
+					}
+					GGBoneCluster& cluster = gg_bone_clusters[it->second];
+					const XMFLOAT3& p0 = vertex_positions[i0];
+					const XMFLOAT3& p1 = vertex_positions[i1];
+					const XMFLOAT3& p2 = vertex_positions[i2];
+					const wi::primitive::AABB tri(wi::math::Min(p0, wi::math::Min(p1, p2)), wi::math::Max(p0, wi::math::Max(p1, p2)));
+					cluster.aabb = cluster.triangles.empty() ? tri : wi::primitive::AABB::Merge(cluster.aabb, tri);
+					cluster.triangles.push_back((subsetIndex << 24) | triangleIndex);
+				}
+			}
+		}
+		gg_bone_clusters_built = true;
 	}
 	void MeshComponent::BuildBVH()
 	{

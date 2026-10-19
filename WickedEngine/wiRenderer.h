@@ -56,6 +56,12 @@ namespace wi::renderer
 	// ~8 screen pixels of even diffusion. Substitutes for resolution: blur and supersampling
 	// attack the same under-sampling.
 	extern int gg_reflection_blur;
+	// GG: the level's "Use Fastest LOD" flags, the DX11 rules: 1 draws every object in the planar reflection passes at its
+	// last LOD (read in DrawScene), every shadow at its last LOD (the shadow batches), the environment probes' capture at
+	// the last LOD
+	extern int gg_reflection_lowest_lod;
+	extern int gg_shadow_lowest_lod;
+	extern int gg_probe_lowest_lod;
 	constexpr wi::graphics::Format format_depthbuffer_main = wi::graphics::Format::D32_FLOAT_S8X24_UINT;
 	constexpr wi::graphics::Format format_rendertarget_main = wi::graphics::Format::R11G11B10_FLOAT;
 	constexpr wi::graphics::Format format_idbuffer = wi::graphics::Format::R32_UINT;

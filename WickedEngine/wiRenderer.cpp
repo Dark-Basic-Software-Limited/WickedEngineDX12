@@ -487,6 +487,10 @@ int gg_reflection_width = 0;
 // GGMAX 3.90: Water Reflection Blur - passes of the separable Gaussian over the resolved
 // planar reflection. 0 = off. See wiRenderer.h and the consumer in wiRenderPath3D.cpp.
 int gg_reflection_blur = 0;
+// GG: the level's "Use Fastest LOD" flags. See wiRenderer.h.
+int gg_reflection_lowest_lod = 0;
+int gg_shadow_lowest_lod = 0;
+int gg_probe_lowest_lod = 0;
 static bool localShadowInvalidate = true;           // settings/level change -> next decision forces a full clear
 static uint64_t localShadowDecisionFrame = ~0ull;   // frame the Phase 2 decision was produced
 // GGMAX 2.07c: dir + cone are part of the key — the spot shadow's content depends on the
@@ -8715,6 +8719,8 @@ void DrawShadowmaps(
 						// gg_shadow_caster_extrude — that is the whole point of the counter.
 						gg_dbg_shadow_casters.fetch_add(1, std::memory_order_relaxed);
 
+						// GG: the shadow at the last LOD when the level asks (Shadows Use Fastest LOD)
+						if (gg_shadow_lowest_lod != 0) shadow_lod = (uint8_t)(vis.scene->meshes[object.mesh_index].GetLODCount() - 1);
 						RenderBatch batch;
 						batch.Create(object.mesh_index, uint32_t(i), gg_shadowBatchDist, object.sort_bits, camera_mask, shadow_lod);
 
@@ -8885,6 +8891,8 @@ void DrawShadowmaps(
 						if (!gg_ShadowFadeBatchDistance(object, distanceSq, gg_shadowBatchDist))
 							continue;
 
+						// GG: the shadow at the last LOD when the level asks (Shadows Use Fastest LOD)
+						if (gg_shadow_lowest_lod != 0) shadow_lod = (uint8_t)(vis.scene->meshes[object.mesh_index].GetLODCount() - 1);
 						RenderBatch batch;
 						batch.Create(object.mesh_index, uint32_t(i), gg_shadowBatchDist, object.sort_bits, 0xFF, shadow_lod);
 
@@ -9059,6 +9067,8 @@ void DrawShadowmaps(
 						if (!gg_ShadowFadeBatchDistance(object, distanceSq, gg_shadowBatchDist))
 							continue;
 
+						// GG: the shadow at the last LOD when the level asks (Shadows Use Fastest LOD)
+						if (gg_shadow_lowest_lod != 0) shadow_lod = (uint8_t)(vis.scene->meshes[object.mesh_index].GetLODCount() - 1);
 						RenderBatch batch;
 						batch.Create(object.mesh_index, uint32_t(i), gg_shadowBatchDist, object.sort_bits, camera_mask, shadow_lod);
 
@@ -9247,6 +9257,8 @@ void DrawScene(
 	const bool skip_planar_reflection_objects = flags & DRAWSCENE_SKIP_PLANAR_REFLECTION_OBJECTS;
 	const bool foreground = flags & DRAWSCENE_FOREGROUND_ONLY;
 	const bool maincamera = flags & DRAWSCENE_MAINCAMERA;
+	// GG: only the planar reflection passes skip the reflection objects, so this is the reflection pass test
+	const bool reflection_lowest_lod = skip_planar_reflection_objects && gg_reflection_lowest_lod != 0;
 
 	device->EventBegin("DrawScene", cmd);
 	device->BindShadingRate(ShadingRate::RATE_1X1, cmd);
@@ -9338,7 +9350,15 @@ void DrawScene(
 			}
 
 			if (ggQ) gg_dbg_watch_q[renderPass][GG_Q_ADDED].fetch_add(1, std::memory_order_relaxed);
-			renderQueue.add(object.mesh_index, instanceIndex, distance, object.sort_bits);
+			if (reflection_lowest_lod)
+			{
+				const MeshComponent& mesh = vis.scene->meshes[object.mesh_index];
+				renderQueue.add(object.mesh_index, instanceIndex, distance, object.sort_bits, 0xFF, (uint8_t)(mesh.GetLODCount() - 1));
+			}
+			else
+			{
+				renderQueue.add(object.mesh_index, instanceIndex, distance, object.sort_bits);
+			}
 		}
 		if (!renderQueue.empty())
 		{
@@ -11470,7 +11490,9 @@ void RefreshEnvProbes(const Visibility& vis, CommandList cmd)
 						if (camera_mask == 0)
 							continue;
 
-						renderQueue.add(object.mesh_index, uint32_t(i), 0, object.sort_bits, camera_mask);
+						// GG: the probes' capture at the last LOD when the level asks
+						renderQueue.add(object.mesh_index, uint32_t(i), 0, object.sort_bits, camera_mask,
+							gg_probe_lowest_lod != 0 ? (uint8_t)(vis.scene->meshes[object.mesh_index].GetLODCount() - 1) : (uint8_t)0xFF);
 					}
 				}
 			}

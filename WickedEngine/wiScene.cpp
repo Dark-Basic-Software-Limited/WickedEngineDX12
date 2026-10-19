@@ -7905,6 +7905,35 @@ namespace wi::scene
 						intersect_triangle(subsetIndex, indexOffset, triangleIndex);
 					});
 				}
+				else if (armature != nullptr && !armature->boneData.empty() && softbody == nullptr && (mesh->gg_bone_clusters_built || mesh->vertex_boneweights.size() == mesh->vertex_positions.size()))
+				{
+					// GG: a skinned mesh by its bone clusters: each group's bind-pose box moved by the bone's current matrix, a
+					// little room added for the vertices that follow other bones, and only the groups the ray crosses skinned
+					// and tested (every triangle of a character was tested before, 5-18 ms a ray)
+					if (!mesh->gg_bone_clusters_built)
+						mesh->GG_BuildBoneClusters();
+					const Ray ray_local = Ray(rayOrigin_local, rayDirection_local);
+					for (const MeshComponent::GGBoneCluster& cluster : mesh->gg_bone_clusters)
+					{
+						AABB box = cluster.aabb;
+						if (cluster.bone < armature->boneData.size())
+						{
+							const XMFLOAT4X4 m4 = armature->boneData[cluster.bone].GetMatrix();
+							box = cluster.aabb.transform(XMMatrixTranspose(XMLoadFloat4x4(&m4)));
+						}
+						const XMFLOAT3 bmin = box.getMin();
+						const XMFLOAT3 bmax = box.getMax();
+						const float pad = std::max(2.0f, 0.15f * std::max(bmax.x - bmin.x, std::max(bmax.y - bmin.y, bmax.z - bmin.z)));
+						box = AABB(XMFLOAT3(bmin.x - pad, bmin.y - pad, bmin.z - pad), XMFLOAT3(bmax.x + pad, bmax.y + pad, bmax.z + pad));
+						if (!ray_local.intersects(box))
+							continue;
+						for (uint32_t packed : cluster.triangles)
+						{
+							const uint32_t subsetIndex = packed >> 24;
+							intersect_triangle(subsetIndex, mesh->subsets[subsetIndex].indexOffset, packed & 0xFFFFFF);
+						}
+					}
+				}
 				else
 				{
 					// Brute-force intersection test:

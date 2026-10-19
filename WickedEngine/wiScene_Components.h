@@ -897,6 +897,18 @@ namespace wi::scene
 
 		// Rebuilds CPU-side BVH acceleration structure
 		void BuildBVH();
+		// GG: a skinned mesh has no BVH (its triangles move), so for rays its triangles are grouped by their heaviest bone,
+		// each group with its bind-pose box; a ray moves each box by the bone's current matrix and skins and tests only the
+		// groups it crosses. Built at the first ray that needs it
+		struct GGBoneCluster
+		{
+			uint32_t bone = ~0u;
+			wi::primitive::AABB aabb;
+			wi::vector<uint32_t> triangles; // subset index in the top byte, triangle index below
+		};
+		mutable wi::vector<GGBoneCluster> gg_bone_clusters;
+		mutable bool gg_bone_clusters_built = false;
+		void GG_BuildBoneClusters() const;
 
 		size_t GetMemoryUsageCPU() const;
 		size_t GetMemoryUsageGPU() const;

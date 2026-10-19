@@ -781,6 +781,16 @@ static int skipcomment (FILE *f, int *cp) {
 }
 
 
+static FILE *(*fileopener) (const char *filename, const char *mode) = NULL;
+
+LUALIB_API void luaL_setfileopener (FILE *(*opener)(const char *filename, const char *mode)) {
+  fileopener = opener;
+}
+
+LUALIB_API FILE *luaL_fopen (const char *filename, const char *mode) {
+  return fileopener ? fileopener(filename, mode) : fopen(filename, mode);
+}
+
 LUALIB_API int luaL_loadfilex (lua_State *L, const char *filename,
                                              const char *mode) {
   LoadF lf;
@@ -794,7 +804,7 @@ LUALIB_API int luaL_loadfilex (lua_State *L, const char *filename,
   else {
     lua_pushfstring(L, "@%s", filename);
     errno = 0;
-    lf.f = fopen(filename, "r");
+    lf.f = luaL_fopen(filename, "r");
     if (lf.f == NULL) return errfile(L, "open", fnameindex);
   }
   lf.n = 0;
@@ -804,7 +814,8 @@ LUALIB_API int luaL_loadfilex (lua_State *L, const char *filename,
     lf.n = 0;  /* remove possible newline */
     if (filename) {  /* "real" file? */
       errno = 0;
-      lf.f = freopen(filename, "rb", lf.f);  /* reopen in binary mode */
+      fclose(lf.f);
+      lf.f = luaL_fopen(filename, "rb");  /* reopen in binary mode */
       if (lf.f == NULL) return errfile(L, "reopen", fnameindex);
       skipcomment(lf.f, &c);  /* re-read initial portion */
     }

@@ -94,6 +94,10 @@ LUALIB_API int (luaL_loadfilex) (lua_State *L, const char *filename,
 
 #define luaL_loadfile(L,f)	luaL_loadfilex(L,f,NULL)
 
+/* the file opener behind luaL_loadfilex, io.open, io.lines and require: fopen unless one is set */
+LUALIB_API void (luaL_setfileopener) (FILE *(*opener)(const char *filename, const char *mode));
+LUALIB_API FILE *(luaL_fopen) (const char *filename, const char *mode);
+
 LUALIB_API int (luaL_loadbufferx) (lua_State *L, const char *buff, size_t sz,
                                    const char *name, const char *mode);
 LUALIB_API int (luaL_loadstring) (lua_State *L, const char *s);

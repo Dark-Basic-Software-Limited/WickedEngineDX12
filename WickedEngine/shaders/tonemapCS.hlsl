@@ -63,7 +63,21 @@ void main(uint3 DTid : SV_DispatchThreadID)
 	[branch]
 	if (tonemap_push.texture_input_distortion >= 0)
 	{
-		uv += bindless_textures[descriptor_index(tonemap_push.texture_input_distortion)].SampleLevel(sampler_linear_clamp, uv, 0).rg;
+		float2 distortion = bindless_textures[descriptor_index(tonemap_push.texture_input_distortion)].SampleLevel(sampler_linear_clamp, uv, 0).rg;
+		// GG: the offset dropped where it would fetch something nearer than this pixel (the first person gun, a wall's edge in
+		// front of a far fire), which the haze copied out into itself; the haze bends only what lies behind it, and what is
+		// farther than this pixel, the horizon, still shimmers
+		[branch]
+		if (any(distortion != 0) && GetCamera().texture_lineardepth_index >= 0)
+		{
+			const float depthHere = texture_lineardepth.SampleLevel(sampler_point_clamp, uv, 0);
+			const float depthThere = texture_lineardepth.SampleLevel(sampler_point_clamp, uv + distortion, 0);
+			if (depthThere < depthHere * 0.8)
+			{
+				distortion = 0;
+			}
+		}
+		uv += distortion;
 	}
 
 	[branch]

@@ -615,6 +615,10 @@ namespace wi
 			{
 				cb.xEmitterOptions |= EMITTER_OPTION_BIT_FRAME_BLENDING_ENABLED;
 			}
+			if (sheet_stored_values)
+			{
+				cb.xEmitterOptions |= EMITTER_OPTION_BIT_SHEET_STORED_VALUES;
+			}
 			if (ALLOW_MESH_SHADER && device->CheckCapability(GraphicsDeviceCapability::MESH_SHADER))
 			{
 				cb.xEmitterOptions |= EMITTER_OPTION_BIT_MESH_SHADER_ENABLED;

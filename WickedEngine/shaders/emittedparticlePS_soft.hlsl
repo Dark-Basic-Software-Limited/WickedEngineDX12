@@ -36,11 +36,19 @@ float4 main(VertextoPixel input) : SV_TARGET
 	if (material.textures[SLOT].IsValid())
 	{
 		color = material.textures[SLOT].Sample(sampler_linear_clamp, input.tex.xyxy);
+#ifndef EMITTEDPARTICLE_DISTORTION
+		// a sheet authored against its stored values but read through an sRGB view, put back to them (the DX11 build read
+		// the sheets as stored; through the sRGB view a stored 0.5 reads 0.21 and near-black smoke goes black)
+		if (xEmitterOptions & EMITTER_OPTION_BIT_SHEET_STORED_VALUES) color.rgb = (half3)ApplySRGBCurve(color.rgb);
+#endif // EMITTEDPARTICLE_DISTORTION
 
 		[branch]
 		if (xEmitterOptions & EMITTER_OPTION_BIT_FRAME_BLENDING_ENABLED)
 		{
 			half4 color2 = material.textures[SLOT].Sample(sampler_linear_clamp, input.tex.zwzw);
+#ifndef EMITTEDPARTICLE_DISTORTION
+			if (xEmitterOptions & EMITTER_OPTION_BIT_SHEET_STORED_VALUES) color2.rgb = (half3)ApplySRGBCurve(color2.rgb);
+#endif // EMITTEDPARTICLE_DISTORTION
 			color = lerp(color, color2, input.frameBlend);
 		}
 	}

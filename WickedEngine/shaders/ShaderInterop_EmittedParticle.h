@@ -38,6 +38,7 @@ static const uint EMITTER_OPTION_BIT_MESH_SHADER_ENABLED = 1 << 2;
 static const uint EMITTER_OPTION_BIT_COLLIDERS_DISABLED = 1 << 3;
 static const uint EMITTER_OPTION_BIT_USE_RAIN_BLOCKER = 1 << 4;
 static const uint EMITTER_OPTION_BIT_TAKE_COLOR_FROM_MESH = 1 << 5;
+static const uint EMITTER_OPTION_BIT_SHEET_STORED_VALUES = 1 << 6; // the colour sheet is stored plain but read through an sRGB view: put back to its stored values
 
 CBUFFER(EmittedParticleCB, CBSLOT_OTHER_EMITTEDPARTICLE)
 {

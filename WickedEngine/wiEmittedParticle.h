@@ -178,6 +178,7 @@ namespace wi
 
 		float burst_amount = 0.0f;
 		float burst_split = 0.0f;
+		bool sheet_stored_values = false; // the host sets it for a sheet authored against its stored values (a legacy .PE) that this engine reads through an sRGB view
 		float burst_delay = 0.0f;       // MILLISECONDS
 		float burst_delay_timer = 0.0f;
 		float spawn_random = 0.0f;      // gust / stutter emission model

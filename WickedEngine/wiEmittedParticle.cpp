@@ -385,7 +385,9 @@ namespace wi
 			{
 				float amount = (float)burst / burst_split;
 				emit += amount;
-				burst -= (int)amount;
+				// whole particles, rounded up, as the DX11 int burst had it: truncated, a burst smaller than burst_split never ran
+				// out, and a fraction of it was emitted every frame for as long as the emitter lived
+				burst -= std::max(1, (int)std::ceil(amount));
 				if (burst < 0) burst = 0;
 			}
 			else

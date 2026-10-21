@@ -3552,6 +3552,13 @@ namespace wi
 				desc.width = internalResolution.x / 4;
 				desc.height = internalResolution.y / 4;
 			}
+			// GGMAX: the same targets asked for again are kept. The game pushes its visuals many times at a level's start
+			// (43 times in one load), and each call made a new set and destroyed the old, which waits for a frame to be
+			// freed; inside the load's one long frame 43 sets of reflection, sun-shaft and bloom targets held 4.8 GB at
+			// once (2026-10-21) and the start ran the card out of memory
+			if (rtReflection.IsValid() && rtReflection.desc.width == desc.width && rtReflection.desc.height == desc.height
+				&& rtReflection.desc.format == desc.format && rtReflection.desc.sample_count == desc.sample_count)
+				return;
 			desc.misc_flags = ResourceMiscFlag::TRANSIENT_ATTACHMENT;
 			desc.layout = ResourceState::RENDERTARGET;
 			device->CreateTexture(&desc, nullptr, &rtReflection);
@@ -3598,7 +3605,12 @@ namespace wi
 
 		if (value)
 		{
-			wi::renderer::CreateBloomResources(bloomResources, GetInternalResolution());
+			// GGMAX: kept when already made for this resolution (see setReflectionsEnabled)
+			XMUINT2 internalResolution = GetInternalResolution();
+			if (bloomResources.texture_bloom.IsValid() && bloomResources.texture_bloom.desc.width == internalResolution.x / 4
+				&& bloomResources.texture_bloom.desc.height == internalResolution.y / 4)
+				return;
+			wi::renderer::CreateBloomResources(bloomResources, internalResolution);
 		}
 		else
 		{
@@ -3646,6 +3658,10 @@ namespace wi
 			desc.width = internalResolution.x;
 			desc.height = internalResolution.y;
 			desc.sample_count = getMSAASampleCount();
+			// GGMAX: kept when already made at this size and sample count (see setReflectionsEnabled)
+			if (rtSun[0].IsValid() && rtSun[0].desc.width == desc.width && rtSun[0].desc.height == desc.height
+				&& rtSun[0].desc.sample_count == desc.sample_count && rtSun[0].desc.format == desc.format)
+				return;
 			device->CreateTexture(&desc, nullptr, &rtSun[0]);
 			device->SetName(&rtSun[0], "rtSun[0]");
 

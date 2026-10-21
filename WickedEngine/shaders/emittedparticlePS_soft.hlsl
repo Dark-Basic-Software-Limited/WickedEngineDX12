@@ -125,7 +125,33 @@ float4 main(VertextoPixel input) : SV_TARGET
 
 		TiledLighting(surface, lighting, GetFlatTileIndex(pixel));
 
-		color.rgb *= lighting.direct.diffuse + lighting.indirect.diffuse;
+		// the sun's forward scattering, by the strength set (0, the default, skips it): a cloud with the sun behind it glows,
+		// brightest looking toward the sun through it (ComputeScattering). The sun's light is taken through light_directional
+		// with the surface turned to face it (normal and view both along the light, so no Fresnel and no degenerate half
+		// vector), so its cascaded shadow applies; the light code returns early for a surface facing away from the light,
+		// which a backlit sprite's own normal does, so LIGHTING_SCATTER's term never reaches the backlit case
+		half3 scatter = 0;
+		[branch]
+		if (xParticleScatter > 0 && !directional_lights().empty())
+		{
+			ShaderEntityIterator iterator = directional_lights();
+			for (uint entity_index = iterator.first_item(); entity_index < iterator.end_item(); ++entity_index)
+			{
+				ShaderEntity sun = load_entity(entity_index);
+				if (sun.IsStaticLight())
+					continue;
+				const half3 L = sun.GetDirection();
+				Surface facing = surface;
+				facing.N = L;
+				facing.V = L;
+				Lighting sunlight;
+				sunlight.create(0, 0, 0, 0);
+				light_directional(sun, facing, sunlight);
+				scatter += ComputeScattering(saturate(dot(L, -V))) * sunlight.direct.diffuse;
+			}
+		}
+
+		color.rgb *= lighting.direct.diffuse + lighting.indirect.diffuse + xParticleScatter * scatter;
 		color.rgb += lighting.indirect.specular;
 
 		//color.rgb = float3(unrotated_uv, 0);

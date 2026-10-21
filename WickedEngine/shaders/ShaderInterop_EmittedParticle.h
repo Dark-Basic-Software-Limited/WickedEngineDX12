@@ -117,7 +117,7 @@ CBUFFER(EmittedParticleCB, CBSLOT_OTHER_EMITTEDPARTICLE)
 
 	float		xParticleRandomPosScale;
 	uint		xTotalEmitCount;
-	float		xParticlePadding0;
+	float		xParticleScatter;			// the sun's forward scattering on a lit layer (wi::renderer::SetParticleScatter), 0 off
 	float		xParticlePadding1;
 };
 

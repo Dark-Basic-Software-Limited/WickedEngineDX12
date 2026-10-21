@@ -1339,6 +1339,10 @@ namespace wi::renderer
 	void SetVXGIReflectionsEnabled(bool enabled);
 	bool GetVXGIReflectionsEnabled();
 	void SetGameSpeed(float value);
+	// the sun's forward scattering on lit particles: a cloud with the sun behind it glows, brightest looking toward the sun
+	// through it; 0 off (the default), 1 the phase function as it is
+	void SetParticleScatter(float value);
+	float GetParticleScatter();
 	float GetGameSpeed();
 	// GGMAX 1.67: triangles submitted to the main camera color pass (opaque+transparent,
 	// once per subset) during the last completed frame — for the game's Performance HUD.

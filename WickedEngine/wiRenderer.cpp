@@ -21371,6 +21371,9 @@ void SetVXGIEnabled(bool enabled)
 bool GetVXGIEnabled() { return VXGI_ENABLED; }
 void SetVXGIReflectionsEnabled(bool enabled) { VXGI_REFLECTIONS_ENABLED = enabled; }
 bool GetVXGIReflectionsEnabled() { return VXGI_REFLECTIONS_ENABLED; }
+static float particleScatter = 0; // the sun's forward scattering on lit particles, 0 off
+void SetParticleScatter(float value) { particleScatter = std::max(0.0f, value); }
+float GetParticleScatter() { return particleScatter; }
 void SetGameSpeed(float value) { GameSpeed = std::max(0.0f, value); }
 float GetGameSpeed() { return GameSpeed; }
 void SetShadowsEnabled(bool value)

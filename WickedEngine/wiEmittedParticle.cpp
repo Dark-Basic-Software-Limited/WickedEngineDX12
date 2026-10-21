@@ -603,7 +603,7 @@ namespace wi
 			cb.xParticleRandomPos = random_position;
 			cb.xParticleRandomPosScale = random_position_scale;
 			cb.xTotalEmitCount = total_emit_count;
-			cb.xParticlePadding0 = 0;
+			cb.xParticleScatter = wi::renderer::GetParticleScatter();
 			cb.xParticlePadding1 = 0;
 
 			cb.xEmitterOptions = 0;

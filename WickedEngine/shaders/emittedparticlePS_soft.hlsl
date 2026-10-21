@@ -125,7 +125,9 @@ float4 main(VertextoPixel input) : SV_TARGET
 
 		TiledLighting(surface, lighting, GetFlatTileIndex(pixel));
 
-		color.rgb *= lighting.direct.diffuse + lighting.indirect.diffuse;
+		// the direct light divided by PI, as ApplyLighting does for objects: BRDF_GetDiffuse leaves it out, so without it a lit
+		// particle took PI times the direct light an object does
+		color.rgb *= lighting.direct.diffuse / PI + lighting.indirect.diffuse;
 		color.rgb += lighting.indirect.specular;
 
 		//color.rgb = float3(unrotated_uv, 0);

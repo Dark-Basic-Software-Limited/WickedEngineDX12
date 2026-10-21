@@ -93,8 +93,19 @@ float4 main(VertextoPixel input) : SV_TARGET
 
 #ifdef EMITTEDPARTICLE_LIGHTING
 
+	// a legacy .PE layer takes the vertex shader's light, the centre's blended into the corners' towards the edges
 	[branch]
-	if (color.a > 0)
+	if (xEmitterFadeinTime >= 0 && color.a > 0)
+	{
+		const float edge = saturate(length(float2(input.unrotated_uv) - 0.5) * 2);
+		color.rgb *= (half3)lerp(input.litCentre, input.litCorner, edge);
+		float3 V = input.GetViewVector();
+		const float dist = length(V);
+		V /= dist;
+		ApplyFog(dist, V, color);
+		color = max(0, color);
+	}
+	else if (color.a > 0)
 	{
 		float3 N;
 		N.x = -cos(PI * input.unrotated_uv.x);

@@ -16,6 +16,11 @@ struct VertextoPixel
 	nointerpolation half frameBlend : FRAMEBLEND;
 	nointerpolation half size : PARTICLESIZE;
 	nointerpolation uint color : PARTICLECOLOR;
+#ifdef EMITTEDPARTICLE_LIGHTING
+	// a legacy .PE layer's light from the vertex shader, at this corner and at the sprite's centre
+	float3 litCorner : LITCORNER;
+	nointerpolation float3 litCentre : LITCENTRE;
+#endif // EMITTEDPARTICLE_LIGHTING
 	
 	inline float3 GetPos3D()
 	{

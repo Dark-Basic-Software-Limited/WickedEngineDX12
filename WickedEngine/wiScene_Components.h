@@ -1205,6 +1205,7 @@ namespace wi::scene
 			// object _flags are never persisted by MAX (objects are rebuilt from FPE/model
 			// load every level load; the tree pool re-asserts this flag at creation).
 			OCCLUSION_QUERY_DISABLED = 1 << 28,	// GGMAX: opt this object out of per-object GPU occlusion queries (always treated as visible)
+			APPARENT_CULL_DISABLED = 1 << 26,	// GGMAX: never culled for its apparent size (a small lamp head kept in view while its light shines)
 			SHADOW_DISTANCE_FADE = 1 << 27,		// GGMAX 3.108: its sun shadow dissolves with its distance fade instead of cutting off (tree pool)
 		};
 		uint32_t _flags = RENDERABLE | CAST_SHADOW;
@@ -1277,6 +1278,7 @@ namespace wi::scene
 		// With this you can disable object rendering for reflections
 		constexpr void SetNotVisibleInReflections(bool value) { if (value) { _flags |= NOT_VISIBLE_IN_REFLECTIONS; } else { _flags &= ~NOT_VISIBLE_IN_REFLECTIONS; } }
 		constexpr void SetWetmapEnabled(bool value) { if (value) { _flags |= WETMAP_ENABLED; } else { _flags &= ~WETMAP_ENABLED; } }
+		constexpr void SetApparentCullDisabled(bool value) { if (value) { _flags |= APPARENT_CULL_DISABLED; } else { _flags &= ~APPARENT_CULL_DISABLED; } } // GGMAX
 		// GGMAX: exclude this object from GPU occlusion queries — it is always considered visible.
 		// Use for huge pools of cheap objects (tree pool) where query bookkeeping costs more than drawing.
 		constexpr void SetOcclusionQueryDisabled(bool value) { if (value) { _flags |= OCCLUSION_QUERY_DISABLED; } else { _flags &= ~OCCLUSION_QUERY_DISABLED; } }
@@ -1297,6 +1299,7 @@ namespace wi::scene
 		constexpr bool IsNotVisibleInMainCamera() const { return _flags & NOT_VISIBLE_IN_MAIN_CAMERA; }
 		constexpr bool IsNotVisibleInReflections() const { return _flags & NOT_VISIBLE_IN_REFLECTIONS; }
 		constexpr bool IsWetmapEnabled() const { return _flags & WETMAP_ENABLED; }
+		constexpr bool IsApparentCullDisabled() const { return _flags & APPARENT_CULL_DISABLED; } // GGMAX
 		constexpr bool IsOcclusionQueryDisabled() const { return _flags & OCCLUSION_QUERY_DISABLED; }	// GGMAX
 
 		constexpr float GetTransparency() const { return 1 - color.w; }

@@ -4777,7 +4777,8 @@ void UpdateVisibility(Visibility& vis)
 			// GGMAX delta 1.30: apparent-size cull — drop objects that would render as a distant speck.
 			// Cull when (radius/distance) < threshold, i.e. radius^2 < threshold^2 * distance^2. The
 			// distSq > radiusSq guard keeps objects the camera is inside/next-to always visible.
-			if (visible && apparentCullTangentSq > 0.0f)
+			// GGMAX: an object marked APPARENT_CULL_DISABLED (a lamp head) is never dropped for its size
+			if (visible && apparentCullTangentSq > 0.0f && !vis.scene->objects[args.jobIndex].IsApparentCullDisabled())
 			{
 				const float distSq = wi::math::DistanceSquared(apparentCullEye, aabb.getCenter());
 				const float radius = aabb.getRadius();

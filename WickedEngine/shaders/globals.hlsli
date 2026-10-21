@@ -510,8 +510,10 @@ StructuredBuffer<DDGIProbe> bindless_structured_ddi_probes[] : register(space208
 #define load_geometry(geometryIndex) (bindless_structured_geometry[descriptor_index(GetScene().geometrybuffer)][geometryIndex])
 #define load_meshlet(meshletIndex) (bindless_structured_meshlet[descriptor_index(GetScene().meshletbuffer)][meshletIndex])
 #define load_material(materialIndex) (bindless_structured_material[descriptor_index(GetScene().materialbuffer)][materialIndex])
-#define load_entity(entityIndex) (GetFrame().entityArray[entityIndex])
-#define load_entitymatrix(matrixIndex) (GetFrame().matrixArray[matrixIndex])
+// GGMAX: the entity and matrix arrays are raw buffers of the view's own (FrameCB descriptors), not the frame constant buffer's
+// inline arrays, so SHADER_ENTITY_COUNT can be 1024; a ShaderEntity is 64 bytes (static_assert in ShaderInterop_Renderer.h)
+#define load_entity(entityIndex) (bindless_buffers[GetFrame().entityarray_descriptor].Load<ShaderEntity>((entityIndex) * 64))
+#define load_entitymatrix(matrixIndex) (bindless_buffers[GetFrame().matrixarray_descriptor].Load<float4x4>((matrixIndex) * 64))
 #ifdef TRANSPARENT
 #define load_entitytile(tileIndex) (bindless_structured_uint[GetCamera().buffer_entitytiles_index][GetCamera().entity_culling_tile_bucket_count_flat + tileIndex])
 #else

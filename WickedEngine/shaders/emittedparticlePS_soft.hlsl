@@ -122,6 +122,10 @@ float4 main(VertextoPixel input) : SV_TARGET
 		surface.sss_inv = material.GetSSSInverse();
 		surface.extinction = 0;
 		surface.update();
+		// no Fresnel on a particle's light: smoke and dust are clouds of grains, not a surface with an interface, and the factor
+		// took the diffuse light away when the light was behind the cloud, where real smoke brightens; with no reflectance
+		// F_Schlick is 0 and the diffuse is the full light
+		surface.f0 = 0;
 
 		TiledLighting(surface, lighting, GetFlatTileIndex(pixel));
 

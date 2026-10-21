@@ -1163,7 +1163,7 @@ struct alignas(16) ShaderFrustumCorners
 static const float CAPSULE_SHADOW_AFFECTION_RANGE = 4; // how far away the capsule shadow can reach outside of their own radius
 static const float CAPSULE_SHADOW_BOLDEN = 1.1f; // multiplier for capsule shadow capsule radiuses globally
 
-static const uint SHADER_ENTITY_COUNT = 256;
+static const uint SHADER_ENTITY_COUNT = 1024; // GGMAX: was 256 in the frame constant buffer; the arrays are GPU buffers now (FrameCB entityarray_descriptor)
 static const uint SHADER_ENTITY_TILE_BUCKET_COUNT = SHADER_ENTITY_COUNT / 32;
 
 struct ShaderEntityIterator
@@ -1375,8 +1375,13 @@ struct alignas(16) FrameCB
 	uint decals;
 	uint forces;
 
-	ShaderEntity entityArray[SHADER_ENTITY_COUNT];
-	float4x4 matrixArray[SHADER_ENTITY_COUNT];
+	// GGMAX: the entity and matrix arrays were here (ShaderEntity entityArray[SHADER_ENTITY_COUNT]; float4x4 matrixArray[...]),
+	// which held the count to 256 in the 64 KB constant buffer; they are raw GPU buffers of the view's own now, read through
+	// load_entity and load_entitymatrix by these bindless descriptors
+	int entityarray_descriptor;
+	int matrixarray_descriptor;
+	int padding_entityarray0;
+	int padding_entityarray1;
 };
 
 enum SHADERCAMERA_OPTIONS

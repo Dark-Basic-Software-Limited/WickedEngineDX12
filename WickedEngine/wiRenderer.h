@@ -50,6 +50,9 @@ namespace wi::renderer
 	// RenderPath3D::setReflectionsEnabled, so every path that re-creates the reflection
 	// targets picks it up for free - including ResizeBuffers and the game's own callers.
 	extern int gg_reflection_width;
+	extern float gg_light_max_distance; // GGMAX: point and spot lights farther than this from the camera (their range added) are left out of the frame; 0 none (the host's SetLightMaxDistance)
+	extern uint32_t gg_lights_visible; // GGMAX: the lights in view this frame, and how many of them the entity array took (the performance panel)
+	extern uint32_t gg_lights_packed;
 	// GGMAX 3.90: Water Reflection Blur. Number of 9-tap separable Gaussian passes run over
 	// rtReflection_resolved after the planar reflection pass. 0 = off, image byte-identical.
 	// The reflection is magnified ~4x on flat water, so one pass of ~2 texels sigma reads as
@@ -258,6 +261,15 @@ namespace wi::renderer
 		std::atomic_bool volumetriclight_request{ false };
 		std::atomic_bool transparents_visible{ false };
 		std::atomic_bool mesh_blend_visible{ false };
+
+		// GGMAX: the frame's shader entities and their matrices, filled by UpdatePerFrameData and uploaded by UpdateRenderData into
+		// GPU buffers of this view's own (the frame constant buffer held them, 256 at most); mutable as both take a const view
+		mutable wi::vector<ShaderEntity> entityArray;
+		mutable wi::vector<XMFLOAT4X4> matrixArray;
+		mutable uint32_t entityArrayCount = 0;
+		mutable uint32_t matrixArrayCount = 0;
+		mutable wi::graphics::GPUBuffer entityBuffer;
+		mutable wi::graphics::GPUBuffer matrixBuffer;
 
 		void Clear()
 		{

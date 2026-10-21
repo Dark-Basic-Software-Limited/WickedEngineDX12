@@ -484,6 +484,10 @@ int gg_shadow_res_steps = 4;
 // GGMAX 3.89: Water Reflection Size. 0 = stock internal-resolution/4 for the planar
 // reflection target. See wiRenderer.h and the only consumer, setReflectionsEnabled.
 int gg_reflection_width = 0;
+float gg_light_max_distance = 0.0f;
+uint32_t gg_lights_visible = 0;
+uint32_t gg_lights_packed = 0;
+static constexpr uint32_t GG_MATRIXARRAY_COUNT = SHADER_ENTITY_COUNT * 2; // GGMAX: decals, probes and every shadowed light's matrices, with headroom
 // GGMAX 3.90: Water Reflection Blur - passes of the separable Gaussian over the resolved
 // planar reflection. 0 = off. See wiRenderer.h and the consumer in wiRenderPath3D.cpp.
 int gg_reflection_blur = 0;
@@ -4708,7 +4712,15 @@ void UpdateVisibility(Visibility& vis)
 			if ((aabb.layerMask & vis.layerMask) && vis.frustum.CheckBoxFast(aabb))
 			{
 				const LightComponent& light = vis.scene->lights[args.jobIndex];
-				if (!light.IsInactive())
+				// GGMAX: a point or spot light out of reach takes no entity slot, as one out of view takes none: one with no range
+				// (a lamp off by day), or farther from the camera than gg_light_max_distance with its range added
+				bool gg_in_reach = true;
+				if (light.GetType() != LightComponent::DIRECTIONAL)
+				{
+					if (light.GetRange() <= 1.0f) gg_in_reach = false;
+					else if (gg_light_max_distance > 0.0f && wi::math::DistanceEstimated(XMLoadFloat3(&light.position), vis.camera->GetEye()) > gg_light_max_distance + light.GetRange()) gg_in_reach = false;
+				}
+				if (!light.IsInactive() && gg_in_reach)
 				{
 					// Local stream compaction:
 					stream_compaction.list[stream_compaction.count++] = args.groupIndex;
@@ -5016,6 +5028,23 @@ void UpdateVisibility(Visibility& vis)
 	// finalize stream compaction:
 	vis.visibleObjects.resize((size_t)vis.object_counter.load());
 	vis.visibleLights.resize((size_t)vis.light_counter.load());
+	// GGMAX: nearest first (directional lights ahead of all), so the lights the entity array cannot take are the farthest
+	gg_lights_visible = (uint32_t)vis.visibleLights.size();
+	if (vis.visibleLights.size() > 32)
+	{
+		const XMVECTOR eye = vis.camera->GetEye();
+		static thread_local wi::vector<std::pair<float, uint32_t>> keyed;
+		keyed.clear();
+		keyed.reserve(vis.visibleLights.size());
+		for (uint32_t lightIndex : vis.visibleLights)
+		{
+			const LightComponent& light = vis.scene->lights[lightIndex];
+			const float key = light.GetType() == LightComponent::DIRECTIONAL ? -1.0f : wi::math::DistanceEstimated(XMLoadFloat3(&light.position), eye);
+			keyed.emplace_back(key, lightIndex);
+		}
+		std::sort(keyed.begin(), keyed.end(), [](const std::pair<float, uint32_t>& a, const std::pair<float, uint32_t>& b) { return a.first < b.first; });
+		for (size_t i = 0; i < keyed.size(); ++i) vis.visibleLights[i] = keyed[i].second;
+	}
 
 	if (vis.scene->weather.IsOceanEnabled())
 	{
@@ -5971,8 +6000,27 @@ void UpdatePerFrameData(
 	uint forcefieldarray_count = 0;
 	frameCB.entity_culling_count = 0;
 	{
-		ShaderEntity* entityArray = frameCB.entityArray;
-		float4x4* matrixArray = frameCB.matrixArray;
+		// GGMAX: the arrays are the view's own, uploaded to its GPU buffers by UpdateRenderData; the frame constant buffer carries
+		// their bindless descriptors (it held the arrays inline before, which capped the entities at 256 in its 64 KB)
+		if (vis.entityArray.size() != SHADER_ENTITY_COUNT) vis.entityArray.resize(SHADER_ENTITY_COUNT);
+		if (vis.matrixArray.size() != GG_MATRIXARRAY_COUNT) vis.matrixArray.resize(GG_MATRIXARRAY_COUNT);
+		if (!vis.entityBuffer.IsValid())
+		{
+			GPUBufferDesc bd;
+			bd.usage = Usage::DEFAULT;
+			bd.bind_flags = BindFlag::SHADER_RESOURCE;
+			bd.misc_flags = ResourceMiscFlag::BUFFER_RAW;
+			bd.size = sizeof(ShaderEntity) * SHADER_ENTITY_COUNT;
+			device->CreateBuffer(&bd, nullptr, &vis.entityBuffer);
+			device->SetName(&vis.entityBuffer, "Visibility::entityBuffer");
+			bd.size = sizeof(XMFLOAT4X4) * GG_MATRIXARRAY_COUNT;
+			device->CreateBuffer(&bd, nullptr, &vis.matrixBuffer);
+			device->SetName(&vis.matrixBuffer, "Visibility::matrixBuffer");
+		}
+		frameCB.entityarray_descriptor = device->GetDescriptorIndex(&vis.entityBuffer, SubresourceType::SRV);
+		frameCB.matrixarray_descriptor = device->GetDescriptorIndex(&vis.matrixBuffer, SubresourceType::SRV);
+		ShaderEntity* entityArray = vis.entityArray.data();
+		float4x4* matrixArray = vis.matrixArray.data();
 
 		uint32_t entityCounter = 0;
 		uint32_t matrixCounter = 0;
@@ -5984,8 +6032,7 @@ void UpdatePerFrameData(
 		{
 			if (entityCounter == SHADER_ENTITY_COUNT)
 			{
-				entityCounter--;
-				break;
+				break; // GGMAX: the rest are left out; taking one back made the next kind overwrite the last slot
 			}
 			if (matrixCounter >= MATRIXARRAY_COUNT)
 			{
@@ -6066,8 +6113,7 @@ void UpdatePerFrameData(
 		{
 			if (entityCounter == SHADER_ENTITY_COUNT)
 			{
-				entityCounter--;
-				break;
+				break; // GGMAX: the rest are left out; taking one back made the next kind overwrite the last slot
 			}
 			if (matrixCounter >= MATRIXARRAY_COUNT)
 			{
@@ -6125,8 +6171,7 @@ void UpdatePerFrameData(
 		{
 			if (entityCounter == SHADER_ENTITY_COUNT)
 			{
-				entityCounter--;
-				break;
+				break; // GGMAX: the rest are left out; taking one back made the next kind overwrite the last slot
 			}
 
 			const LightComponent& light = vis.scene->lights[lightIndex];
@@ -6293,8 +6338,7 @@ void UpdatePerFrameData(
 		{
 			if (entityCounter == SHADER_ENTITY_COUNT)
 			{
-				entityCounter--;
-				break;
+				break; // GGMAX: the rest are left out; taking one back made the next kind overwrite the last slot
 			}
 
 			const LightComponent& light = vis.scene->lights[lightIndex];
@@ -6379,8 +6423,7 @@ void UpdatePerFrameData(
 		{
 			if (entityCounter == SHADER_ENTITY_COUNT)
 			{
-				entityCounter--;
-				break;
+				break; // GGMAX: the rest are left out; taking one back made the next kind overwrite the last slot
 			}
 
 			const LightComponent& light = vis.scene->lights[lightIndex];
@@ -6456,8 +6499,7 @@ void UpdatePerFrameData(
 		{
 			if (entityCounter == SHADER_ENTITY_COUNT)
 			{
-				entityCounter--;
-				break;
+				break; // GGMAX: the rest are left out; taking one back made the next kind overwrite the last slot
 			}
 
 			const LightComponent& light = vis.scene->lights[lightIndex];
@@ -6532,8 +6574,7 @@ void UpdatePerFrameData(
 		{
 			if (entityCounter == SHADER_ENTITY_COUNT)
 			{
-				entityCounter--;
-				break;
+				break; // GGMAX: the rest are left out; taking one back made the next kind overwrite the last slot
 			}
 			ShaderEntity shaderentity = {};
 
@@ -6580,8 +6621,7 @@ void UpdatePerFrameData(
 		{
 			if (entityCounter == SHADER_ENTITY_COUNT)
 			{
-				entityCounter--;
-				break;
+				break; // GGMAX: the rest are left out; taking one back made the next kind overwrite the last slot
 			}
 			ShaderEntity shaderentity = {};
 
@@ -6616,6 +6656,10 @@ void UpdatePerFrameData(
 			entityCounter++;
 			forcefieldarray_count++;
 		}
+
+		vis.entityArrayCount = entityCounter;
+		vis.matrixArrayCount = matrixCounter;
+		gg_lights_packed = lightarray_count;
 	}
 
 	frameCB.probes = ShaderEntityIterator(envprobearray_offset, envprobearray_count);
@@ -6656,6 +6700,12 @@ void UpdateRenderData(
 	PushBarrier(GPUBarrier::Buffer(&vis.scene->meshletBuffer, ResourceState::SHADER_RESOURCE, ResourceState::UNORDERED_ACCESS));
 
 	PushBarrier(GPUBarrier::Buffer(&buffers[BUFFERTYPE_FRAMECB], ResourceState::CONSTANT_BUFFER, ResourceState::COPY_DST));
+	// GGMAX: the view's entity and matrix arrays go up with the frame constants
+	if (vis.entityBuffer.IsValid())
+	{
+		PushBarrier(GPUBarrier::Buffer(&vis.entityBuffer, ResourceState::SHADER_RESOURCE, ResourceState::COPY_DST));
+		PushBarrier(GPUBarrier::Buffer(&vis.matrixBuffer, ResourceState::SHADER_RESOURCE, ResourceState::COPY_DST));
+	}
 	if (vis.scene->instanceBuffer.IsValid())
 	{
 		PushBarrier(GPUBarrier::Buffer(&vis.scene->instanceBuffer, ResourceState::SHADER_RESOURCE, ResourceState::COPY_DST));
@@ -6676,6 +6726,13 @@ void UpdateRenderData(
 
 	device->UpdateBuffer(&buffers[BUFFERTYPE_FRAMECB], &frameCB, cmd);
 	PushBarrier(GPUBarrier::Buffer(&buffers[BUFFERTYPE_FRAMECB], ResourceState::COPY_DST, ResourceState::CONSTANT_BUFFER));
+	if (vis.entityBuffer.IsValid())
+	{
+		device->UpdateBuffer(&vis.entityBuffer, vis.entityArray.data(), cmd, sizeof(ShaderEntity) * std::max(1u, vis.entityArrayCount));
+		device->UpdateBuffer(&vis.matrixBuffer, vis.matrixArray.data(), cmd, sizeof(XMFLOAT4X4) * std::max(1u, vis.matrixArrayCount));
+		PushBarrier(GPUBarrier::Buffer(&vis.entityBuffer, ResourceState::COPY_DST, ResourceState::SHADER_RESOURCE));
+		PushBarrier(GPUBarrier::Buffer(&vis.matrixBuffer, ResourceState::COPY_DST, ResourceState::SHADER_RESOURCE));
+	}
 
 	if (vis.scene->instanceBuffer.IsValid() && vis.scene->instanceArraySize > 0)
 	{

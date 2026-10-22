@@ -781,6 +781,15 @@ static int skipcomment (FILE *f, int *cp) {
 }
 
 
+/* GGMAX: see lauxlib.h - NULL = stock fopen */
+FILE *(*ggLua_fopenhook) (const char *filename, const char *mode) = NULL;
+
+LUALIB_API FILE *ggLua_fopen (const char *filename, const char *mode) {
+  return (ggLua_fopenhook != NULL) ? ggLua_fopenhook(filename, mode)
+                                   : fopen(filename, mode);
+}
+
+
 LUALIB_API int luaL_loadfilex (lua_State *L, const char *filename,
                                              const char *mode) {
   LoadF lf;
@@ -794,7 +803,7 @@ LUALIB_API int luaL_loadfilex (lua_State *L, const char *filename,
   else {
     lua_pushfstring(L, "@%s", filename);
     errno = 0;
-    lf.f = fopen(filename, "r");
+    lf.f = ggLua_fopen(filename, "r");  /* GGMAX: was fopen */
     if (lf.f == NULL) return errfile(L, "open", fnameindex);
   }
   lf.n = 0;
@@ -804,7 +813,12 @@ LUALIB_API int luaL_loadfilex (lua_State *L, const char *filename,
     lf.n = 0;  /* remove possible newline */
     if (filename) {  /* "real" file? */
       errno = 0;
-      lf.f = freopen(filename, "rb", lf.f);  /* reopen in binary mode */
+      if (ggLua_fopenhook != NULL) {  /* GGMAX: reopen where the hook found it */
+        fclose(lf.f);
+        lf.f = ggLua_fopenhook(filename, "rb");
+      }
+      else
+        lf.f = freopen(filename, "rb", lf.f);  /* reopen in binary mode */
       if (lf.f == NULL) return errfile(L, "reopen", fnameindex);
       skipcomment(lf.f, &c);  /* re-read initial portion */
     }

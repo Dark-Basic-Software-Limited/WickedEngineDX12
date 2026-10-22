@@ -423,7 +423,7 @@ static int ll_loadlib (lua_State *L) {
 
 
 static int readable (const char *filename) {
-  FILE *f = fopen(filename, "r");  /* try to open file */
+  FILE *f = ggLua_fopen(filename, "r");  /* try to open file (GGMAX: was fopen) */
   if (f == NULL) return 0;  /* open failed */
   fclose(f);
   return 1;

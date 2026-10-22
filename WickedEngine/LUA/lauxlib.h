@@ -247,6 +247,16 @@ typedef struct luaL_Stream {
   lua_CFunction closef;  /* to close stream (NULL for closed streams) */
 } luaL_Stream;
 
+/*
+** GGMAX: host file-open hook. GameGuru MAX's DX11 build compiled its own Lua 5.2 with every
+** open-by-name (luaL_loadfilex = dofile/loadfile, io.open, io.lines/input/output with a file
+** name, require's searchpath) routed through the host's GG_fopen, which looks in the per-user
+** writable area before the install folder. A host restores that by pointing ggLua_fopenhook at
+** its own open function. NULL (the default) = plain fopen, so stock behaviour is unchanged.
+*/
+extern FILE *(*ggLua_fopenhook) (const char *filename, const char *mode);
+LUALIB_API FILE *(ggLua_fopen) (const char *filename, const char *mode);
+
 /* }====================================================== */
 
 /*

@@ -313,6 +313,20 @@ bool gg_dx11_light_falloff = true;
 // GGMAX 3.114: OPTION_BIT_GG_DX11_FOG_CURVE (fogHF.hlsli GetFogAmount). The default fog start of a
 // GameGuru level is 40000 (visuals_resetvalues), so this changes the distant haze on most levels.
 bool gg_dx11_fog_curve = true;
+// GGMAX 3.126: MiniEngine's MSAO tolerances are absolute in depth NORMALISED BY zFar (upsample: |dz|/zFar
+// against 1e-7 and a 1e-3 noise filter; blur: zFar/z deltas against a pixel-sized StepSize), tuned for a
+// ~100 m far plane. GameGuru levels run zFar = 500000 inches (12.7 km), so a railing 1-2 m in front of a
+// wall falls inside the noise tolerance: unmatched railing pixels took ~98% of the wall's AO and the blur
+// smeared across the thin posts - dark patches that swim as the posts change pixel column (DX11 the same).
+// MiniEngine's design point is ~100 m (4000 inches): on that railing AO-buffer dark coverage 91% -> 54% (editor), 74% ->
+// 46% (Test Level), flat-surface flicker over sub-pixel yaw 22% -> 6% of pixels. But the tighter noise filter lightens every
+// other pixel row of contact AO on grazing ground (only even rows have an exact half-res twin), from ~20 m out at 4000.
+// Swept 4000/10000/20000 with the 3.126b depth pick: 10000 (254 m) kept the railing at 57% dark (stock 90%), gave the
+// least pop-in, and half the extra row striping of 4000 (far-ground index stock 6.30, 4000 7.11, 10000 6.71).
+float gg_msao_reference_far = 10000.0f;
+// GGMAX 3.126b: see MSAO_PREPARE (ShaderInterop_Postprocess.h)
+uint32_t gg_msao_downsample_mode = 1;
+float gg_msao_downsample_edge = 0.1f;
 std::atomic<size_t> SHADER_ERRORS{ 0 };
 std::atomic<size_t> SHADER_MISSING{ 0 };
 bool VXGI_ENABLED = false;
@@ -15240,6 +15254,10 @@ void Postprocess_MSAO(
 	// Depth downsampling + deinterleaving pass1:
 	{
 		device->BindComputeShader(&shaders[CSTYPE_POSTPROCESS_MSAO_PREPAREDEPTHBUFFERS1], cmd);
+		MSAO_PREPARE gg_prepare = {};
+		gg_prepare.gg_mode = gg_msao_downsample_mode;
+		gg_prepare.gg_edge = gg_msao_downsample_edge;
+		device->PushConstants(&gg_prepare, sizeof(gg_prepare), cmd);
 
 		const GPUResource* uavs[] = {
 			&res.texture_lineardepth_downsize1,
@@ -15277,6 +15295,10 @@ void Postprocess_MSAO(
 	// Depth downsampling + deinterleaving pass2:
 	{
 		device->BindComputeShader(&shaders[CSTYPE_POSTPROCESS_MSAO_PREPAREDEPTHBUFFERS2], cmd);
+		MSAO_PREPARE gg_prepare = {};
+		gg_prepare.gg_mode = gg_msao_downsample_mode;
+		gg_prepare.gg_edge = gg_msao_downsample_edge;
+		device->PushConstants(&gg_prepare, sizeof(gg_prepare), cmd);
 
 		device->BindResource(&res.texture_lineardepth_downsize2, 0, cmd);
 
@@ -15531,6 +15553,17 @@ void Postprocess_MSAO(
 		msao_upsample.kUpsampleTolerance = powf(10.0f, g_UpsampleTolerance);
 		msao_upsample.NoiseFilterStrength = 1.0f / (powf(10.0f, g_NoiseFilterTolerance) + msao_upsample.kUpsampleTolerance);
 		msao_upsample.StepSize = (float)lineardepth.GetDesc().width / (float)LoWidth;
+		if (gg_msao_reference_far > 0.0f && camera.zFarP > gg_msao_reference_far)
+		{
+			// GGMAX 3.126: exactly the result of running with zFar = gg_msao_reference_far (k = zFar / ref):
+			// every upsample weight and the noise filter scale by k (ratio unchanged), and the blur's
+			// collinearity test is invariant when StepSize scales by k^2 as the zFar/z deltas scale by k.
+			// The AO term itself (msaoCS) is a depth RATIO and does not depend on zFar.
+			const float k = camera.zFarP / gg_msao_reference_far;
+			msao_upsample.kUpsampleTolerance /= k;
+			msao_upsample.NoiseFilterStrength *= k;
+			msao_upsample.StepSize *= k * k;
+		}
 		device->PushConstants(&msao_upsample, sizeof(msao_upsample), cmd);
 
 		device->BindUAV(&Destination, 0, cmd);

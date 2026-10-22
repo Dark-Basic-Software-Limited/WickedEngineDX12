@@ -89,6 +89,14 @@ namespace wi::renderer
 	// GGMAX 3.114: DX11 fog curve (optical depth past fog start only). setup.ini `fogdx11curve=0`,
 	// harness `SET_FOGCURVE 0|1` (fully live).
 	extern bool gg_dx11_fog_curve;
+	// GGMAX 3.126: MSAO blur/upsample depth tolerances behave as if the far plane were this many world
+	// units whenever the camera's far plane is larger (0 = stock). setup.ini `msaoreffar`, harness
+	// SET_MSAOREFFAR <units>. See Postprocess_MSAO.
+	extern float gg_msao_reference_far;
+	// GGMAX 3.126b: MSAO depth-pyramid pick at depth edges (0 stock top-left texel, 1 farthest, 2 nearest)
+	// and the relative depth range that counts as an edge. setup.ini `msaodownsample`, harness SET_MSAODOWNSAMPLE.
+	extern uint32_t gg_msao_downsample_mode;
+	extern float gg_msao_downsample_edge;
 	// GGMAX 2.14: first-person weapon shadow-position pull (DX11 SHADERTYPE_WEAPON parity).
 	// setup.ini `weaponshadow=0`, harness `SET_WEAPONSHADOW 0|1` (fully live).
 	extern bool gg_weapon_shadow;

@@ -81,6 +81,17 @@ struct MSAO
 CONSTANTBUFFER(msao, MSAO, CBSLOT_MSAO);
 
 //#define MSAO_SAMPLE_EXHAUSTIVELY
+// GGMAX 3.126b: depth pyramid pick for the MSAO prepare passes (msao_preparedepthbuffers1/2CS).
+// Stock MiniEngine keeps the top-left texel of every 2x2 block, so a post or gap a few pixels wide is in a
+// coarse level at some camera angles and missing at others - large AO bands that pop with a sub-pixel turn.
+// gg_mode 0 = stock; 1 = where the block's depth range exceeds gg_edge (relative) take its FARTHEST depth;
+// 2 = take its NEAREST there. Blocks without an edge keep the stock texel, so smooth surfaces are unchanged.
+struct MSAO_PREPARE
+{
+	uint gg_mode;
+	float gg_edge;
+	uint2 gg_pad;
+};
 struct MSAO_UPSAMPLE
 {
 	float2 InvLowResolution;

@@ -2893,7 +2893,8 @@ namespace wi
 					cmd,
 					getBloomThreshold(),
 					getExposure(),
-					getEyeAdaptionEnabled() ? &luminanceResources.luminance : nullptr
+					getEyeAdaptionEnabled() ? &luminanceResources.luminance : nullptr,
+					getBloomStrength()
 				);
 			}
 

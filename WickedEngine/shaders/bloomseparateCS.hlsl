@@ -32,5 +32,8 @@ void main(uint3 DTid : SV_DispatchThreadID)
 	color = min(color, 10); // clamp upper limit: avoid incredibly large values to overly dominate bloom (high speculars were causing problems)
 	color = max(color - bloom.threshold, 0);
 
+	// the strength: the blur and the tonemap's taps are linear, so this scales what the tonemap adds
+	color *= bloom.strength;
+
 	bindless_rwtextures[descriptor_index(bloom.texture_output)][DTid.xy] = float4(color, 1);
 }

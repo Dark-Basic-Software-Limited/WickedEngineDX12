@@ -35,6 +35,7 @@ struct Bloom
 	int texture_input;
 	int texture_output;
 	int buffer_input_luminance;
+	float strength;
 };
 
 #define lineardepth_inputresolution postprocess.params0.xy

@@ -39,6 +39,7 @@ namespace wi
 		float contrast = 1.0f;
 		float saturation = 1.0f;
 		float bloomThreshold = 1.0f;
+		float bloomStrength = 1.0f;
 		float motionBlurStrength = 100.0f;
 		float dofStrength = 10.0f;
 		float sharpenFilterAmount = 0.28f;
@@ -242,6 +243,7 @@ namespace wi
 		constexpr float getContrast() const { return contrast; }
 		constexpr float getSaturation() const { return saturation; }
 		constexpr float getBloomThreshold() const { return bloomThreshold; }
+		constexpr float getBloomStrength() const { return bloomStrength; }
 		constexpr float getMotionBlurStrength() const { return motionBlurStrength; }
 		constexpr float getDepthOfFieldStrength() const { return dofStrength; }
 		constexpr float getSharpenFilterAmount() const { return sharpenFilterAmount; }
@@ -301,6 +303,7 @@ namespace wi
 		constexpr void setContrast(float value) { contrast = value; }
 		constexpr void setSaturation(float value) { saturation = value; }
 		constexpr void setBloomThreshold(float value) { bloomThreshold = value; }
+		constexpr void setBloomStrength(float value) { bloomStrength = value; }
 		constexpr void setMotionBlurStrength(float value) { motionBlurStrength = value; }
 		constexpr void setDepthOfFieldStrength(float value) { dofStrength = value; }
 		constexpr void setSharpenFilterAmount(float value) { sharpenFilterAmount = value; }

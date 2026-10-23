@@ -519,7 +519,8 @@ namespace wi::renderer
 		float threshold = 1.0f, // cutoff value, pixels below this will not contribute to bloom
 		float exposure = 1.0f,
 		const wi::graphics::GPUBuffer* buffer_luminance = nullptr,
-		float strength = 1.0f // how strongly the bloom is added (applied here: the blur and the tonemap's taps are linear)
+		float strength = 1.0f, // how strongly the bloom is added (applied here: the blur and the tonemap's taps are linear)
+		bool before_exposure = false // the threshold and cap taken on the scene's own values, the exposure applied after
 	);
 
 	void ComputeShadingRateClassification(

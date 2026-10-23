@@ -40,6 +40,7 @@ namespace wi
 		float saturation = 1.0f;
 		float bloomThreshold = 1.0f;
 		float bloomStrength = 1.0f;
+		bool bloomBeforeExposure = false; // the bloom's threshold and cap taken before the exposure, as GameGuru MAX's DX11 build
 		float motionBlurStrength = 100.0f;
 		float dofStrength = 10.0f;
 		float sharpenFilterAmount = 0.28f;
@@ -244,6 +245,7 @@ namespace wi
 		constexpr float getSaturation() const { return saturation; }
 		constexpr float getBloomThreshold() const { return bloomThreshold; }
 		constexpr float getBloomStrength() const { return bloomStrength; }
+		constexpr bool getBloomBeforeExposure() const { return bloomBeforeExposure; }
 		constexpr float getMotionBlurStrength() const { return motionBlurStrength; }
 		constexpr float getDepthOfFieldStrength() const { return dofStrength; }
 		constexpr float getSharpenFilterAmount() const { return sharpenFilterAmount; }
@@ -304,6 +306,7 @@ namespace wi
 		constexpr void setSaturation(float value) { saturation = value; }
 		constexpr void setBloomThreshold(float value) { bloomThreshold = value; }
 		constexpr void setBloomStrength(float value) { bloomStrength = value; }
+		constexpr void setBloomBeforeExposure(bool value) { bloomBeforeExposure = value; }
 		constexpr void setMotionBlurStrength(float value) { motionBlurStrength = value; }
 		constexpr void setDepthOfFieldStrength(float value) { dofStrength = value; }
 		constexpr void setSharpenFilterAmount(float value) { sharpenFilterAmount = value; }

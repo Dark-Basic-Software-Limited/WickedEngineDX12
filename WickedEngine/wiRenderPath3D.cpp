@@ -2894,7 +2894,8 @@ namespace wi
 					getBloomThreshold(),
 					getExposure(),
 					getEyeAdaptionEnabled() ? &luminanceResources.luminance : nullptr,
-					getBloomStrength()
+					getBloomStrength(),
+					getBloomBeforeExposure()
 				);
 			}
 

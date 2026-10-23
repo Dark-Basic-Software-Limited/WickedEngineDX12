@@ -13618,7 +13618,9 @@ void ComputeBloom(
 	CommandList cmd,
 	float threshold,
 	float exposure,
-	const GPUBuffer* buffer_luminance
+	const GPUBuffer* buffer_luminance,
+	float strength,
+	bool before_exposure
 )
 {
 	device->EventBegin("Bloom", cmd);
@@ -13659,6 +13661,8 @@ void ComputeBloom(
 		bloom.texture_input = device->GetDescriptorIndex(&input, SubresourceType::SRV);
 		bloom.texture_output = device->GetDescriptorIndex(&res.texture_bloom, SubresourceType::UAV);
 		bloom.buffer_input_luminance = device->GetDescriptorIndex(buffer_luminance, SubresourceType::SRV);
+		bloom.strength = strength;
+		bloom.before_exposure = before_exposure ? 1 : 0;
 		device->PushConstants(&bloom, sizeof(bloom), cmd);
 
 		device->Dispatch(

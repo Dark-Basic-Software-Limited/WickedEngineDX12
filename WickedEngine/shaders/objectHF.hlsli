@@ -77,9 +77,16 @@
 // (which resolves through the residency map) and a plain tex.Sample. For a genuinely sparse
 // material the plain sample reads the physical TILE ATLAS with virtual UVs, which is not a blurrier
 // picture, it is the wrong texels. The Super Quick rungs sample albedo, so they need the real path.
-#if !defined(OBJECTSHADER_LAYOUT_COMMON) && !defined(OBJECTSHADER_LAYOUT_GG_SUPERQUICK)
+//
+// GGMAX 3.127: nor may the env probe capture (envMapPS). With DISABLE_SVT every near-ring terrain chunk in a
+// probe sampled its whole 16384x12288 tile atlas squashed over the chunk (texMulAdd 1,1,0,0) - a mosaic of
+// foreign tiles in every probe, the corrupt patches on reflective objects. ENVMAPRENDERING never gets
+// SVT_FEEDBACK (no early depth), so the probe reads whatever is resident, at the coarsest resident mip where
+// the main view has not asked for more - DX11's probe shader walked the page table the same way. Pixel
+// shader only: envMapVS / vxgi_temporalCS also define ENVMAPRENDERING and SampleVirtual uses derivatives.
+#if !defined(OBJECTSHADER_LAYOUT_COMMON) && !defined(OBJECTSHADER_LAYOUT_GG_SUPERQUICK) && !(defined(ENVMAPRENDERING) && defined(OBJECTSHADER_COMPILE_PS))
 #define DISABLE_SVT
-#endif // !OBJECTSHADER_LAYOUT_COMMON && !OBJECTSHADER_LAYOUT_GG_SUPERQUICK
+#endif // !OBJECTSHADER_LAYOUT_COMMON && !OBJECTSHADER_LAYOUT_GG_SUPERQUICK && !(ENVMAPRENDERING PS)
 
 #include "globals.hlsli"
 #include "brdf.hlsli"

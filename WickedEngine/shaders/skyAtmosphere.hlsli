@@ -384,8 +384,25 @@ half3 GetAtmosphereTransmittance(float3 worldPosition, float3 worldDirection, At
 half3 GetAtmosphericLightTransmittance(AtmosphereParameters atmosphere, float3 worldPosition, half3 worldDirection, Texture2D<half4> transmittanceLutTexture)
 {
 	const float3 planetCenterWorld = atmosphere.planetCenter * SKY_UNIT_TO_M;
-	const float3 planetCenterToWorldPos = (worldPosition - planetCenterWorld) * M_TO_SKY_UNIT;
-        
+	float3 planetCenterToWorldPos = (worldPosition - planetCenterWorld) * M_TO_SKY_UNIT;
+
+	// GGMAX 3.130: a surface BELOW the virtual planet's ground takes the transmittance at the ground, as
+	// GetSkyWorldCameraOrigin already snaps the camera (same 10 m offset). GetAtmosphereTransmittance returns 0
+	// for any point inside the planet, and this engine reads GG's world units as METRES (M_TO_SKY_UNIT 0.001)
+	// where DX11's Wicked read them as INCHES (0.0000254): the planet ground (planetCenter 0.1 km below the
+	// origin) sits at world y = -100 here, -3937 in DX11. So with Simulated Sky every surface below y = -100 -
+	// Island Showdown's whole seabed (water at -102) - lost the sun and, with it, the ocean caustics
+	// (light_directional scales them by the light colour), on screen and in env probe captures. DX11 lit them.
+	// Points more than 10 m above the ground are untouched; the units are left alone (aerial perspective, fog and
+	// clouds are tuned to them).
+	const float minRadius = atmosphere.bottomRadius + 0.01;
+	const float radius = length(planetCenterToWorldPos);
+	[flatten]
+	if (radius < minRadius)
+	{
+		planetCenterToWorldPos *= minRadius / max(radius, 0.000001);
+	}
+
 	half3 atmosphereTransmittance = GetAtmosphereTransmittance(planetCenterToWorldPos, worldDirection, atmosphere, transmittanceLutTexture);
 	return atmosphereTransmittance;
 }

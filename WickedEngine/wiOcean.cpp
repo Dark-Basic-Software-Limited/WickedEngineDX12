@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <mutex>
+#include <random>
 
 using namespace wi::graphics;
 using namespace wi::scene;
@@ -74,11 +75,20 @@ namespace wi
 #define HALF_SQRT_2	0.7071068f
 #define GRAV_ACCEL	981.0f	// The acceleration of gravity, cm/s^2
 
+	// GG: the wave pattern from its own generator, seeded the same at each initHeightMap, so the same parameters always make
+	// the same sea. With rand() every rebuild (GameGuru's full visuals refresh did one) made a new pattern, and took over a
+	// million numbers from the game's rand() sequence (four for each of the 513 x 513 points of the default map)
+	static std::mt19937 g_OceanRandom;
+	static float OceanRandom01()
+	{
+		return (g_OceanRandom() >> 8) * (1.0f / 16777216.0f);
+	}
+
 	// Generating gaussian random number with mean 0 and standard deviation 1.
 	float Gauss()
 	{
-		float u1 = rand() / (float)RAND_MAX;
-		float u2 = rand() / (float)RAND_MAX;
+		float u1 = OceanRandom01();
+		float u2 = OceanRandom01();
 		if (u1 < 1e-6f)
 			u1 = 1e-6f;
 		return std::sqrt(-2 * logf(u1)) * cosf(2 * XM_PI * u2);
@@ -257,6 +267,7 @@ namespace wi
 	{
 		int i, j;
 		XMFLOAT2 K;
+		g_OceanRandom.seed(5489u); // GG: the same pattern each time (Gauss)
 
 		XMFLOAT2 wind_dir;
 		XMStoreFloat2(&wind_dir, XMVector2Normalize(XMLoadFloat2(&params.wind_dir)));

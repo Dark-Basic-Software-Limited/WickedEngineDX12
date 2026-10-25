@@ -97,6 +97,26 @@ namespace wi::renderer
 	// and the relative depth range that counts as an edge. setup.ini `msaodownsample`, harness SET_MSAODOWNSAMPLE.
 	extern uint32_t gg_msao_downsample_mode;
 	extern float gg_msao_downsample_edge;
+	// GGMAX 3.129: forward light mask of env probe captures / voxelize (ForwardEntityCullingCPU). true (default) =
+	// bit n names slot n of frameCB.lights, the type-sorted array the shader loads; false = stock (bit n =
+	// position n in vis.visibleLights, which lights captures with the wrong lights). Harness SET_FWDLIGHTMASK, live.
+	extern bool gg_forward_lightmask_slots;
+	// GGMAX 3.129: harness DUMP_FWDLIGHTMASK audit. While on, every masked batch checks each set bit against the
+	// slot table UpdatePerFrameData recorded this frame (0 by construction for the slots path; it measures the
+	// stock mask). [0] = RENDERPASS_ENVMAPCAPTURE, [1] = RENDERPASS_VOXELIZE.
+	extern bool gg_forward_lightmask_audit;
+	struct GG_ForwardLightMaskAudit
+	{
+		uint64_t batches = 0;   // masks built
+		uint64_t bits = 0;      // bits set
+		uint64_t wrong = 0;     // set bits whose slot holds a light that does not touch the batch, or no light
+		uint64_t missed = 0;    // lights in slots 0..63 that touch the batch but have no bit
+		uint64_t overcap = 0;   // lights in slots 64+ that touch the batch (a 64-bit mask cannot name them)
+	};
+	void GG_GetForwardLightMaskAudit(GG_ForwardLightMaskAudit out[2], bool reset);
+	// Scene light index stored in each frameCB.lights slot of the latest UpdatePerFrameData (first maxCount slots);
+	// returns the frame's light slot count.
+	uint32_t GG_GetForwardLightSlots(uint32_t* outLightIndices, uint32_t maxCount);
 	// GGMAX 2.14: first-person weapon shadow-position pull (DX11 SHADERTYPE_WEAPON parity).
 	// setup.ini `weaponshadow=0`, harness `SET_WEAPONSHADOW 0|1` (fully live).
 	extern bool gg_weapon_shadow;

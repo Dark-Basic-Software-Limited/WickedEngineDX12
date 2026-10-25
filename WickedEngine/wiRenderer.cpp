@@ -327,6 +327,36 @@ float gg_msao_reference_far = 10000.0f;
 // GGMAX 3.126b: see MSAO_PREPARE (ShaderInterop_Postprocess.h)
 uint32_t gg_msao_downsample_mode = 1;
 float gg_msao_downsample_edge = 0.1f;
+// GGMAX 3.129: the forward light mask (env probe captures, voxelize) must name slots of frameCB.lights. That array
+// is written in TYPE GROUPS (directional, spot, point, rect; inactive lights skipped) while vis.visibleLights is in
+// scene order - and its order is not even stable past 63 lights (per-group stream compaction appends groups in
+// completion order). Stock ForwardEntityCullingCPU set bit i for visibleLights[i] and the shader loaded slot i, so
+// a capture lit each object with whatever light happened to sit at that slot. UpdatePerFrameData records the scene
+// light written to each of the first 64 slots; the mask is built from that table.
+bool gg_forward_lightmask_slots = true;
+bool gg_forward_lightmask_audit = false;
+static constexpr uint32_t GG_FWD_LIGHT_SLOTS = 64; // = xForwardLightMask's two 32-bit buckets
+static uint32_t gg_fwd_slot_light[GG_FWD_LIGHT_SLOTS] = {};
+static uint32_t gg_fwd_slot_count = 0;     // slots written this frame (may exceed 64)
+static const wi::scene::Scene* gg_fwd_slot_scene = nullptr; // the scene those light indices belong to
+static std::atomic<uint64_t> gg_fwd_audit[2][5] = {};
+void GG_GetForwardLightMaskAudit(GG_ForwardLightMaskAudit out[2], bool reset)
+{
+	for (int p = 0; p < 2; ++p)
+	{
+		uint64_t v[5];
+		for (int k = 0; k < 5; ++k)
+			v[k] = reset ? gg_fwd_audit[p][k].exchange(0) : gg_fwd_audit[p][k].load();
+		out[p].batches = v[0]; out[p].bits = v[1]; out[p].wrong = v[2]; out[p].missed = v[3]; out[p].overcap = v[4];
+	}
+}
+uint32_t GG_GetForwardLightSlots(uint32_t* outLightIndices, uint32_t maxCount)
+{
+	const uint32_t n = std::min(std::min(gg_fwd_slot_count, GG_FWD_LIGHT_SLOTS), maxCount);
+	for (uint32_t i = 0; i < n; ++i)
+		outLightIndices[i] = gg_fwd_slot_light[i];
+	return gg_fwd_slot_count;
+}
 std::atomic<size_t> SHADER_ERRORS{ 0 };
 std::atomic<size_t> SHADER_MISSING{ 0 };
 bool VXGI_ENABLED = false;
@@ -3824,6 +3854,26 @@ ForwardEntityMaskCB ForwardEntityCullingCPU(const Visibility& vis, const AABB& b
 	cb.xForwardEnvProbeMask = 0;
 
 	uint32_t buckets[2] = { 0,0 };
+	// GGMAX 3.129: the shader (shadingHF ForwardLighting) loads lights().first_item() + bit, a slot of the type-sorted
+	// frameCB.lights - so walk those slots (UpdatePerFrameData recorded which scene light each holds), not
+	// visibleLights. Directional lights come first, so the 64-light cap now drops the farthest-down point/rect lights
+	// of the frame, never the sun. The table describes the frame CB every capture binds, whichever vis is passed;
+	// its light indices are only meaningful in the scene they were recorded from (otherwise no lights).
+	const uint32_t gg_slot_n = vis.scene == gg_fwd_slot_scene ? std::min(gg_fwd_slot_count, GG_FWD_LIGHT_SLOTS) : 0u;
+	const uint32_t gg_light_n = (uint32_t)std::min(vis.scene->aabb_lights.size(), vis.scene->lights.GetCount());
+	if (gg_forward_lightmask_slots)
+	{
+		for (uint32_t slot = 0; slot < gg_slot_n; ++slot)
+		{
+			const uint32_t lightIndex = gg_fwd_slot_light[slot];
+			if (lightIndex < gg_light_n && vis.scene->aabb_lights[lightIndex].intersects(batch_aabb))
+			{
+				buckets[slot / 32] |= 1u << (slot % 32);
+			}
+		}
+	}
+	else
+	{
 	for (size_t i = 0; i < std::min(size_t(64), vis.visibleLights.size()); ++i) // only support indexing 64 lights at max for now
 	{
 		const uint32_t lightIndex = vis.visibleLights[i];
@@ -3835,8 +3885,51 @@ ForwardEntityMaskCB ForwardEntityCullingCPU(const Visibility& vis, const AABB& b
 			buckets[bucket_index] |= 1 << bucket_place;
 		}
 	}
+	}
 	cb.xForwardLightMask.x = buckets[0];
 	cb.xForwardLightMask.y = buckets[1];
+
+	// GGMAX 3.129: audit of the mask against the slot table, whichever path built it: a set bit is right only if its
+	// slot holds a light that touches the batch. For the slots path this is 0 by construction - it measures how far
+	// the STOCK mask is off. Whether the table matches the uploaded entity array is a separate check
+	// (harness DUMP_FWDLIGHTMASK TABLECHECK reads RenderPath3D::frameCB.entityArray).
+	const int gg_audit_pass = renderPass == RENDERPASS_ENVMAPCAPTURE ? 0 : (renderPass == RENDERPASS_VOXELIZE ? 1 : -1);
+	if (gg_forward_lightmask_audit && gg_audit_pass >= 0)
+	{
+		uint64_t bits = 0, wrong = 0, missed = 0, overcap = 0;
+		for (uint32_t slot = 0; slot < GG_FWD_LIGHT_SLOTS; ++slot)
+		{
+			const bool set = (buckets[slot / 32] >> (slot % 32)) & 1u;
+			const uint32_t lightIndex = slot < gg_slot_n ? gg_fwd_slot_light[slot] : ~0u;
+			const bool touches = lightIndex < gg_light_n && vis.scene->aabb_lights[lightIndex].intersects(batch_aabb);
+			bits += set ? 1 : 0;
+			wrong += (set && !touches) ? 1 : 0;
+			missed += (!set && touches) ? 1 : 0;
+		}
+		// slots 64+ are not in the table: count visible lights that touch the batch beyond the first 64 slots
+		// (also counts lights dropped at SHADER_ENTITY_COUNT, which never reach the GPU either)
+		if (gg_fwd_slot_count > GG_FWD_LIGHT_SLOTS)
+		{
+			uint32_t touching_all = 0, touching_table = 0;
+			for (uint32_t lightIndex : vis.visibleLights)
+			{
+				if (lightIndex < gg_light_n && vis.scene->aabb_lights[lightIndex].intersects(batch_aabb))
+					touching_all++;
+			}
+			for (uint32_t slot = 0; slot < gg_slot_n; ++slot)
+			{
+				const uint32_t lightIndex = gg_fwd_slot_light[slot];
+				if (lightIndex < gg_light_n && vis.scene->aabb_lights[lightIndex].intersects(batch_aabb))
+					touching_table++;
+			}
+			overcap = touching_all > touching_table ? touching_all - touching_table : 0;
+		}
+		gg_fwd_audit[gg_audit_pass][0].fetch_add(1);
+		gg_fwd_audit[gg_audit_pass][1].fetch_add(bits);
+		gg_fwd_audit[gg_audit_pass][2].fetch_add(wrong);
+		gg_fwd_audit[gg_audit_pass][3].fetch_add(missed);
+		gg_fwd_audit[gg_audit_pass][4].fetch_add(overcap);
+	}
 
 	for (size_t i = 0; i < std::min(size_t(32), vis.visibleDecals.size()); ++i)
 	{
@@ -6135,6 +6228,13 @@ void UpdatePerFrameData(
 		// Write directional lights into entity array:
 		lightarray_offset = entityCounter;
 		lightarray_offset_directional = entityCounter;
+		// GGMAX 3.129: the scene light written to each of the first 64 slots of frameCB.lights (called just before
+		// each memcpy below, so a slot re-written at SHADER_ENTITY_COUNT keeps its last writer, as the GPU will)
+		auto gg_record_light_slot = [&](uint32_t lightIndex) {
+			const uint32_t slot = entityCounter - lightarray_offset;
+			if (slot < GG_FWD_LIGHT_SLOTS)
+				gg_fwd_slot_light[slot] = lightIndex;
+		};
 		for (uint32_t lightIndex : vis.visibleLights)
 		{
 			if (entityCounter == SHADER_ENTITY_COUNT)
@@ -6296,6 +6396,7 @@ void UpdatePerFrameData(
 				shaderentity.SetFlags(ENTITY_FLAG_LIGHT_VOLUMETRICCLOUDS);
 			}
 
+			gg_record_light_slot(lightIndex);
 			std::memcpy(entityArray + entityCounter, &shaderentity, sizeof(ShaderEntity));
 			entityCounter++;
 			lightarray_count_directional++;
@@ -6382,6 +6483,7 @@ void UpdatePerFrameData(
 				shaderentity.SetFlags(ENTITY_FLAG_LIGHT_VOLUMETRICCLOUDS);
 			}
 
+			gg_record_light_slot(lightIndex);
 			std::memcpy(entityArray + entityCounter, &shaderentity, sizeof(ShaderEntity));
 			entityCounter++;
 			lightarray_count_spot++;
@@ -6459,6 +6561,7 @@ void UpdatePerFrameData(
 				shaderentity.SetFlags(ENTITY_FLAG_LIGHT_VOLUMETRICCLOUDS);
 			}
 
+			gg_record_light_slot(lightIndex);
 			std::memcpy(entityArray + entityCounter, &shaderentity, sizeof(ShaderEntity));
 			entityCounter++;
 			lightarray_count_point++;
@@ -6532,10 +6635,13 @@ void UpdatePerFrameData(
 				shaderentity.SetFlags(ENTITY_FLAG_LIGHT_VOLUMETRICCLOUDS);
 			}
 
+			gg_record_light_slot(lightIndex);
 			std::memcpy(entityArray + entityCounter, &shaderentity, sizeof(ShaderEntity));
 			entityCounter++;
 			lightarray_count_rect++;
 		}
+		gg_fwd_slot_count = entityCounter - lightarray_offset;
+		gg_fwd_slot_scene = vis.scene;
 
 		lightarray_count = lightarray_count_directional + lightarray_count_spot + lightarray_count_point + lightarray_count_rect;
 		frameCB.entity_culling_count = lightarray_count + decalarray_count + envprobearray_count;

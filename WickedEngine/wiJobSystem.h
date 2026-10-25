@@ -17,6 +17,11 @@ namespace wi::jobsystem
 	void Initialize(uint32_t maxThreadCount = ~0u);
 	void ShutDown();
 
+	// GG: how the workers are tied to cores, set before Initialize: 1 each worker's core as a preference only
+	// (SetThreadIdealProcessor, the default), 0 each pinned to its own core (Wicked's way), 2 not tied. A pinned worker cannot
+	// move when its core is slow to run it (an efficiency or low power core on a hybrid CPU), and a job it holds waits with it
+	void SetAffinityMode(int mode);
+
 	// Returns true if the job system is shutting down
 	//	Long-running (multi-frame) jobs should ideally check this and exit themselves if true
 	bool IsShuttingDown();

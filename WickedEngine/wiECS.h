@@ -182,8 +182,19 @@ namespace wi::ecs
 		//	The other component manager is not retained after this operation!
 		inline void Merge(ComponentManager<Component>& other)
 		{
-			components.reserve(GetCount() + other.GetCount());
-			entities.reserve(GetCount() + other.GetCount());
+			// GG: grown by half again at least: reserving exactly the new count made every merge into a full list move
+			// the whole list (each particle effect load merges into the scene's lists)
+			const size_t needed = GetCount() + other.GetCount();
+			if (needed > components.capacity())
+			{
+				const size_t grown = components.capacity() + components.capacity() / 2;
+				components.reserve(needed > grown ? needed : grown);
+			}
+			if (needed > entities.capacity())
+			{
+				const size_t grown = entities.capacity() + entities.capacity() / 2;
+				entities.reserve(needed > grown ? needed : grown);
+			}
 
 			for (size_t i = 0; i < other.GetCount(); ++i)
 			{

@@ -225,6 +225,13 @@ namespace wi::jobsystem
 		}
 	} static internal_state;
 
+	// GG: how the workers are tied to cores (SetAffinityMode, before Initialize)
+	static int affinityMode = 1;
+	void SetAffinityMode(int mode)
+	{
+		affinityMode = mode;
+	}
+
 	void Initialize(uint32_t maxThreadCount)
 	{
 		if (internal_state.numCores > 0)
@@ -327,10 +334,18 @@ namespace wi::jobsystem
 #ifdef _WIN32
 				// Do Windows-specific thread setup:
 
-				// Put each thread on to dedicated core:
-				DWORD_PTR affinityMask = 1ull << core;
-				DWORD_PTR affinity_result = SetThreadAffinityMask(handle, affinityMask);
-				assert(affinity_result > 0);
+				if (affinityMode == 1)
+				{
+					// GG: the core as a preference, so the scheduler can move the worker
+					SetThreadIdealProcessor(handle, core);
+				}
+				else if (affinityMode == 0)
+				{
+					// Put each thread on to dedicated core:
+					DWORD_PTR affinityMask = 1ull << core;
+					DWORD_PTR affinity_result = SetThreadAffinityMask(handle, affinityMask);
+					assert(affinity_result > 0);
+				}
 
 				if (priority == Priority::High)
 				{
@@ -406,7 +421,7 @@ namespace wi::jobsystem
 			}
 		}
 
-		wilog("wi::jobsystem Initialized with %d cores in %.2f ms\n\tHigh priority threads: %d\n\tLow priority threads: %d\n\tStreaming threads: %d", internal_state.numCores, timer.elapsed(), GetThreadCount(Priority::High), GetThreadCount(Priority::Low), GetThreadCount(Priority::Streaming));
+		wilog("wi::jobsystem Initialized with %d cores in %.2f ms\n\tHigh priority threads: %d\n\tLow priority threads: %d\n\tStreaming threads: %d\n\tAffinity mode: %d", internal_state.numCores, timer.elapsed(), GetThreadCount(Priority::High), GetThreadCount(Priority::Low), GetThreadCount(Priority::Streaming), affinityMode);
 	}
 
 	void ShutDown()

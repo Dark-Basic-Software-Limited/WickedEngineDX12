@@ -31,6 +31,7 @@ DEFINE_GUID(D3D12_VIDEO_DECODE_PROFILE_H264, 0x1b81be68, 0xa0c7, 0x11d3, 0xb9, 0
 #include <sstream>
 #include <fstream> // GGMAX 1.51: dred_report.txt post-mortem
 #include <ctime>   // GGMAX 1.51: report timestamp
+#include <psapi.h> // GGMAX 3.141: GetProcessMemoryInfo for the device-removal report
 #include <algorithm>
 #include <intrin.h> // _BitScanReverse64
 
@@ -497,6 +498,173 @@ namespace wi::graphics
 	// armed). On device removal the full DRED report (last in-flight op per command list, page
 	// fault VA + owning live/freed resources) is appended to exe-dir dred_report.txt.
 	bool gg_dred_armed = false;
+
+	// ★★ GGMAX 3.141: DEVICE-REMOVAL CONTEXT. A tester's log ended in
+	//     [Error] D3D12: device removed, cause: DXGI_ERROR_DEVICE_HUNG
+	// and nothing else: no GPU, no driver, no time, nothing about what the app was doing, and no way
+	// to tell "DRED was off" from "DRED had nothing" (it was off - tools/prealpha_clean.sh deletes
+	// dred.txt). OnDeviceRemoved now writes one context block to log.txt and dred_report.txt, and the
+	// dialog tells the tester what to do next.
+	//
+	// ⚠ Everything the report reads lives HERE, as atomics written on the main thread during normal
+	// frames or values fixed at init: OnDeviceRemoved can run on a THREADPOOL thread with the device
+	// already gone, so the report makes no D3D calls, takes no locks and uses no RTTI (3.35g), and it
+	// does NOT touch D3D12MA's GetBudget, which recurses without bound when its DXGI query fails.
+	std::atomic<uint64_t> gg_rm_last_submit_ms{ 0 };   // GetTickCount64 at the main thread's last SubmitCommandLists
+	std::atomic<uint64_t> gg_rm_vram_sample_ms{ 0 };   // when the four VRAM figures were taken (0 = never)
+	std::atomic<uint64_t> gg_rm_vram_local_usage{ 0 };
+	std::atomic<uint64_t> gg_rm_vram_local_budget{ 0 };
+	std::atomic<uint64_t> gg_rm_vram_shared_usage{ 0 };
+	std::atomic<uint64_t> gg_rm_vram_shared_budget{ 0 };
+	std::atomic<int> gg_rm_uploads_in_flight{ 0 };      // CopyAllocator submits still waiting on the GPU (level-load uploads)
+	// Set by each caller of OnDeviceRemoved on ITS OWN thread just before the call, and read by
+	// OnDeviceRemoved on that same thread. thread_local, so a second detector on another thread (the
+	// main thread's Present failing while the pool thread is still reporting) cannot relabel the report.
+	static thread_local const char* gg_rm_detected_by = nullptr;
+	static bool gg_rm_dred_by_debug_layer = false;       // DRED forced on by -debugdevice, not dred.txt
+	static bool gg_rm_dred_file_at_launch = false;       // dred.txt was there when arming was attempted
+	std::atomic<uint64_t> gg_removal_at_ms{ 0 };         // GetTickCount64 when OnDeviceRemoved began
+	std::atomic<bool> gg_removal_report_ready{ false };  // report written - the main thread's dialog waits for this
+	// Set by the GAME at init. wiApplication calls it on the MAIN thread after the report is ready and
+	// just before the dialog, so the game can append what only it knows (mode, level, settings).
+	void (*gg_removal_game_context_hook)() = nullptr;
+	static ID3D12Device5* gg_rm_test_device = nullptr;   // non-owning; set and cleared by the device ctor/dtor
+	static Microsoft::WRL::ComPtr<IDXGIAdapter3> gg_rm_adapter3; // for the once-a-second VRAM sample
+
+	// What the MAIN thread was waiting on when the device went (nullptr = no GPU wait). A level load
+	// submits no frames for seconds, so "last frame submitted" alone cannot say whether the main thread
+	// was blocked on the GPU or busy on the CPU. A wait that ENDS because of the removal stays recorded
+	// (its fence jumps to UINT64_MAX at the same moment the report reads this).
+	std::atomic<const char*> gg_rm_main_wait{ nullptr };
+	std::atomic<uint64_t> gg_rm_main_wait_since_ms{ 0 };
+	static void gg_MainWaitBegin(const char* what)
+	{
+		if (GetCurrentThreadId() != wi::platform::main_thread_id())
+			return;
+		gg_rm_main_wait_since_ms.store(GetTickCount64(), std::memory_order_relaxed);
+		gg_rm_main_wait.store(what, std::memory_order_release);
+	}
+	static void gg_MainWaitEnd(bool ended_by_removal)
+	{
+		if (ended_by_removal || GetCurrentThreadId() != wi::platform::main_thread_id())
+			return;
+		gg_rm_main_wait.store(nullptr, std::memory_order_release);
+	}
+	// How the last WaitForGPU ended: 0 never ran, 1 completed (every queue drained - the GPU was
+	// healthy), 2 ended BY the removal (it was waiting on a GPU that hung or faulted), 3 the device was
+	// already removed. The game reads it straight after its own drain (terrain material swap).
+	std::atomic<int> gg_rm_last_drain_outcome{ 0 };
+	std::atomic<uint64_t> gg_rm_last_drain_end_ms{ 0 };
+	// GPU progress while healthy: the last frame the graphics queue COMPLETED vs the last one the CPU
+	// SUBMITTED, and when that was read. Sampled at the end of every frame (where one frame behind is the
+	// normal state: the CPU has just waited for the PREVIOUS slot), after every WaitForGPU that completes,
+	// and at each app phase - so during a load with no frames it still says whether the GPU had finished
+	// everything it was given. A GPU that hangs stops the readings: their age then shows when it stopped.
+	std::atomic<uint64_t> gg_rm_gpu_completed_frame{ 0 };
+	std::atomic<uint64_t> gg_rm_cpu_submitted_frame{ 0 };
+	std::atomic<uint64_t> gg_rm_gpu_progress_ms{ 0 };
+	static ID3D12Fence* gg_rm_gfx_frame_fence[2] = {}; // non-owning: frame_fence_gpu[b][QUEUE_GRAPHICS]
+
+	// VRAM usage/budget, at most once a second: from SubmitCommandLists, and from gg_NoteAppPhase so a
+	// level load (no frames for seconds) still leaves a recent sample. Never after a removal - a TDR
+	// purges video memory, and the reading would not show the state that led up to it anyway.
+	static std::atomic<uint64_t> gg_rm_vram_attempt_ms{ 0 };
+	static void gg_rm_SampleVRAM(uint64_t now_ms)
+	{
+		if (!gg_rm_adapter3 || now_ms - gg_rm_vram_attempt_ms.load(std::memory_order_relaxed) < 1000)
+			return;
+		gg_rm_vram_attempt_ms.store(now_ms, std::memory_order_relaxed);
+		DXGI_QUERY_VIDEO_MEMORY_INFO local = {}, shared = {};
+		if (SUCCEEDED(gg_rm_adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &local)) &&
+			SUCCEEDED(gg_rm_adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &shared)))
+		{
+			gg_rm_vram_local_usage.store(local.CurrentUsage, std::memory_order_relaxed);
+			gg_rm_vram_local_budget.store(local.Budget, std::memory_order_relaxed);
+			gg_rm_vram_shared_usage.store(shared.CurrentUsage, std::memory_order_relaxed);
+			gg_rm_vram_shared_budget.store(shared.Budget, std::memory_order_relaxed);
+			gg_rm_vram_sample_ms.store(now_ms, std::memory_order_release);
+		}
+	}
+
+	// The GAME names what it is doing with gg_NoteAppPhase (level load begin/end, terrain material
+	// swap, Test Game enter/exit ...) and the report prints the last few with their age. STRING
+	// LITERALS only: the pointer is read from the pool thread after the fact, so it must point at
+	// static storage. Lock-free; a racing write can at worst mis-age one line.
+	static constexpr uint32_t GG_PHASE_RING = 16;
+	struct GGPhaseEntry
+	{
+		std::atomic<const char*> name{ nullptr };
+		std::atomic<uint64_t> ms{ 0 };
+		std::atomic<uint64_t> frame{ 0 };
+	};
+	static GGPhaseEntry gg_phase_ring[GG_PHASE_RING];
+	static std::atomic<uint32_t> gg_phase_next{ 0 };
+	void gg_NoteAppPhase(const char* literal)
+	{
+		GGPhaseEntry& e = gg_phase_ring[gg_phase_next.fetch_add(1, std::memory_order_relaxed) % GG_PHASE_RING];
+		e.name.store(nullptr, std::memory_order_relaxed);
+		const uint64_t now_ms = GetTickCount64();
+		e.ms.store(now_ms, std::memory_order_relaxed);
+		const GraphicsDevice* d = GetDevice();
+		e.frame.store(d != nullptr ? d->GetFrameCount() : 0, std::memory_order_relaxed);
+		e.name.store(literal, std::memory_order_release);
+		if (d != nullptr && !d->IsDeviceRemoved())
+		{
+			gg_rm_SampleVRAM(now_ms);
+			// Refresh how far the GPU has got (the submitted count only moves at a submit).
+			uint64_t done = 0;
+			bool gone = false;
+			for (ID3D12Fence* f : gg_rm_gfx_frame_fence)
+			{
+				if (f == nullptr) continue;
+				const uint64_t v = f->GetCompletedValue();
+				if (v == UINT64_MAX) gone = true;
+				else if (v > done) done = v;
+			}
+			if (!gone && done != 0)
+			{
+				gg_rm_gpu_completed_frame.store(done, std::memory_order_relaxed);
+				gg_rm_gpu_progress_ms.store(now_ms, std::memory_order_relaxed);
+			}
+		}
+	}
+
+	// The dialog's Yes/No (wiApplication.cpp): offer to create dred.txt only when tracing was off by both
+	// routes and no dred.txt exists where the arming check looks (EXE folder, then the CWD).
+	bool gg_RemovalShouldOfferDred()
+	{
+		// The SAME launch-time inputs as gg_RemovalAdvice's step 3, so the box offers Yes exactly when its text
+		// says "choose Yes below". (A dred.txt created mid-session is merely re-created by Yes - harmless:
+		// arming only checks that the file exists.)
+		return !(gg_dred_armed || gg_rm_dred_by_debug_layer || gg_rm_dred_file_at_launch);
+	}
+	// An EMPTY dred.txt beside the EXE. std::ofstream, not wi::helper::FileWrite, which refuses size 0.
+	// Logged at Error level so log.txt is rewritten with the outcome.
+	bool gg_CreateDredFlagFile()
+	{
+		std::wstring flag; // wide: a narrow ofstream fails on an install path with non-ASCII characters
+		wi::helper::StringConvert(wi::helper::GetDirectoryFromPath(wi::helper::GetExecutablePath()) + "dred.txt", flag);
+		bool ok = false;
+		{
+			std::ofstream f(flag, std::ios::out | std::ios::trunc);
+			ok = (bool)f;
+		}
+		wi::backlog::post(ok ? "GGMAX 3.141: dred.txt created next to the EXE at the user's request - DRED arms from the next launch (delete the file to turn it off)"
+			: "GGMAX 3.141: could not create dred.txt next to the EXE (folder not writable?)", wi::backlog::LogLevel::Error);
+		return ok;
+	}
+
+	// Harness TEST_DEVICE_REMOVED. ID3D12Device5::RemoveDevice puts the device into the removed state
+	// the way a real fault does - fences jump to UINT64_MAX and the threadpool handler fires - so the
+	// whole report path runs for real. The cause then reads DXGI_ERROR_DEVICE_REMOVED, not HUNG; the
+	// reporting is the same code either way.
+	bool gg_ForceDeviceRemovedForTest()
+	{
+		if (gg_rm_test_device == nullptr)
+			return false;
+		gg_rm_test_device->RemoveDevice();
+		return true;
+	}
 
 	// GGMAX 2.03: wi::platform::Exit() only posts WM_QUIT and RETURNS, so a failed device-init
 	// call used to fall through into null derefs (e.g. SetName on a queue that never got
@@ -2059,6 +2227,7 @@ namespace dx12_internal
 #ifdef PLATFORM_WINDOWS_DESKTOP
 	inline void HandleDeviceRemoved(PVOID context, BOOLEAN)
 	{
+		gg_rm_detected_by = "GPU fence event (Windows threadpool)"; // GGMAX 3.141
 		GraphicsDevice_DX12* removedDevice = (GraphicsDevice_DX12*)context;
 		removedDevice->OnDeviceRemoved();
 	}
@@ -2191,6 +2360,7 @@ std::mutex queue_locker;
 			std::scoped_lock lock(queue_locker); // queue operations are not thread-safe on XBOX
 #endif // PLATFORM_XBOX
 
+			gg_rm_uploads_in_flight.fetch_add(1, std::memory_order_relaxed); // GGMAX 3.141: shown in a removal report
 			queue->ExecuteCommandLists(1, commandlists);
 			dx12_check(queue->Signal(cmd.fence.Get(), 1));
 		}
@@ -2199,7 +2369,15 @@ std::mutex queue_locker;
 			// GGMAX 2.61: null event handle = BLOCK this thread until the copy queue reaches the
 			// fence. Measured because bursts of with-initdata resource creates stack these waits.
 			wi::Timer gg_t_copywait;
+			gg_MainWaitBegin("copy-queue upload wait (e.g. level-load textures)"); // GGMAX 3.141 (main thread only)
 			dx12_check(cmd.fence->SetEventOnCompletion(1, nullptr));
+			gg_MainWaitEnd(cmd.fence->GetCompletedValue() == UINT64_MAX);
+			// On a removal the fence jumps to UINT64_MAX and this wait returns at the same moment the report
+			// reads the counter - so a removed-while-waiting upload stays counted (it was on the GPU).
+			if (cmd.fence->GetCompletedValue() != UINT64_MAX)
+			{
+				gg_rm_uploads_in_flight.fetch_sub(1, std::memory_order_relaxed);
+			}
 			::gg_dbg_copywait_us.fetch_add((unsigned long long)(gg_t_copywait.elapsed_milliseconds() * 1000.0), std::memory_order_relaxed);
 			::gg_dbg_copywait_events.fetch_add(1, std::memory_order_relaxed);
 		}
@@ -2805,6 +2983,7 @@ std::mutex queue_locker;
 			const std::string dredflag = wi::helper::GetDirectoryFromPath(wi::helper::GetExecutablePath()) + "dred.txt";
 			if (wi::helper::FileExists(dredflag) || wi::helper::FileExists("dred.txt"))
 			{
+				gg_rm_dred_file_at_launch = true; // GGMAX 3.141
 				auto D3D12GetDebugInterface = (PFN_D3D12_GET_DEBUG_INTERFACE)wiGetProcAddress(dx12, "D3D12GetDebugInterface");
 				ComPtr<ID3D12DeviceRemovedExtendedDataSettings1> pDredSettings;
 				if (D3D12GetDebugInterface != nullptr && SUCCEEDED(D3D12GetDebugInterface(PPV_ARGS(pDredSettings))))
@@ -2814,6 +2993,11 @@ std::mutex queue_locker;
 					pDredSettings->SetBreadcrumbContextEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
 					gg_dred_armed = true;
 					wi::backlog::post("GGMAX 1.51: DRED armed (dred.txt found) — device-removal post-mortem will append to dred_report.txt");
+				}
+				else
+				{
+					// GGMAX 3.141: this branch used to be silent, so dred.txt could sit there doing nothing.
+					wi::backlog::post("GGMAX 3.141: dred.txt found but DRED could NOT be armed (D3D12GetDebugInterface unavailable) - a device removal will have no GPU trace", wi::backlog::LogLevel::Warning);
 				}
 			}
 		}
@@ -2847,6 +3031,7 @@ std::mutex queue_locker;
 					pDredSettings->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
 					pDredSettings->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
 					pDredSettings->SetBreadcrumbContextEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+					gg_rm_dred_by_debug_layer = true; // GGMAX 3.141: so a removal report does not say "not armed"
 				}
 			}
 
@@ -3249,6 +3434,13 @@ std::mutex queue_locker;
 				};
 			}
 		}
+		// GGMAX 3.141: non-owning copies so gg_NoteAppPhase can refresh the GPU-progress reading during a
+		// level load, when no frame is submitted for seconds. Cleared in the dtor.
+		static_assert(BUFFERCOUNT <= 2, "gg_rm_gfx_frame_fence holds two slots");
+		for (uint32_t b = 0; b < BUFFERCOUNT; ++b)
+		{
+			gg_rm_gfx_frame_fence[b] = frame_fence_gpu[b][QUEUE_GRAPHICS].Get();
+		}
 
 		copyAllocator.init(this);
 
@@ -3325,6 +3517,16 @@ std::mutex queue_locker;
 					adapterType = features.UMA() ? AdapterType::IntegratedGpu : AdapterType::DiscreteGpu;
 				}
 			}
+
+			// GGMAX 3.141: what a device-removal report needs later, captured while the device is healthy.
+			// IDXGIAdapter3 for the once-a-second VRAM sample (SubmitCommandLists); a non-owning device
+			// pointer for the harness's forced-removal test.
+			gg_rm_adapter3.Reset();
+			if (FAILED(dxgiAdapter.As(&gg_rm_adapter3)))
+			{
+				gg_rm_adapter3.Reset();
+			}
+			gg_rm_test_device = device.Get();
 		}
 
 		if (features.HighestShaderModel() < D3D_SHADER_MODEL_6_0)
@@ -3647,6 +3849,8 @@ std::mutex queue_locker;
 		}
 
 		wilog("Created GraphicsDevice_DX12 (%d ms)\nAdapter: %s", (int)std::round(timer.elapsed()), adapterName.c_str());
+		// GGMAX 3.141: the driver version was computed above and never logged anywhere.
+		wilog("GPU id %04X:%04X, %s", vendorId, deviceId, driverDescription.empty() ? "driver version unknown" : driverDescription.c_str());
 
 		// GGMAX 1.77: the shader-visible descriptor heaps are sized once, here, and never grow.
 		// 1,000,000 CBV_SRV_UAV descriptors is the tier-1 cap, not a measured requirement — record
@@ -3660,6 +3864,9 @@ std::mutex queue_locker;
 	}
 	GraphicsDevice_DX12::~GraphicsDevice_DX12()
 	{
+		gg_rm_test_device = nullptr; // GGMAX 3.141
+		gg_rm_adapter3.Reset();
+		gg_rm_gfx_frame_fence[0] = gg_rm_gfx_frame_fence[1] = nullptr;
 		WaitForGPU();
 
 #ifdef PLATFORM_WINDOWS_DESKTOP
@@ -6201,6 +6408,19 @@ std::mutex queue_locker;
 		std::scoped_lock lock(queue_locker); // queue operations are not thread-safe on XBOX
 #endif // PLATFORM_XBOX
 
+		// GGMAX 3.141: inputs for a device-removal report (see gg_rm_*). When the main thread last
+		// submitted, and VRAM usage/budget at most once a second (two DXGI queries). Sampled NOW, while
+		// the device is healthy: a TDR purges video memory, so a reading taken after a removal would not
+		// show the state that led up to it.
+		{
+			const uint64_t gg_now_ms = GetTickCount64();
+			gg_rm_last_submit_ms.store(gg_now_ms, std::memory_order_relaxed);
+			if (!deviceRemoved.load(std::memory_order_acquire))
+			{
+				gg_rm_SampleVRAM(gg_now_ms);
+			}
+		}
+
 		// GGMAX 1.48a: phase attribution of the submit tail
 		wi::Timer gg_phase_timer;
 		double gg_phase_prev = 0;
@@ -6425,6 +6645,7 @@ std::mutex queue_locker;
 						wilog_error("Device Lost on Present: %s", wi::helper::GetPlatformErrorString(((hr == DXGI_ERROR_DEVICE_REMOVED) ? device->GetDeviceRemovedReason() : hr)).c_str());
 
 						// Handle device lost
+						gg_rm_detected_by = "Present (main thread)"; // GGMAX 3.141
 						OnDeviceRemoved();
 					}
 #endif // PLATFORM_XBOX
@@ -6475,7 +6696,28 @@ std::mutex queue_locker;
 			{
 				// nullptr event handle will simply wait immediately:
 				//	https://docs.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12fence-seteventoncompletion#remarks
+				gg_MainWaitBegin("end-of-frame wait for the GPU (frame fence)"); // GGMAX 3.141
 				dx12_check(fence->SetEventOnCompletion(1, nullptr));
+				gg_MainWaitEnd(fence->GetCompletedValue() == UINT64_MAX);
+			}
+		}
+		// GGMAX 3.141: GPU progress for a removal report - the newest frame the graphics queue has
+		// completed (both buffer slots; each is signalled with its own frame's FRAMECOUNT) vs the newest
+		// submitted. UINT64_MAX means the device is already gone: keep the last healthy reading.
+		{
+			uint64_t gg_done = 0;
+			bool gg_gone = false;
+			for (uint32_t b = 0; b < BUFFERCOUNT; ++b)
+			{
+				const uint64_t v = frame_fence_gpu[b][QUEUE_GRAPHICS]->GetCompletedValue();
+				if (v == UINT64_MAX) gg_gone = true;
+				else if (v > gg_done) gg_done = v;
+			}
+			if (!gg_gone)
+			{
+				gg_rm_gpu_completed_frame.store(gg_done, std::memory_order_relaxed);
+				gg_rm_cpu_submitted_frame.store(FRAMECOUNT - 1, std::memory_order_relaxed);
+				gg_rm_gpu_progress_ms.store(GetTickCount64(), std::memory_order_relaxed);
 			}
 		}
 
@@ -6509,6 +6751,294 @@ std::mutex queue_locker;
 		}
 	}
 
+#ifdef PLATFORM_WINDOWS_DESKTOP
+	// GGMAX 3.141: what a TESTER should do after a device removal - the dialog shows it and the report
+	// ends with it. Every step is something they can do without us.
+	// for_dialog: the dialog asks Yes/No to create dred.txt itself (wiApplication.cpp) when tracing was off,
+	// so a non-programmer does not have to make an empty file (and fall into "dred.txt.txt").
+	static std::string gg_RemovalAdvice(bool hung, bool dred_armed, bool dred_file_present, bool for_dialog)
+	{
+		std::string s = hung
+			? "What happened: the graphics card stopped responding and Windows reset the graphics driver, so GameGuru MAX has to close.\n"
+			: "What happened: the graphics device was removed or reset, so GameGuru MAX has to close.\n";
+		s += "\nWhat to do:\n";
+		// 08-05: booting too soon after a TDR crashed INSIDE D3D12CreateDevice (the soak waits 25 s since;
+		// that is a chosen margin, not a measured threshold).
+		s += "1. Wait about 30 seconds before starting GameGuru MAX again, so the graphics driver can finish recovering.\n";
+		// log.txt is rewritten within a second of the next launch (engine init posts an Error), so copy first.
+		s += "2. BEFORE starting it again, copy log.txt and dred_report.txt (and Guru-Crash.log if there is one) from the folder with GameGuruMAX.exe - log.txt is replaced at the next launch. Send them with a note of what you were doing.\n";
+		if (dred_armed)
+			s += "3. Detailed GPU tracing (DRED) was on for this run; its trace is in dred_report.txt.\n";
+		else if (dred_file_present)
+			s += "3. dred.txt is present, but this PC could not turn on detailed GPU tracing (DRED) - please mention that when you report this.\n";
+		else if (for_dialog)
+			s += "3. To record more detail next time, choose Yes below and repeat the same steps. Yes creates dred.txt next to GameGuruMAX.exe, which turns on detailed GPU tracing (DRED) at every launch until you delete that file; it may cost a few percent of GPU speed.\n";
+		else
+			s += "3. To record more detail next time: create an empty file named dred.txt next to GameGuruMAX.exe (the crash dialog offers to do this), restart, and repeat the same steps. Delete dred.txt to turn it off again.\n";
+		// Driver advice comes LAST: a HUNG is often the application's own commands, and a driver update
+		// would also change the conditions we need to reproduce it.
+		s += "4. If it keeps happening: send us the files from a run with GPU tracing on first; then update your graphics driver, and set any GPU, CPU or memory overclock or undervolt back to default.\n";
+		return s;
+	}
+
+	static std::string gg_HresultName(HRESULT hr)
+	{
+		switch (hr)
+		{
+		case S_OK: return "S_OK";
+		case DXGI_ERROR_UNSUPPORTED: return "DXGI_ERROR_UNSUPPORTED (not enabled)";
+		case DXGI_ERROR_NOT_CURRENTLY_AVAILABLE: return "DXGI_ERROR_NOT_CURRENTLY_AVAILABLE";
+		case E_NOINTERFACE: return "E_NOINTERFACE (no DRED interface)";
+		default:
+		{
+			char hex[16];
+			snprintf(hex, sizeof(hex), "0x%08X", (unsigned)hr);
+			return hex;
+		}
+		}
+	}
+
+	// GGMAX 3.141: the context block for log.txt and dred_report.txt. Reads only the gg_rm_* atomics,
+	// the phase ring, values fixed at init and cheap Win32 queries (process times, memory status,
+	// RtlGetVersion, three registry values) - see the warning at gg_rm_last_submit_ms for why.
+	static std::string gg_RemovalContext(const char* reason, const char* reason_hex, bool hung, const std::string& gpu_line,
+		uint64_t framecount, bool dred_armed, bool dred_file_present, HRESULT hr_dred, HRESULT hr_breadcrumbs, HRESULT hr_pagefault,
+		const std::string& advice)
+	{
+		const uint64_t at_ms = gg_removal_at_ms.load(std::memory_order_relaxed);
+		char line[640];
+		std::string s = "==== GGMAX device-removal context ====\n";
+		auto add = [&s](const char* label, const char* value) { s += label; s += value; s += "\n"; };
+
+		// HUNG is not only a timeout: Microsoft defines it as badly formed commands, and the 08-05 HUNG
+		// here was a GPU page fault on freed terrain textures (PLAYGAME_CRASH_2026-08-05.md).
+		snprintf(line, sizeof(line), "%s (%s)%s", reason, reason_hex,
+			hung ? " - the GPU stopped responding or faulted (e.g. a timeout, or reading freed memory) and Windows reset the driver" : "");
+		add("cause:        ", line);
+
+		const char* by = gg_rm_detected_by;
+		const unsigned long this_thread = GetCurrentThreadId();
+		snprintf(line, sizeof(line), "%s | reported on thread %lu (%s)",
+			by != nullptr ? by : "not recorded (e.g. a failed descriptor-heap allocation)", this_thread,
+			this_thread == wi::platform::main_thread_id() ? "the main thread" : "not the main thread");
+		add("detected by:  ", line);
+
+		{
+			std::time_t now = std::time(nullptr);
+			std::tm tmv = {};
+			localtime_s(&tmv, &now);
+			char stamp[64] = {};
+			std::strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S", &tmv);
+			uint64_t up = 0;
+			FILETIME created, exited, kernel, user, nowft;
+			if (GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user))
+			{
+				GetSystemTimeAsFileTime(&nowft);
+				ULARGE_INTEGER a, b;
+				a.LowPart = created.dwLowDateTime; a.HighPart = created.dwHighDateTime;
+				b.LowPart = nowft.dwLowDateTime; b.HighPart = nowft.dwHighDateTime;
+				up = b.QuadPart > a.QuadPart ? (b.QuadPart - a.QuadPart) / 10000000ull : 0;
+			}
+			snprintf(line, sizeof(line), "%s local | %llu:%02llu:%02llu after launch | frame %llu", stamp,
+				(unsigned long long)(up / 3600), (unsigned long long)((up / 60) % 60), (unsigned long long)(up % 60),
+				(unsigned long long)framecount);
+			add("when:         ", line);
+		}
+
+		add("GPU:          ", gpu_line.c_str());
+
+		{
+			// Which build: log.txt has no build line, and a report from a different exe is a different bug.
+			std::wstring wexe;
+			wi::helper::StringConvert(wi::helper::GetExecutablePath(), wexe);
+			WIN32_FILE_ATTRIBUTE_DATA fad = {};
+			if (GetFileAttributesExW(wexe.c_str(), GetFileExInfoStandard, &fad))
+			{
+				SYSTEMTIME st = {};
+				FILETIME local = {};
+				FileTimeToLocalFileTime(&fad.ftLastWriteTime, &local);
+				FileTimeToSystemTime(&local, &st);
+				const unsigned long long size = ((unsigned long long)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
+				snprintf(line, sizeof(line), "GameGuruMAX.exe %llu bytes, modified %04u-%02u-%02u %02u:%02u", size,
+					st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute);
+			}
+			else
+			{
+				snprintf(line, sizeof(line), "unknown");
+			}
+			add("build:        ", line);
+		}
+
+		{
+			// RtlGetVersion: GetVersionEx reports Windows 8 to an EXE not manifested for later versions.
+			typedef LONG(WINAPI* RtlGetVersionFn)(PRTL_OSVERSIONINFOW);
+			RTL_OSVERSIONINFOW vi = {};
+			vi.dwOSVersionInfoSize = sizeof(vi);
+			HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+			RtlGetVersionFn fn = ntdll != nullptr ? (RtlGetVersionFn)GetProcAddress(ntdll, "RtlGetVersion") : nullptr;
+			if (fn != nullptr && fn(&vi) == 0)
+				snprintf(line, sizeof(line), "%lu.%lu build %lu", vi.dwMajorVersion, vi.dwMinorVersion, vi.dwBuildNumber);
+			else
+				snprintf(line, sizeof(line), "unknown");
+			add("Windows:      ", line);
+		}
+
+		{
+			const uint64_t sampled = gg_rm_vram_sample_ms.load(std::memory_order_acquire);
+			if (sampled == 0)
+			{
+				snprintf(line, sizeof(line), "no sample (no frame submitted since launch)");
+			}
+			else
+			{
+				const double MB = 1024.0 * 1024.0;
+				const double lu = gg_rm_vram_local_usage.load(std::memory_order_relaxed) / MB;
+				const double lb = gg_rm_vram_local_budget.load(std::memory_order_relaxed) / MB;
+				snprintf(line, sizeof(line), "dedicated %.0f of %.0f MB budget%s, shared %.0f of %.0f MB (last sampled %.1f s before the removal)",
+					lu, lb, (lb > 0 && lu > lb) ? " (OVER BUDGET)" : "",
+					gg_rm_vram_shared_usage.load(std::memory_order_relaxed) / MB, gg_rm_vram_shared_budget.load(std::memory_order_relaxed) / MB,
+					at_ms >= sampled ? (at_ms - sampled) / 1000.0 : 0.0);
+			}
+			add("VRAM:         ", line);
+		}
+
+		{
+			PROCESS_MEMORY_COUNTERS_EX pmc = {};
+			pmc.cb = sizeof(pmc);
+			MEMORYSTATUSEX ms = {};
+			ms.dwLength = sizeof(ms);
+			const double MB = 1024.0 * 1024.0;
+			const bool have_p = GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS*)&pmc, sizeof(pmc)) != 0;
+			const bool have_m = GlobalMemoryStatusEx(&ms) != 0;
+			snprintf(line, sizeof(line), "process %.0f MB private | system RAM %.0f MB free of %.0f MB",
+				have_p ? pmc.PrivateUsage / MB : -1.0, have_m ? ms.ullAvailPhys / MB : -1.0, have_m ? ms.ullTotalPhys / MB : -1.0);
+			add("memory:       ", line);
+		}
+
+		{
+			const uint64_t last = gg_rm_last_submit_ms.load(std::memory_order_relaxed);
+			if (last == 0)
+			{
+				snprintf(line, sizeof(line), "no frame submitted since launch");
+			}
+			else
+			{
+				const double ago = at_ms >= last ? (at_ms - last) / 1000.0 : 0.0;
+				const char* wait = gg_rm_main_wait.load(std::memory_order_acquire);
+				const uint64_t since = gg_rm_main_wait_since_ms.load(std::memory_order_relaxed);
+				char waitbuf[256];
+				if (wait != nullptr)
+					snprintf(waitbuf, sizeof(waitbuf), "; it was blocked in: %s, for %.2f s", wait, at_ms >= since ? (at_ms - since) / 1000.0 : 0.0);
+				else
+					snprintf(waitbuf, sizeof(waitbuf), "; it was NOT in a GPU wait (busy on the CPU - e.g. loading - or between frames)");
+				snprintf(line, sizeof(line), "last frame submitted %.2f s before the removal%s", ago, waitbuf);
+			}
+			add("main thread:  ", line);
+		}
+
+		{
+			const uint64_t done = gg_rm_gpu_completed_frame.load(std::memory_order_relaxed);
+			const uint64_t sent = gg_rm_cpu_submitted_frame.load(std::memory_order_relaxed);
+			const uint64_t when = gg_rm_gpu_progress_ms.load(std::memory_order_relaxed);
+			if (when == 0)
+				snprintf(line, sizeof(line), "no reading");
+			else
+				snprintf(line, sizeof(line), "the GPU had completed frame %llu of %llu submitted, read %.1f s before the removal "
+					"(one frame behind is normal at the end of a frame; readings stop when the GPU stops)",
+					(unsigned long long)done, (unsigned long long)sent, at_ms >= when ? (at_ms - when) / 1000.0 : 0.0);
+			add("GPU progress: ", line);
+		}
+
+		{
+			const int outcome = gg_rm_last_drain_outcome.load(std::memory_order_relaxed);
+			const uint64_t end = gg_rm_last_drain_end_ms.load(std::memory_order_relaxed);
+			const char* what = outcome == 1 ? "COMPLETED (every queue drained - the GPU was healthy then)"
+				: outcome == 2 ? "ended BY the removal (it was waiting on a GPU that had hung or faulted)"
+				: outcome == 3 ? "found the device already removed" : nullptr;
+			if (what == nullptr)
+				snprintf(line, sizeof(line), "none this session");
+			else
+				snprintf(line, sizeof(line), "%s, %.1f s %s the removal", what,
+					end <= at_ms ? (at_ms - end) / 1000.0 : (end - at_ms) / 1000.0, end <= at_ms ? "before" : "after");
+			add("last drain:   ", line);
+		}
+
+		{
+			const int uploads = gg_rm_uploads_in_flight.load(std::memory_order_relaxed);
+			snprintf(line, sizeof(line), "%d texture/buffer upload(s) in flight on the copy queue%s", uploads,
+				uploads > 0 ? " - an upload (e.g. level-load data) was on the GPU" : "");
+			add("uploads:      ", line);
+		}
+
+		{
+			// Read-only. Microsoft: applications should not CHANGE these keys; logging them shows whether
+			// a tester's timeout has been changed from the 2 s default.
+			std::string tdr;
+			const wchar_t* key = L"SYSTEM\\CurrentControlSet\\Control\\GraphicsDrivers";
+			const wchar_t* wnames[] = { L"TdrLevel", L"TdrDelay", L"TdrDdiDelay" };
+			const char* names[] = { "TdrLevel", "TdrDelay", "TdrDdiDelay" };
+			for (int i = 0; i < 3; ++i)
+			{
+				DWORD value = 0, size = sizeof(value);
+				if (RegGetValueW(HKEY_LOCAL_MACHINE, key, wnames[i], RRF_RT_REG_DWORD, nullptr, &value, &size) == ERROR_SUCCESS)
+				{
+					tdr += std::string(names[i]) + "=" + std::to_string(value) + " ";
+				}
+			}
+			add("TDR settings: ", tdr.empty() ? "Windows defaults (no TdrLevel/TdrDelay/TdrDdiDelay values; GPU timeout 2 s)"
+				: (tdr + "(changed from the Windows defaults)").c_str());
+		}
+
+		if (dred_armed || gg_rm_dred_by_debug_layer)
+			snprintf(line, sizeof(line), "ARMED (%s) - breadcrumbs %s, page fault %s",
+				gg_rm_dred_by_debug_layer ? "by the debug layer, -debugdevice" : "dred.txt",
+				gg_HresultName(hr_breadcrumbs).c_str(), gg_HresultName(hr_pagefault).c_str());
+		else if (dred_file_present)
+			snprintf(line, sizeof(line), "NOT ARMED although dred.txt was present at launch (the D3D12 debug interface was unavailable) - no GPU trace; DRED query %s",
+				gg_HresultName(hr_dred).c_str());
+		else
+			snprintf(line, sizeof(line), "NOT ARMED (no dred.txt next to the EXE at launch) - no GPU breadcrumb trace for this removal");
+		add("DRED:         ", line);
+
+		add("queue mode:   ", gg_single_queue ? "single queue (setup.ini singlequeue=1, the default)" : "async queues (setup.ini singlequeue=0)");
+
+		{
+			struct Phase { uint64_t ms; uint64_t frame; const char* name; };
+			Phase phases[GG_PHASE_RING];
+			int count = 0;
+			// In WRITE order, starting at the oldest slot - not sorted by time: GetTickCount64 moves in ~16 ms
+			// steps, so "drain before the swap" and "swapping" share a tick and a sort could swap them once
+			// the ring has wrapped. Before the first wrap the slots from next to the end are still empty.
+			const uint32_t start = gg_phase_next.load(std::memory_order_acquire);
+			for (uint32_t i = 0; i < GG_PHASE_RING; ++i)
+			{
+				GGPhaseEntry& e = gg_phase_ring[(start + i) % GG_PHASE_RING];
+				const char* name = e.name.load(std::memory_order_acquire);
+				if (name != nullptr)
+				{
+					phases[count++] = { e.ms.load(std::memory_order_relaxed), e.frame.load(std::memory_order_relaxed), name };
+				}
+			}
+			s += "app phases (oldest first, as the game reported them):\n";
+			if (count == 0)
+				s += "   (none recorded)\n";
+			for (int i = 0; i < count; ++i)
+			{
+				const double rel = ((double)phases[i].ms - (double)at_ms) / 1000.0;
+				snprintf(line, sizeof(line), "   %8.1f s %s  frame %-8llu %s", rel < 0 ? -rel : rel, rel <= 0 ? "before" : "after ",
+					(unsigned long long)phases[i].frame, phases[i].name);
+				s += line;
+				s += "\n";
+			}
+		}
+
+		s += "--- for the tester ---\n";
+		s += advice;
+		s += "=======================================\n";
+		return s;
+	}
+#endif // PLATFORM_WINDOWS_DESKTOP
+
 	void GraphicsDevice_DX12::OnDeviceRemoved()
 	{
 #ifdef PLATFORM_WINDOWS_DESKTOP
@@ -6519,7 +7049,10 @@ std::mutex queue_locker;
 		{
 			return;
 		}
-		deviceRemoved = true;
+		// ★ GGMAX 3.141: deviceRemoved is now published only once deviceRemovedMessage is complete
+		// (below). It used to be set right here, so the main thread could see the flag and copy the
+		// message - a plain std::string - while this thread (often a pool thread) was still writing it.
+		gg_removal_at_ms.store(GetTickCount64(), std::memory_order_relaxed);
 
 		const char* removedReasonString;
 		HRESULT removedReason = device->GetDeviceRemovedReason();
@@ -6544,11 +7077,42 @@ std::mutex queue_locker;
 		case DXGI_ERROR_ACCESS_DENIED:
 			removedReasonString = "DXGI_ERROR_ACCESS_DENIED";
 			break;
+		case S_OK:
+			// GGMAX 3.141: DescriptorAllocator::block_allocate calls this when CreateDescriptorHeap fails,
+			// which can happen WITHOUT a device removal - it used to read "Unknown DXGI error (0x00000000)".
+			removedReasonString = (gg_rm_detected_by == nullptr)
+				? "S_OK - the device was NOT removed: a descriptor heap could not be created (out of memory?)"
+				: "S_OK - the device reports it was NOT removed";
+			break;
 		default:
 			removedReasonString = "Unknown DXGI error";
 			break;
 		}
 
+		// GGMAX 3.141: the dialog text is complete BEFORE the flag goes up - the advice, the GPU and the
+		// code itself (the default case above used to throw the value away).
+		char gg_reason_hex[16] = {};
+		snprintf(gg_reason_hex, sizeof(gg_reason_hex), "0x%08X", (unsigned)removedReason);
+		// "dred.txt present but DRED could not be armed" is about LAUNCH, when arming happens - a dred.txt
+		// created mid-session (as the advice tells testers to do) must not read as "this PC cannot arm DRED".
+		const bool gg_dred_file = gg_rm_dred_file_at_launch;
+		const bool gg_hung = (removedReason == DXGI_ERROR_DEVICE_HUNG);
+		const bool gg_dred_on = gg_dred_armed || gg_rm_dred_by_debug_layer;
+		const std::string gg_advice = gg_RemovalAdvice(gg_hung, gg_dred_on, gg_dred_file, false);
+		char gg_gpu_id[32] = {};
+		snprintf(gg_gpu_id, sizeof(gg_gpu_id), " [%04X:%04X] ", vendorId, deviceId);
+		// The adapter type matters for reading VRAM: on an integrated GPU "dedicated" is the OS carve-out.
+		const char* gg_gpu_type = adapterType == AdapterType::DiscreteGpu ? " (discrete)"
+			: adapterType == AdapterType::IntegratedGpu ? " (integrated)" : adapterType == AdapterType::Cpu ? " (software)" : "";
+		const std::string gg_gpu_line = adapterName + gg_gpu_type + gg_gpu_id + (driverDescription.empty() ? std::string("driver version unknown") : driverDescription);
+
+		std::string message = "D3D12: device removed, cause: ";
+		message += removedReasonString;
+		message += " (";
+		message += gg_reason_hex;
+		message += ")";
+		deviceRemovedMessage = message + "\nGPU: " + gg_gpu_line + "\n\n" + gg_RemovalAdvice(gg_hung, gg_dred_on, gg_dred_file, true);
+		deviceRemoved.store(true, std::memory_order_release);
 
 		// Based on: https://github.com/simco50/D3D12_Research/blob/869373829444f029eb3a6ce95dd3aa541c665bb2/D3D12/Graphics/RHI/Graphics.cpp
 
@@ -6640,15 +7204,75 @@ std::mutex queue_locker;
 		};
 		static_assert(ARRAYSIZE(AllocTypesNames) == D3D12_DRED_ALLOCATION_TYPE_VIDEO_ENCODER_HEAP - D3D12_DRED_ALLOCATION_TYPE_COMMAND_QUEUE + 1, "AllocTypes array length mismatch");
 
-		std::string log;
-
+		// GGMAX 3.141: keep the HRESULTs - DXGI_ERROR_UNSUPPORTED means "not enabled", so the report can
+		// tell "DRED was off" from "DRED was on and had nothing to say". The three getters are cheap and
+		// only fill structs; the node WALK below is what access-violated on 09-16, so the context block is
+		// written and posted BEFORE it - a fault in the walk can no longer take the whole report down.
+		HRESULT gg_hr_dred = E_NOINTERFACE, gg_hr_breadcrumbs = E_NOINTERFACE, gg_hr_pagefault = E_NOINTERFACE;
 		ComPtr<ID3D12DeviceRemovedExtendedData1> pDred;
-		if (SUCCEEDED(device->QueryInterface(PPV_ARGS(pDred))))
+		D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT1 pDredAutoBreadcrumbsOutput = {};
+		D3D12_DRED_PAGE_FAULT_OUTPUT1 DredPageFaultOutput = {};
+		gg_hr_dred = device->QueryInterface(PPV_ARGS(pDred));
+		if (SUCCEEDED(gg_hr_dred))
 		{
-			D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT1 pDredAutoBreadcrumbsOutput = {};
-			if (SUCCEEDED(pDred->GetAutoBreadcrumbsOutput1(&pDredAutoBreadcrumbsOutput)))
+			gg_hr_breadcrumbs = pDred->GetAutoBreadcrumbsOutput1(&pDredAutoBreadcrumbsOutput);
+			gg_hr_pagefault = pDred->GetPageFaultAllocationOutput1(&DredPageFaultOutput);
+		}
+
+		// GGMAX 3.141: the context block - memory and cheap Win32 calls only (see gg_RemovalContext).
+		const std::string gg_ctx = gg_RemovalContext(removedReasonString, gg_reason_hex, gg_hung, gg_gpu_line, FRAMECOUNT,
+			gg_dred_armed, gg_dred_file, gg_hr_dred, gg_hr_breadcrumbs, gg_hr_pagefault, gg_advice);
+		// UTF-8 path -> wide: a narrow ofstream fails on an install path with non-ASCII characters.
+		std::wstring gg_report_path;
+		wi::helper::StringConvert(wi::helper::GetDirectoryFromPath(wi::helper::GetExecutablePath()) + "dred_report.txt", gg_report_path);
+
+		// GGMAX 1.51: persist the post-mortem next to the EXE — the backlog may never flush to
+		// disk once Exit() runs, and the message boxes outlive the process. Appends, so repeated
+		// crashes across sessions accumulate in one file.
+		// GGMAX 3.141: header + context written FIRST, before any log post or the DRED walk - it is the
+		// artefact that survives (09-16 and 3.35g both had the removal path itself fail part-way).
+		{
+			std::ofstream report(gg_report_path, std::ios::app);
+			if (report)
+			{
+				std::time_t now = std::time(nullptr);
+				std::tm tmv = {};
+				localtime_s(&tmv, &now);
+				char stamp[64] = {};
+				std::strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S", &tmv);
+				report << "==== D3D12 device removed at " << stamp << " | cause: " << removedReasonString << " (" << gg_reason_hex << ")"
+					<< " | DRED " << (gg_dred_on ? "ARMED" : "NOT ARMED - create an empty dred.txt next to the EXE and reproduce") << " ====\n"; // 3.141: ASCII - the em dash reached the file as one code-page byte
+				report << gg_ctx;
+			}
+		}
+
+		// ★★★ GGMAX 3.26 - THIS ONE RAN ON A THREADPOOL THREAD.
+		//
+		// HandleDeviceRemoved is invoked by RegisterWaitForSingleObject, so OnDeviceRemoved can run
+		// on a pool thread. wi::helper::messageBox uses MessageBox(GetActiveWindow(), ...) and
+		// GetActiveWindow is PER-THREAD - on a pool thread it returns NULL, so the box was created
+		// with NO OWNER. An un-owned top-level window from the foreground process activates itself
+		// and steals foreground WITHOUT disabling the game window, and that activation is what the
+		// main thread received, mid-frame, inside its own dialog's pump.
+		//
+		// Two threads racing to raise modal dialogs about the same event is the actual defect. Log
+		// from wherever we are; the MAIN thread owns the one dialog and the exit (wiApplication.cpp).
+		wilog_error("%s", message.c_str());
+		// GGMAX 3.141: ONE Error-level post for the whole block. An Error post is what rewrites log.txt
+		// (wiBacklog), and the process is terminated without the final flush, so anything posted below
+		// Error after this would be lost; wilog_error itself caps at 1024 bytes.
+		wi::backlog::post(gg_ctx, wi::backlog::LogLevel::Error);
+
+		std::string log;
+		if (SUCCEEDED(gg_hr_dred))
+		{
+			if (SUCCEEDED(gg_hr_breadcrumbs))
 			{
 				log += "[DRED] Last tracked GPU operations:\n";
+				if (pDredAutoBreadcrumbsOutput.pHeadAutoBreadcrumbNode == nullptr)
+				{
+					log += "(no breadcrumb nodes - DRED recorded no command lists in flight)\n"; // GGMAX 3.141
+				}
 
 				std::map<int, const wchar_t*> contextStrings;
 
@@ -6715,8 +7339,7 @@ std::mutex queue_locker;
 				}
 			}
 
-			D3D12_DRED_PAGE_FAULT_OUTPUT1 DredPageFaultOutput = {};
-			if (SUCCEEDED(pDred->GetPageFaultAllocationOutput1(&DredPageFaultOutput)) && DredPageFaultOutput.PageFaultVA != 0)
+			if (SUCCEEDED(gg_hr_pagefault) && DredPageFaultOutput.PageFaultVA != 0)
 			{
 				log += "[DRED] PageFault at VA GPUAddress " + std::to_string(DredPageFaultOutput.PageFaultVA) + "\n";
 
@@ -6758,47 +7381,21 @@ std::mutex queue_locker;
 			}
 		}
 
+		// The DRED trace, after the context block (see above), appended to the same report.
+		{
+			std::ofstream report(gg_report_path, std::ios::app);
+			if (report)
+			{
+				report << log << "\n";
+			}
+		}
 		if (!log.empty())
 		{
 			wi::backlog::post(log, wi::backlog::LogLevel::Error);
 		}
-
-		// GGMAX 1.51: persist the post-mortem next to the EXE — the backlog may never flush to
-		// disk once Exit() runs, and the message boxes outlive the process. Appends, so repeated
-		// crashes across sessions accumulate in one file.
-		{
-			const std::string report_path = wi::helper::GetDirectoryFromPath(wi::helper::GetExecutablePath()) + "dred_report.txt";
-			std::ofstream report(report_path, std::ios::app);
-			if (report)
-			{
-				std::time_t now = std::time(nullptr);
-				std::tm tmv = {};
-				localtime_s(&tmv, &now);
-				char stamp[64] = {};
-				std::strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S", &tmv);
-				report << "==== D3D12 device removed at " << stamp << " | cause: " << removedReasonString
-					<< " | DRED " << (gg_dred_armed ? "ARMED" : "NOT ARMED — create an empty dred.txt next to the EXE and reproduce") << " ====\n";
-				report << log << "\n";
-			}
-		}
-
-		std::string message = "D3D12: device removed, cause: ";
-		message += removedReasonString;
-		deviceRemovedMessage = message;
-		// ★★★ GGMAX 3.26 - THIS ONE RAN ON A THREADPOOL THREAD.
-		//
-		// HandleDeviceRemoved is invoked by RegisterWaitForSingleObject, so OnDeviceRemoved can run
-		// on a pool thread. wi::helper::messageBox uses MessageBox(GetActiveWindow(), ...) and
-		// GetActiveWindow is PER-THREAD - on a pool thread it returns NULL, so the box was created
-		// with NO OWNER. An un-owned top-level window from the foreground process activates itself
-		// and steals foreground WITHOUT disabling the game window, and that activation is what the
-		// main thread received, mid-frame, inside its own dialog's pump.
-		//
-		// Two threads racing to raise modal dialogs about the same event is the actual defect. Log
-		// from wherever we are; the MAIN thread owns the one dialog and the exit (wiApplication.cpp).
-		wilog_error("%s", message.c_str());
 		// GGMAX 3.26a: whatever the validation layer saw in the run-up, into the log.
 		gg_DrainValidationMessages("device removal");
+		gg_removal_report_ready.store(true, std::memory_order_release); // GGMAX 3.141: the dialog may show now
 #endif // PLATFORM_WINDOWS_DESKTOP
 	}
 
@@ -6820,7 +7417,11 @@ std::mutex queue_locker;
 		// identically the moment the device was gone. Fixing only the caller would have left the
 		// other eight armed.
 		if (deviceRemoved.load(std::memory_order_acquire))
+		{
+			gg_rm_last_drain_outcome.store(3, std::memory_order_relaxed); // GGMAX 3.141: already removed
+			gg_rm_last_drain_end_ms.store(GetTickCount64(), std::memory_order_relaxed);
 			return;
+		}
 
 		ComPtr<ID3D12Fence> fence;
 		const HRESULT gg_fence_hr = device->CreateFence(0, D3D12_FENCE_FLAG_NONE, PPV_ARGS(fence));
@@ -6831,9 +7432,12 @@ std::mutex queue_locker;
 			wilog_error("WaitForGPU: CreateFence failed with %s - the device is gone, so there is "
 				"nothing left to wait for. Returning instead of dereferencing a null fence.",
 				wi::helper::GetPlatformErrorString(gg_fence_hr).c_str());
+			gg_rm_last_drain_outcome.store(3, std::memory_order_relaxed); // GGMAX 3.141
+			gg_rm_last_drain_end_ms.store(GetTickCount64(), std::memory_order_relaxed);
 			return;
 		}
 
+		gg_MainWaitBegin("WaitForGPU (draining every queue)"); // GGMAX 3.141
 		for (auto& queue : queues)
 		{
 			if (queue.queue == nullptr)
@@ -6845,6 +7449,21 @@ std::mutex queue_locker;
 			}
 			fence->Signal(0);
 		}
+		// GGMAX 3.141: did the drain COMPLETE (the GPU was healthy up to here) or end because the device
+		// went while it waited? GetDeviceRemovedReason is the race-free answer: the flag above is raised
+		// by the report thread a moment after the fences jump to UINT64_MAX.
+		const bool gg_removed = (device->GetDeviceRemovedReason() != S_OK);
+		const uint64_t gg_now = GetTickCount64();
+		gg_rm_last_drain_outcome.store(gg_removed ? 2 : 1, std::memory_order_relaxed);
+		gg_rm_last_drain_end_ms.store(gg_now, std::memory_order_relaxed);
+		if (!gg_removed && FRAMECOUNT > 0)
+		{
+			// every queue drained: everything submitted so far is complete
+			gg_rm_gpu_completed_frame.store(FRAMECOUNT - 1, std::memory_order_relaxed);
+			gg_rm_cpu_submitted_frame.store(FRAMECOUNT - 1, std::memory_order_relaxed);
+			gg_rm_gpu_progress_ms.store(gg_now, std::memory_order_relaxed);
+		}
+		gg_MainWaitEnd(gg_removed);
 	}
 
 	// GGMAX 1.43: see wiGraphicsDevice.h. WaitForGPU() drains every queue, so nothing on the

@@ -7,6 +7,7 @@
 #include <cstring>
 #include <algorithm>
 #include <functional>
+#include <vector> // GGMAX 3.141: AllocateGPU's scratch fallback on a removed device
 
 namespace wi::graphics
 {
@@ -351,7 +352,21 @@ namespace wi::graphics
 			GPULinearAllocator& allocator = GetFrameAllocator(cmd);
 
 			const uint64_t free_space = allocator.buffer.desc.size - allocator.offset;
-			if (dataSize > free_space)
+			// ★ GGMAX 3.141: on a REMOVED device the growth below fails, and it used to grow IN PLACE: CreateBuffer
+			// fills desc (the new size), internal_state and a null mapped_data before it fails, so the allocator
+			// kept a "valid" buffer with nothing mapped and every caller's memcpy wrote to address ~0. Two test
+			// removals in the first frames after a level load (just after the post-load terrain swap) crashed
+			// exactly there (RenderMeshes on a worker, GPUParticles on the main thread, through
+			// BindDynamicConstantBuffer), before the dialog and the game's report block could appear. Now: once the device is gone, reuse the current mapped buffer from offset 0 (no pointless
+			// create); and a growth is kept only if the new buffer really is mapped - otherwise the old mapped
+			// buffer is reused, or the caller writes into CPU scratch. Nothing recorded after a removal ever
+			// executes on the GPU. A healthy device grows exactly as before.
+			if (dataSize > free_space && IsDeviceRemoved() && allocator.buffer.IsValid() &&
+				allocator.buffer.mapped_data != nullptr && dataSize <= allocator.buffer.desc.size)
+			{
+				allocator.offset = 0;
+			}
+			else if (dataSize > free_space)
 			{
 				GPUBufferDesc desc;
 				desc.usage = Usage::UPLOAD;
@@ -359,9 +374,29 @@ namespace wi::graphics
 				desc.misc_flags = ResourceMiscFlag::BUFFER_RAW;
 				allocator.alignment = GetMinOffsetAlignment(&desc);
 				desc.size = AlignTo((allocator.buffer.desc.size + dataSize) * 2, allocator.alignment);
-				CreateBuffer(&desc, nullptr, &allocator.buffer);
-				SetName(&allocator.buffer, "frame_allocator");
-				allocator.offset = 0;
+				GPUBuffer grown;
+				if (CreateBuffer(&desc, nullptr, &grown) && grown.mapped_data != nullptr)
+				{
+					allocator.buffer = grown;
+					SetName(&allocator.buffer, "frame_allocator");
+					allocator.offset = 0;
+				}
+				else if (allocator.buffer.IsValid() && allocator.buffer.mapped_data != nullptr && dataSize <= allocator.buffer.desc.size)
+				{
+					allocator.offset = 0; // growth failed (device removed): reuse the mapped buffer
+				}
+				else
+				{
+					// Nothing mapped is big enough: the caller's writes land in CPU scratch. The allocator is left
+					// as it was, so a later request that fits still uses the real mapped buffer.
+					thread_local std::vector<uint8_t> gg_scratch;
+					if (gg_scratch.size() < dataSize)
+						gg_scratch.resize((size_t)dataSize);
+					allocation.buffer = allocator.buffer.IsValid() ? allocator.buffer : grown;
+					allocation.offset = 0;
+					allocation.data = gg_scratch.data();
+					return allocation;
+				}
 			}
 
 			allocation.buffer = allocator.buffer;

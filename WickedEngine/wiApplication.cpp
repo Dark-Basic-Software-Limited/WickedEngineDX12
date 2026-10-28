@@ -29,6 +29,8 @@
 #include <new>
 #include <cstdlib>
 #include <atomic>
+#include <thread>  // GGMAX 3.141: exit watchdog after the device-lost dialog
+#include <chrono>
 
 //#define WICKED_ENGINE_HEAP_ALLOCATION_COUNTER
 
@@ -38,6 +40,19 @@ static std::atomic<size_t> size_of_heap_allocations{ 0 };
 #endif // WICKED_ENGINE_HEAP_ALLOCATION_COUNTER
 
 using namespace wi::graphics;
+
+#ifdef PLATFORM_WINDOWS_DESKTOP
+// GGMAX 3.141: set by the DX12 device-removal report (wiGraphicsDevice_DX12.cpp).
+namespace wi::graphics
+{
+	extern std::atomic<bool> gg_removal_report_ready;
+	extern std::atomic<uint64_t> gg_removal_at_ms;
+	extern void (*gg_removal_game_context_hook)();
+	bool gg_RemovalShouldOfferDred();
+	bool gg_CreateDredFlagFile();
+}
+namespace wi::backlog { void FreezeLogfile(); } // GGMAX 3.141 (wiBacklog.cpp)
+#endif // PLATFORM_WINDOWS_DESKTOP
 
 namespace wi
 {
@@ -107,14 +122,64 @@ namespace wi
 			// user got nothing, not even the message naming the log files. ClaimDeviceRemovedReport
 			// is virtual on the base now, so this is plain dispatch through a pointer we have
 			// already successfully called a virtual on one line above.
+#ifdef PLATFORM_WINDOWS_DESKTOP
+			// GGMAX 3.141: let the removal report finish first - it often runs on a threadpool thread,
+			// writes the files the dialog points at, and the game appends its own context once it is
+			// done (gg_removal_game_context_hook, just before the box). Capped at 5 s so a reporter that
+			// dies part-way still leaves the user a dialog.
+			if (!wi::graphics::gg_removal_report_ready.load(std::memory_order_acquire) &&
+				GetTickCount64() - wi::graphics::gg_removal_at_ms.load(std::memory_order_relaxed) < 5000)
+			{
+				return;
+			}
+#endif // PLATFORM_WINDOWS_DESKTOP
 			if (graphicsDevice->ClaimDeviceRemovedReport())
 			{
-				wi::helper::messageBox(graphicsDevice->GetDeviceRemovedMessage()
-					// GGMAX 3.35i: both files sit beside the EXE now, so the advice is finally true.
-					+ "\n\nThe graphics device was lost and GameGuru MAX has to close. See log.txt"
-					  " and dred_report.txt, next to the GameGuruMAX executable, for the post-mortem.",
-					"Graphics device lost");
+				// GGMAX 3.141: the message now carries the cause code, the GPU and driver, and what the
+				// tester should do (wiGraphicsDevice_DX12.cpp gg_RemovalAdvice); 3.35i's fixed tail
+				// ("see log.txt and dred_report.txt") is step 2 of that.
+#ifdef PLATFORM_WINDOWS_DESKTOP
+				// The game adds what only it knows (mode, level, settings) - here, on the MAIN thread,
+				// after the engine report and before the box, so it cannot race either.
+				if (wi::graphics::gg_removal_game_context_hook != nullptr)
+				{
+					wi::graphics::gg_removal_game_context_hook();
+				}
+				// Tracing was off: let the tester turn it on with one click instead of making a file.
+				if (wi::graphics::gg_RemovalShouldOfferDred())
+				{
+					if (wi::helper::messageBoxCustom(graphicsDevice->GetDeviceRemovedMessage()
+						+ "\nTurn on detailed GPU tracing (DRED) for the next launches?", "Graphics device lost", "YesNo")
+						== wi::helper::MessageBoxResult::Yes)
+					{
+						if (!wi::graphics::gg_CreateDredFlagFile())
+						{
+							wi::helper::messageBox("dred.txt could not be created next to GameGuruMAX.exe - the folder may not be writable. "
+								"You can create an empty file with that name yourself.", "Graphics device lost");
+						}
+					}
+				}
+				else
+#endif // PLATFORM_WINDOWS_DESKTOP
+				wi::helper::messageBox(graphicsDevice->GetDeviceRemovedMessage(), "Graphics device lost");
+#ifdef PLATFORM_WINDOWS_DESKTOP
+				// GGMAX 3.141: log.txt now holds the engine report, the DRED trace, the game block and the
+				// dialog's outcome. Freeze it, so the failures of whatever still runs into the dead device
+				// cannot push the report out of its 500 entries.
+				wi::backlog::FreezeLogfile();
+#endif // PLATFORM_WINDOWS_DESKTOP
 				wi::platform::Exit();
+#ifdef PLATFORM_WINDOWS_DESKTOP
+				// GGMAX 3.141: Exit() only posts WM_QUIT, and a message pump nested inside a level load can eat it
+				// (EmptyMessages drops it on purpose, the DBP core pump and titleslua's blocking loop lose it;
+				// StartForceRender now re-posts it), and the app would then keep running into a dead device after
+				// OK (from reading the code; not reproduced). The report is on disk and the user has been told the
+				// app must close, so if the normal exit has not happened 10 s from now, end the process.
+				std::thread([] {
+					std::this_thread::sleep_for(std::chrono::seconds(10));
+					TerminateProcess(GetCurrentProcess(), 1);
+				}).detach();
+#endif // PLATFORM_WINDOWS_DESKTOP
 			}
 			return;
 		}

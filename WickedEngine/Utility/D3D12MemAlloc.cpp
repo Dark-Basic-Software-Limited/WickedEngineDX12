@@ -7398,8 +7398,22 @@ void AllocatorPimpl::GetBudget(Budget* outLocalBudget, Budget* outNonLocalBudget
         }
         else
         {
-            UpdateD3D12Budget();
-            GetBudget(outLocalBudget, outNonLocalBudget); // Recursion
+            // GGMAX 3.141: recurse only when the refresh SUCCEEDED. UpdateBudget resets the "should
+            // update" counter only on success, so when both QueryVideoMemoryInfo calls fail (after a
+            // device removal, or a lost adapter) this recursed until the stack overflowed - a crash
+            // inside whatever was merely asking for the budget. On failure, report the last values.
+            if (SUCCEEDED(UpdateD3D12Budget()))
+            {
+                GetBudget(outLocalBudget, outNonLocalBudget); // Recursion
+            }
+            else
+            {
+                m_Budget.GetBudget(m_UseMutex,
+                    outLocalBudget ? &outLocalBudget->UsageBytes : NULL,
+                    outLocalBudget ? &outLocalBudget->BudgetBytes : NULL,
+                    outNonLocalBudget ? &outNonLocalBudget->UsageBytes : NULL,
+                    outNonLocalBudget ? &outNonLocalBudget->BudgetBytes : NULL);
+            }
         }
     }
     else

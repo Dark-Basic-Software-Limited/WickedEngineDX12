@@ -14,6 +14,7 @@
 #include <mutex>
 #include <deque>
 #include <limits>
+#include <atomic> // GGMAX 3.141: logfile_frozen
 #include <iostream>
 
 using namespace wi::graphics;
@@ -44,6 +45,8 @@ namespace wi::backlog
 	std::deque<LogEntry> history;
 	std::mutex historyLock;
 	std::string logfile_path = "";
+	// GGMAX 3.141: set by FreezeLogfile - log.txt is no longer rewritten.
+	std::atomic<bool> logfile_frozen{ false };
 
 	struct InternalState
 	{
@@ -80,9 +83,16 @@ namespace wi::backlog
 			{
 				filename = logfile_path;
 			}
-			std::string text = getText();
+			// GGMAX 3.141: the lock is taken BEFORE the snapshot. Taken after it, two threads posting
+			// Errors at once (a device removal: the pool thread's report, the main thread's Present
+			// failure, the game's block) could write an older snapshot last and drop the newest entry.
 			static std::mutex writelocker;
 			std::scoped_lock lck(writelocker); // to not write the logfile from multiple threads
+			if (logfile_frozen.load(std::memory_order_acquire))
+			{
+				return; // GGMAX 3.141: see FreezeLogfile
+			}
+			std::string text = getText();
 			wi::helper::FileWrite(filename, (const uint8_t*)text.c_str(), text.length());
 		}
 
@@ -93,6 +103,18 @@ namespace wi::backlog
 			writeLogfile();
 		}
 	} internal_state;
+
+	// GGMAX 3.141: write log.txt one last time, then stop rewriting it. Called after the device-lost dialog
+	// (wiApplication.cpp): the load that carries on into the dead device posts one Error per failed call,
+	// and log.txt keeps only the last 500 entries, so within seconds that flood can push the device-removal
+	// report - the thing the dialog tells the tester to send - out of the file (in a test it sat ~250
+	// entries from eviction). Declared where it is used
+	// (wiApplication.cpp) rather than in wiBacklog.h, which nearly every file includes.
+	void FreezeLogfile()
+	{
+		internal_state.writeLogfile();
+		logfile_frozen.store(true, std::memory_order_release);
+	}
 
 	void Toggle()
 	{

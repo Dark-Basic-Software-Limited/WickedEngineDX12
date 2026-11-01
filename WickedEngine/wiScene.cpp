@@ -1070,7 +1070,7 @@ namespace wi::scene
 
 		// GGMAX 3.148: specular shine (see ShaderInterop ShaderScene)
 		extern float gg_specular_shine;
-		shaderscene.gg_specular_shine = std::clamp(gg_specular_shine, 0.0f, 1.0f);
+		shaderscene.gg_specular_shine = (gg_specular_shine == gg_specular_shine) ? std::clamp(gg_specular_shine, 0.0f, 1.0f) : 1.0f; // NaN -> stock
 
 		// GGMAX 2.89 (#157): env-probe parallax precision mode (see lightingHF.hlsli)
 		extern int gg_probeparallax;

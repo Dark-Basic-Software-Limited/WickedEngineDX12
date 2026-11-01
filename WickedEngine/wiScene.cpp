@@ -44,6 +44,9 @@ namespace wi::scene
 	// GGMAX 1.55: global env-probe brightness multiplier (1 = stock), set by the game's
 	// "Global Probe Brightness" slider; consumed in lightingHF EnvironmentReflection_Global.
 	float gg_envprobe_brightness = 1.0f;
+	// GGMAX 3.148: "Specular Shine", set by the game's Visuals slider (1 = stock, 0 = DX11-like highlight);
+	// consumed in brdf.hlsli BRDF_GetSpecular and lightingHF.hlsli GGShineEnvScale.
+	float gg_specular_shine = 1.0f;
 	// GGMAX 2.89 (#157): env-probe parallax precision / policy.
 	//   0 = stock half (reproduces the fp16 overflow defect)
 	//   1 = float precision, parallax kept
@@ -1065,13 +1068,16 @@ namespace wi::scene
 		extern float gg_envprobe_brightness;
 		shaderscene.gg_envprobe_brightness = gg_envprobe_brightness;
 
+		// GGMAX 3.148: specular shine (see ShaderInterop ShaderScene)
+		extern float gg_specular_shine;
+		shaderscene.gg_specular_shine = std::clamp(gg_specular_shine, 0.0f, 1.0f);
+
 		// GGMAX 2.89 (#157): env-probe parallax precision mode (see lightingHF.hlsli)
 		extern int gg_probeparallax;
 		extern int gg_probeonlyglobal;
 		shaderscene.gg_probeparallax = gg_probeparallax;
 		shaderscene.gg_probeonlyglobal = gg_probeonlyglobal;
-		shaderscene.gg_probeparallax_pad1 = 0;
-		shaderscene.gg_probeparallax_pad2 = 0;
+		shaderscene.gg_probeparallax_pad2 = 0; // (pad1 became gg_specular_shine, GGMAX 3.148 - set above)
 
 		shaderscene.impostorInstanceOffset = impostorInstanceOffset;
 		shaderscene.TLAS = device->GetDescriptorIndex(&TLAS, SubresourceType::SRV);

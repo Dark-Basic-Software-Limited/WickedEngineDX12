@@ -47,7 +47,9 @@ struct alignas(16) ShaderScene
 	// on demand (the ball normally sits inside its own local probe, which is why it looks clean
 	// until a drag releases the slot).
 	int gg_probeonlyglobal;
-	int gg_probeparallax_pad1;
+	// GGMAX 3.148: "Specular Shine" (1 = stock, the default; 0 = the DX11 fork's softer highlight face-on) - see
+	// brdf.hlsli BRDF_GetSpecular and lightingHF.hlsli GGShineEnvScale. Took the place of gg_probeparallax_pad1.
+	float gg_specular_shine;
 	int gg_probeparallax_pad2;
 
 	ShaderWeather weather;

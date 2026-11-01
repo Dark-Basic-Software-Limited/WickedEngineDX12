@@ -677,6 +677,22 @@ inline half3 GetAmbient(in float3 N)
 	return ambient;
 }
 
+// GGMAX 3.148: the env-reflection half of "Specular Shine" (scene gg_specular_shine, 1 = stock). The DX11 fork ended
+// both env functions with envColor *= 0.5 * metalness + 0.5 (half the probe reflection on non-metals); this blends
+// toward that as shine goes to 0. Surface carries no metalness, so it is read back from the albedo darkening
+// (surfaceHF: albedo = baseColor * (1 - max(reflectance, metalness))) - a dielectric with reflectance 0.04 reads 0.04.
+// Applied in BOTH env functions: GG's global cube is also an entity probe and mostly arrives through _Local.
+inline half GGShineEnvScale(in Surface surface)
+{
+	const half shine = (half)GetScene().gg_specular_shine;
+	[branch]
+	if (shine >= 1)
+		return 1;
+	const half base = dot(surface.baseColor.rgb, 1);
+	const half metalness = base > 0.001 ? saturate(1 - dot(surface.albedo, 1) / base) : 0;
+	return lerp(0.5 * metalness + 0.5, 1, shine);
+}
+
 // surface:				surface descriptor
 // MIP:					mip level to sample
 // return:				color of the environment color (rgb)
@@ -727,6 +743,8 @@ inline half3 EnvironmentReflection_Global(in Surface surface)
 	envColor *= (half)GetScene().gg_envprobe_brightness;
 
 #endif // ENVMAPRENDERING
+
+	envColor *= GGShineEnvScale(surface); // GGMAX 3.148
 
 	return envColor;
 }
@@ -846,6 +864,8 @@ inline half4 EnvironmentReflection_Local(in TextureCube<half4> cubemap, in Surfa
 	MIP = surface.clearcoat.roughness * mipcount16f;
 	envColor += cubemap.SampleLevel(sampler_linear_clamp, R_parallaxCorrected, MIP).rgb * surface.clearcoat.F;
 #endif // CLEARCOAT
+
+	envColor *= GGShineEnvScale(surface); // GGMAX 3.148
 
 	// blend out if close to any cube edge:
 	half edgeBlend = 1 - pow8(saturate(max(abs(clipSpacePos.x), max(abs(clipSpacePos.y), abs(clipSpacePos.z)))));

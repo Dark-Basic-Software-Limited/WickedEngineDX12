@@ -160,9 +160,15 @@ half3 BRDF_GetSpecular(in Surface surface, in SurfaceToLight surface_to_light)
 	half Vis = V_SmithGGXCorrelated_Anisotropic(surface.aniso.at, surface.aniso.ab, surface.aniso.TdotV, surface.aniso.BdotV,
 		surface_to_light.TdotL, surface_to_light.BdotL, surface.NdotV, surface_to_light.NdotL);
 #else
-	half roughnessBRDF = sqr(clamp(surface.roughness, min_roughness, 1));
+	// GGMAX 3.148: "Specular Shine" (scene gg_specular_shine, 1 = stock and the default). Lower values move the
+	// highlight toward the DX11 fork's look while keeping this BRDF: alpha = r^lerp(1.5, 2, shine) (the fork used
+	// pow(r, 1.5)) and the lobe scaled by lerp(0.5, 1, shine) (the fork's V_Modified was half of Smith-GGX at normal
+	// incidence). At 0 the highlight equals DX11's face-on and stays within ~1.1-1.5x of it up to 45 degrees (3.147).
+	const half shine = (half)GetScene().gg_specular_shine;
+	const half roughness_clamped = clamp(surface.roughness, min_roughness, 1);
+	half roughnessBRDF = shine >= 1 ? sqr(roughness_clamped) : pow(roughness_clamped, lerp((half)1.5, (half)2.0, shine));
 	half D = D_GGX(roughnessBRDF, surface_to_light.NdotH, surface_to_light.H);
-	half Vis = V_SmithGGXCorrelated(roughnessBRDF, surface.NdotV, surface_to_light.NdotL);
+	half Vis = V_SmithGGXCorrelated(roughnessBRDF, surface.NdotV, surface_to_light.NdotL) * lerp((half)0.5, (half)1.0, shine);
 #endif // ANISOTROPIC
 
 	half3 specular = D * Vis * surface_to_light.F;

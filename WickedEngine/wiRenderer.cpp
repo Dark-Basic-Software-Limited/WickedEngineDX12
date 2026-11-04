@@ -7675,6 +7675,9 @@ void OcclusionCulling_Render(const CameraComponent& camera, const Visibility& vi
 	{
 		device->EventBegin("Occlusion Culling Objects", cmd);
 
+		// GGMAX BR-0004: the camera's share of the extrusion magnitude below (the same for every object).
+		const float eye_magnitude = std::max({ std::abs(camera.Eye.x), std::abs(camera.Eye.y), std::abs(camera.Eye.z) });
+
 		for (uint32_t instanceIndex : vis.visibleObjects)
 		{
 			const Scene::OcclusionResult& occlusion_result = vis.scene->occlusion_results_objects[instanceIndex];
@@ -7684,12 +7687,26 @@ void OcclusionCulling_Render(const CameraComponent& camera, const Visibility& vi
 			{
 				AABB aabb = vis.scene->aabb_objects[instanceIndex];
 				// extrude the bounding box a bit:
-				aabb._min.x -= 0.001f;
-				aabb._min.y -= 0.001f;
-				aabb._min.z -= 0.001f;
-				aabb._max.x += 0.001f;
-				aabb._max.y += 0.001f;
-				aabb._max.z += 0.001f;
+				// GGMAX BR-0004: by an amount that grows with the distance from the origin. The box is tested
+				// against a depth buffer that already holds the object itself, so a flat object (a floor tile)
+				// stays visible only while the box's top face wins the depth test against its own surface.
+				// Stock 0.001 is lost in float rounding away from the origin (one ulp at 135,000 = 0.0156, so
+				// 135300.0f + 0.001f == 135300.0f): on a tester's floor at y = 135,300 every tile not over the
+				// sky was reported occluded every frame and vanished for one frame in every (occlusion history
+				// + 1). The box and the mesh are both rounded where the camera's view-projection is applied, at
+				// the magnitude of the object's and the camera's coordinates, so the extrusion is 32 *
+				// FLT_EPSILON of the largest of them (32-64 ulps: 0.5 units at 135,000, 0.004 at 1,000; stock
+				// 0.001 below 262) - a box that much larger only makes the query more conservative.
+				const float magnitude = std::max({ eye_magnitude,
+					std::abs(aabb._min.x), std::abs(aabb._min.y), std::abs(aabb._min.z),
+					std::abs(aabb._max.x), std::abs(aabb._max.y), std::abs(aabb._max.z) });
+				const float extrude = std::max(0.001f, magnitude * (32.0f * FLT_EPSILON));
+				aabb._min.x -= extrude;
+				aabb._min.y -= extrude;
+				aabb._min.z -= extrude;
+				aabb._max.x += extrude;
+				aabb._max.y += extrude;
+				aabb._max.z += extrude;
 				const XMMATRIX transform = aabb.getAsBoxMatrix() * VP;
 				device->PushConstants(&transform, sizeof(transform), cmd);
 

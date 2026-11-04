@@ -329,8 +329,8 @@ uint32_t gg_msao_downsample_mode = 1;
 float gg_msao_downsample_edge = 0.1f;
 // GGMAX 3.129: the forward light mask (env probe captures, voxelize) must name slots of frameCB.lights. That array
 // is written in TYPE GROUPS (directional, spot, point, rect; inactive lights skipped) while vis.visibleLights is in
-// scene order - and its order is not even stable past 63 lights (per-group stream compaction appends groups in
-// completion order). Stock ForwardEntityCullingCPU set bit i for visibleLights[i] and the shader loaded slot i, so
+// another order (since BR-0006 nearest-first, trimmed to what the entity array takes; before that scene order and not
+// even stable past 63 lights - per-group stream compaction appends groups in completion order). Stock ForwardEntityCullingCPU set bit i for visibleLights[i] and the shader loaded slot i, so
 // a capture lit each object with whatever light happened to sit at that slot. UpdatePerFrameData records the scene
 // light written to each of the first 64 slots; the mask is built from that table.
 bool gg_forward_lightmask_slots = true;
@@ -490,6 +490,9 @@ uint32_t GG_GetShadowRects(uint32_t* entities, int* widths, int* heights, int* t
 }
 static int localShadowCappedCount = 0;    // local casters denied a slot (rendered fully lit)
 static int localShadowRenderedCount = 0;  // local shadows actually re-rendered this frame
+// GGMAX BR-0006: full local-atlas clears since startup. The per-frame counters above only show the frame a harness read
+// lands on, so a once-per-camera-move full re-render was invisible to them.
+static uint32_t gg_localShadowFullClearTotal = 0;
 static wi::vector<wi::ecs::Entity> localShadowGrantedPrev; // last frame's granted set (Phase 1.5 hysteresis)
 // GGMAX 3.30: entities whose cached local shadow must refresh THIS frame because a shadow caster
 // moved inside their range. Empty = every cached shadow is reusable. Rebuilt every frame by the
@@ -5124,6 +5127,39 @@ void UpdateVisibility(Visibility& vis)
 	vis.visibleObjects.resize((size_t)vis.object_counter.load());
 	vis.visibleLights.resize((size_t)vis.light_counter.load());
 
+	// GGMAX BR-0006: nearest lights first, as the DX11 fork sorted them. The list is filled by parallel jobs and appended in
+	// completion order, so it changed every frame, and every consumer that keeps only the first N - the frame's entity
+	// array (SHADER_ENTITY_COUNT = 256; a tester's level had 348 visible lights), the 64 lights a forward batch can index -
+	// dropped a DIFFERENT set each frame: nearby flame lights blinked off in about one frame in four. Directional lights
+	// first (DX11 keyed them 0), then by distance from the camera, ties by index; a NaN position after every finite one.
+	if (vis.visibleLights.size() > 1 && vis.camera != nullptr)
+	{
+		const XMFLOAT3 eye = vis.camera->Eye;
+		const auto& lights = vis.scene->lights;
+		auto key = [&](uint32_t i) {
+			if (lights[i].GetType() == LightComponent::DIRECTIONAL)
+				return -1.0f;
+			const float d = wi::math::DistanceSquared(eye, lights[i].position);
+			return d == d ? d : std::numeric_limits<float>::max();
+		};
+		std::sort(vis.visibleLights.begin(), vis.visibleLights.end(), [&](uint32_t a, uint32_t b) {
+			const float ka = key(a), kb = key(b);
+			return ka < kb || (ka == kb && a < b);
+		});
+
+		// Keep only the lights the entity array can take after the decals and env probes UpdatePerFrameData writes first:
+		// it writes lights in TYPE groups (spot before point), so without this every visible spot light, however far,
+		// displaced nearer point lights, where DX11 kept the nearest of any type - and the dropped lights still competed
+		// for shadow-atlas space. One slot stays free: a full array lets the next group overwrite its last entry.
+		const size_t taken = std::min((size_t)MAX_SHADER_DECAL_COUNT, vis.visibleDecals.size())
+			+ std::min((size_t)MAX_SHADER_PROBE_COUNT, vis.visibleEnvProbes.size()) + 1;
+		const size_t budget = taken < SHADER_ENTITY_COUNT ? SHADER_ENTITY_COUNT - taken : 0;
+		if (vis.visibleLights.size() > budget)
+		{
+			vis.visibleLights.resize(budget);
+		}
+	}
+
 	if (vis.scene->weather.IsOceanEnabled())
 	{
 		bool occluded = false;
@@ -5348,6 +5384,13 @@ void UpdateVisibility(Visibility& vis)
 			}
 			if (!vis.shadow_packer.rects.empty())
 			{
+				// GGMAX BR-0006: pack in scene order, not visibleLights order (now distance-sorted). stb_rect_pack keeps the
+				// input order of equal-size rects, so a camera-dependent order swapped two same-size casters' atlas places
+				// whenever they swapped distance rank, and the static local-shadow cache (3.29) then re-rendered every local
+				// shadow and the sun. Ids are unique (one rect per light; the rain blocker is -1, first).
+				std::sort(vis.shadow_packer.rects.begin(), vis.shadow_packer.rects.end(),
+					[](const wi::rectpacker::Rect& a, const wi::rectpacker::Rect& b) { return a.id < b.id; });
+
 				// GGMAX 1.58b: atlas cap 8192 -> 16384 (D3D12 max texture dim). At 8192 the five
 				// 2048 sun cascades (10240 wide) could never fit, so the packer's iterative_scaling
 				// silently HALVED them to 1024/cascade — the DX11 build's Texture2DArray ran true
@@ -5650,6 +5693,7 @@ void UpdateVisibility(Visibility& vis)
 			localAtlasFullClear = changed;
 			if (changed)
 			{
+				gg_localShadowFullClearTotal++; // GGMAX BR-0006: harness readout SHADOW_LOCAL_FULLCLEARS_TOTAL
 				localShadowCache = cur; // this frame re-renders the whole set -> adopt as the cached layout
 				localShadowCacheAtlasW = shadowMapAtlas.desc.width;
 				localShadowCacheAtlasH = shadowMapAtlas.desc.height;
@@ -8537,6 +8581,10 @@ void GetLocalShadowStats(int& granted, int& capped, int& rendered)
 	granted = localShadowGrantedCount;
 	capped = localShadowCappedCount;
 	rendered = localShadowRenderedCount;
+}
+uint32_t GetLocalShadowFullClearTotal()
+{
+	return gg_localShadowFullClearTotal;
 }
 void SetLocalShadowCachingEnabled(bool value)
 {

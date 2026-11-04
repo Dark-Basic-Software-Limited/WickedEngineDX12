@@ -1282,6 +1282,8 @@ namespace wi::renderer
 	// against maxPointShadows (one shared pool fed by the point knob made the spot knob dead).
 	void SetLocalShadowBudget(int maxSpotShadows, int maxPointShadows);
 	void GetLocalShadowStats(int& granted, int& capped, int& rendered);
+	// GGMAX BR-0006: full local-shadow atlas clears (every cached local shadow re-rendered) since startup
+	uint32_t GetLocalShadowFullClearTotal();
 	// GG Phase 2: cache static local shadows (render once, reuse atlas texels until something changes).
 	void SetLocalShadowCachingEnabled(bool value);
 	bool GetLocalShadowCachingEnabled();

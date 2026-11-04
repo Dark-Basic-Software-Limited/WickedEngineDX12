@@ -32,8 +32,22 @@
 ** by flooring them (instead of raising an error if they are not
 ** integral values)
 */
+/*
+** GGMAX 3.154: GameGuru's scripts were written for DX11 MAX's Lua 5.2, whose lua_tointeger /
+** luaL_checkinteger TRUNCATED a fractional number ((lua_Integer)n). Stock 5.4 (F2Ieq) rejects it:
+** library functions raise "number has no integer representation" (string.format('%02d', 12.7) in
+** stop_watch.lua) and lua_tointeger returns 0, so a GameGuru binding read alpha 200.5 as 0
+** (fadezone.lua's fade strobed). F2Itrunc restores 5.2's conversion of finite, in-range numbers for
+** every coercion that uses LUA_FLOORN2I (the C API, luaL_check/optinteger, bitwise operands and their
+** compile-time folding); table keys, equality, comparisons, for-loop limits and math.floor/ceil use
+** their own modes and are unchanged. NaN, inf and |n| >= 2^63 still raise (5.2 cast them silently).
+** Consequences: math.tointeger(3.5) is 3 (5.2 had no math.tointeger; no script uses it); file:seek with
+** a fractional offset and '%x' of a negative fraction now truncate where 5.2 raised. The game's BR-0005
+** math.random wrapper is still needed: 5.2 computed floor(r*(u-l+1))+l on the raw bounds (30.9..35.9),
+** truncation alone would give 30..35.
+*/
 #if !defined(LUA_FLOORN2I)
-#define LUA_FLOORN2I		F2Ieq
+#define LUA_FLOORN2I		F2Itrunc
 #endif
 
 
@@ -43,7 +57,8 @@
 typedef enum {
   F2Ieq,     /* no rounding; accepts only integral values */
   F2Ifloor,  /* takes the floor of the number */
-  F2Iceil    /* takes the ceil of the number */
+  F2Iceil,   /* takes the ceil of the number */
+  F2Itrunc   /* GGMAX 3.154: rounds toward zero, as Lua 5.2's (lua_Integer) cast */
 } F2Imod;
 
 

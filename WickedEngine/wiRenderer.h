@@ -1562,6 +1562,11 @@ namespace wi::renderer
 		std::string name;
 		uint32_t filterMask = wi::enums::FILTER_OPAQUE;
 		wi::graphics::PipelineState pso[wi::enums::RENDERPASS_COUNT] = {};
+		// GGMAX BR-0008: true = materials using this shader draw with the engine's own object pipeline in every pass
+		// (PBR, opaque, double-sided, the material's own alpha test - DX11's AddPipelineDesc for "Tree Animate
+		// Doublesided"), and pso[] is ignored. The shader keeps its slot, its name and its filterMask, so a saved
+		// customShaderID still means the same shader. For GG shaders that the DX12 API cannot build a full pipeline for.
+		bool ggStockPipeline = false;
 	};
 	// Registers a custom shader that can be set to materials. 
 	//	Returns the ID of the custom shader that can be used with MaterialComponent::SetCustomShaderID()

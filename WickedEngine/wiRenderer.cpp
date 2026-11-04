@@ -4234,7 +4234,8 @@ void RenderMeshes(
 						break;
 					}
 				}
-				else if (material.customShaderID >= 0 && material.customShaderID < (int)customShaders.size())
+				else if (material.customShaderID >= 0 && material.customShaderID < (int)customShaders.size()
+					&& !customShaders[material.customShaderID].ggStockPipeline)
 				{
 					const CustomShader& customShader = customShaders[material.customShaderID];
 					if (filterMask & customShader.filterMask)
@@ -4261,7 +4262,16 @@ void RenderMeshes(
 					// ⚠ UNLIT and WATER are left alone. UNLIT is already CHEAPER than PBR, so forcing it
 					// would be slower AND would light something deliberately unlit; WATER would stop
 					// reading as water. CARTOON and TERRAINBLENDED are art, not cost.
-					uint32_t ggShaderType = material.shaderType;
+					// ★★★ GGMAX BR-0008: a custom shader flagged ggStockPipeline (GG's "Tree Animate Doublesided",
+					// customShaderID 1) also lands here. DX11 built its pipelines with AddPipelineDesc(PBR, OPAQUE,
+					// DOUBLESIDED) and swapped only the vertex shader; the DX12 API has no AddPipelineDesc, so GG's
+					// port registered vertex-shader-only shells (no pixel shader, depth disabled) and every mesh set
+					// to the shader drew NOTHING - no colour, no depth, no shadow (tester trees vanished). Its DX12
+					// vertex shader is the stock one anyway (the sway comes from the engine wind, GG 3.58b), so the
+					// stock pipeline with DX11's three forced choices is the whole shader.
+					const bool ggStockCustom = material.customShaderID >= 0 && material.customShaderID < (int)customShaders.size()
+						&& customShaders[material.customShaderID].ggStockPipeline;
+					uint32_t ggShaderType = ggStockCustom ? (uint32_t)MaterialComponent::SHADERTYPE_PBR : material.shaderType;
 					uint32_t ggTessellation = tessellatorRequested;
 					if (gg_sq_objects != 0)
 					{
@@ -4283,8 +4293,8 @@ void RenderMeshes(
 					}
 
 					variant.bits.shadertype = ggShaderType;
-					variant.bits.blendmode = material.GetBlendMode();
-					variant.bits.cullmode = (mesh.IsDoubleSided() || material.IsDoubleSided() || (shadowRendering && mesh.IsDoubleSidedShadow())) ? (uint32_t)CullMode::NONE : (uint32_t)CullMode::BACK;
+					variant.bits.blendmode = ggStockCustom ? (uint32_t)BLENDMODE_OPAQUE : material.GetBlendMode();
+					variant.bits.cullmode = (ggStockCustom || mesh.IsDoubleSided() || material.IsDoubleSided() || (shadowRendering && mesh.IsDoubleSidedShadow())) ? (uint32_t)CullMode::NONE : (uint32_t)CullMode::BACK;
 					variant.bits.tessellation = ggTessellation;
 					variant.bits.alphatest = material.IsAlphaTestEnabled() || forceAlphaTestForDithering;
 					variant.bits.sample_count = renderpass_info.sample_count;

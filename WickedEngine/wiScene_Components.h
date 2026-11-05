@@ -1976,6 +1976,17 @@ namespace wi::scene
 		// above - GameGuru recomputes it from visuals.tree_wind on every visuals update.
 		float gg_objectWindSpaceRcp = 1.0f;
 		float gg_objectWindAmplitude = 1.0f;
+		// GGMAX (Lee 2026-11-05): tree sway - see gg_object_wind (globals.hlsli). GameGuru sets the TARGETS from the Wind
+		// Controls on every visuals update: independence (0..1) and, in gg_objectWindSpaceRcp, 1 / gust length.
+		// Scene::RunWeatherUpdateSystem advances the sway phase and the gust offset (at Wind Speed x
+		// GG_WIND_GUST_TRAVEL_PER_SPEED) every frame and eases the shader copies toward the targets. None is serialized.
+		float gg_objectWindIndependence = 0.0f;
+		float gg_objectSwayPhase = 0.0f;
+		float gg_objectGustOffsetX = 0.0f;
+		float gg_objectGustOffsetZ = 0.0f;
+		float gg_objectEasedIndependence = 0.0f;
+		float gg_objectEasedRandomness = 0.0f;
+		float gg_objectEasedSpaceRcp = 0.0f;   // 0 = not started yet: the first update takes the targets as they are
 		float windRandomness = 5;
 		float windWaveSize = 1;
 		float windSpeed = 1;

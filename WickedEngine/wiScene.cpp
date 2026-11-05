@@ -1077,7 +1077,7 @@ namespace wi::scene
 		extern int gg_probeonlyglobal;
 		shaderscene.gg_probeparallax = gg_probeparallax;
 		shaderscene.gg_probeonlyglobal = gg_probeonlyglobal;
-		shaderscene.gg_probeparallax_pad2 = 0; // (pad1 became gg_specular_shine, GGMAX 3.148 - set above)
+		// (pad1 became gg_specular_shine, GGMAX 3.148; pad2 became gg_object_sway_phase, set with the wind below)
 
 		shaderscene.impostorInstanceOffset = impostorInstanceOffset;
 		shaderscene.TLAS = device->GetDescriptorIndex(&TLAS, SubresourceType::SRV);
@@ -1112,8 +1112,13 @@ namespace wi::scene
 		shaderscene.weather.wind.randomness = weather.windRandomness;
 		shaderscene.weather.wind.wavesize = weather.windWaveSize;
 		shaderscene.weather.wind.direction = weather.windDirection;
-		shaderscene.weather.wind.gg_object_space_rcp = weather.gg_objectWindSpaceRcp;  // GGMAX 3.57
+		shaderscene.weather.wind.gg_object_space_rcp = weather.gg_objectEasedSpaceRcp;  // GGMAX 3.57 / 11-05: eased gust length
 		shaderscene.weather.wind.gg_object_amplitude = weather.gg_objectWindAmplitude; // GGMAX 3.57
+		shaderscene.weather.gg_object_independence = weather.gg_objectEasedIndependence; // GGMAX (Lee 11-05)
+		shaderscene.weather.gg_object_randomness = weather.gg_objectEasedRandomness;     // GGMAX (Lee 11-05)
+		shaderscene.weather.ocean.gg_object_gust_offset_x = weather.gg_objectGustOffsetX; // GGMAX (Lee 11-05)
+		shaderscene.weather.ocean.gg_object_gust_offset_z = weather.gg_objectGustOffsetZ; // GGMAX (Lee 11-05)
+		shaderscene.gg_object_sway_phase = weather.gg_objectSwayPhase;                   // GGMAX (Lee 11-05)
 		shaderscene.weather.atmosphere = weather.atmosphereParameters;
 		shaderscene.weather.volumetric_clouds = weather.volumetricCloudParameters;
 		shaderscene.weather.ocean.water_color = weather.oceanParameters.waterColor;
@@ -6577,6 +6582,53 @@ namespace wi::scene
 	{
 		if (weathers.GetCount() > 0)
 		{
+			// GGMAX (Lee 2026-11-05): tree sway state, advanced on the COMPONENT (the copy below is remade every frame):
+			// - the sway phase advances by Wind Speed x dt, wrapped at 20 pi (the shader uses it x1, x0.8, x1.2, x1.5 -
+			//   all whole turns at 20 pi), so a Wind Speed change alters only the rate;
+			// - the gust pattern is carried downwind by the gust travel speed x dt in WORLD units (the pattern itself lies
+			//   in fixed map axes), so turning the wind only steers where it drifts;
+			// - independence, randomness and the gust length EASE toward GameGuru's values (~0.7 s), so clicking a slider
+			//   never makes every tree jump;
+			// - a non-finite value (a typed-in 1e39) is treated as 0 instead of poisoning the state for the session.
+			{
+				WeatherComponent& wc = weathers[0];
+				auto finite = [](float v) { return std::isfinite(v) ? v : 0.0f; };
+				const float twoPi = 6.28318530718f;
+				const float step = (std::isfinite(dt) && dt > 0) ? std::min(dt, 0.25f) : 0.0f;   // a long load is not a gust
+				const float speed = std::max(0.0f, finite(wc.windSpeed));
+				wc.gg_objectSwayPhase = std::fmod(finite(wc.gg_objectSwayPhase) + speed * step, twoPi * 10.0f);
+				const float travel = speed * GG_WIND_GUST_TRAVEL_PER_SPEED;
+				const float wdx = finite(wc.windDirection.x), wdz = finite(wc.windDirection.z);
+				const float wl = std::sqrt(wdx * wdx + wdz * wdz);
+				wc.gg_objectGustOffsetX = finite(wc.gg_objectGustOffsetX);
+				wc.gg_objectGustOffsetZ = finite(wc.gg_objectGustOffsetZ);
+				if (wl > 1e-6f)
+				{
+					wc.gg_objectGustOffsetX += wdx / wl * travel * step;
+					wc.gg_objectGustOffsetZ += wdz / wl * travel * step;
+				}
+				if (std::fabs(wc.gg_objectGustOffsetX) > 4.0e7f || std::fabs(wc.gg_objectGustOffsetZ) > 4.0e7f)
+				{
+					wc.gg_objectGustOffsetX = 0.0f;   // ~11 h at the fastest wind: start over before float precision shows
+					wc.gg_objectGustOffsetZ = 0.0f;
+				}
+				const float targetRcp = finite(wc.gg_objectWindSpaceRcp) > 0 ? finite(wc.gg_objectWindSpaceRcp) : 1.0f;
+				const float targetK = std::max(0.0f, std::min(1.0f, finite(wc.gg_objectWindIndependence)));
+				const float targetR = std::max(0.0f, finite(wc.windRandomness));
+				if (!(finite(wc.gg_objectEasedSpaceRcp) > 0))
+				{
+					wc.gg_objectEasedSpaceRcp = targetRcp;
+					wc.gg_objectEasedIndependence = targetK;
+					wc.gg_objectEasedRandomness = targetR;
+				}
+				else
+				{
+					const float ease = 1.0f - std::exp(-step / 0.7f);
+					wc.gg_objectEasedSpaceRcp += (targetRcp - wc.gg_objectEasedSpaceRcp) * ease;
+					wc.gg_objectEasedIndependence = finite(wc.gg_objectEasedIndependence) + (targetK - finite(wc.gg_objectEasedIndependence)) * ease;
+					wc.gg_objectEasedRandomness = finite(wc.gg_objectEasedRandomness) + (targetR - finite(wc.gg_objectEasedRandomness)) * ease;
+				}
+			}
 			weather = weathers[0];
 			weather.most_important_light_index = ~0;
 

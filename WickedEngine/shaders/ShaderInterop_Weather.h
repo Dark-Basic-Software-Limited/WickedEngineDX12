@@ -330,6 +330,10 @@ struct alignas(16) ShaderFog
 	float height_end;
 };
 
+// GGMAX (Lee 2026-11-05): tree gusts roll downwind at Wind Speed x this many world units per second (1.0 -> ~5 m/s).
+// Used by wiScene (accumulating the gust offset) AND by gg_object_wind (taking it back one frame for motion vectors).
+#define GG_WIND_GUST_TRAVEL_PER_SPEED 200.0f
+
 struct alignas(16) ShaderWind
 {
 	float3 direction;
@@ -337,14 +341,10 @@ struct alignas(16) ShaderWind
 
 	float wavesize;
 	float randomness;
-	// GGMAX 3.57: object-path wind scale, used ONLY by sample_wind_object (see globals.hlsli).
-	// GameGuru is 39.37 world units per metre; stock Wicked wind is authored for 1 unit per
-	// metre, so the raw field gives ~2.5 cm of travel with a ~5 cm spatial period here - shimmer,
-	// not sway. These two scalars stretch the lookup and the amplitude for the object path only.
-	// Both default to 1.0, and bare sample_wind (grass, rain, spring bones) never reads them,
-	// so nothing outside the tree path changes.
-	float gg_object_space_rcp;   // multiply the lookup position by this (1 / wavelength-ish)
-	float gg_object_amplitude;   // multiply the resulting displacement by this, in world units
+	// GGMAX 3.57 / 11-05: object-path (tree) sway scalars, used ONLY by gg_object_wind (globals.hlsli); bare sample_wind
+	// (grass) never reads them. GameGuru is 39.37 world units per metre.
+	float gg_object_space_rcp;   // 1 / tree gust length in world units (Wind Gust Size), eased by wiScene
+	float gg_object_amplitude;   // sway size in world units (Tree Wind Modifier x 70)
 };
 
 struct alignas(16) ShaderOcean
@@ -358,8 +358,10 @@ struct alignas(16) ShaderOcean
 
 	float caustic_scale;	// scales ONLY the seabed caustic lookup, so its size is independent of patch_size (which also drives wave size). 1 = stock (welded to patch size); <1 = larger caustics
 	float underwater_fog_density;	// GG delta 1.23: fog density for the underwaterCS screen effect, DECOUPLED from the surface water_color.a. 0 = use water_color.a (stock); >0 = independent underwater fog so the surface can stay transparent while the submerged view fogs.
-	float caustic_pad1;
-	float caustic_pad2;
+	// GGMAX (Lee 2026-11-05): were caustic_pad1/2 (unused). How far the trees' gust pattern has been carried downwind, in
+	// world units on X and Z - accumulated by wiScene (see gg_object_wind, globals.hlsli). Same size and place.
+	float gg_object_gust_offset_x;
+	float gg_object_gust_offset_z;
 
 	float4 underwater_color;	// GG delta 1.23: colour the submerged view fogs toward + the waterline transition band, DECOUPLED from the surface water_color.rgb. Only used when underwater_fog_density > 0. rgb used, a spare.
 
@@ -380,7 +382,11 @@ struct alignas(16) ShaderWeather
 
 	float4 stars_rotation; // quaternion
 
-	float2 padding_stars;
+	// GGMAX (Lee 2026-11-05): two scalars for tree sway (gg_object_wind, globals.hlsli), in what was float2
+	// padding_stars - same size and place, so nothing else in the constant buffer moves. Both EASED toward GameGuru's
+	// values by wiScene (~0.7 s), so moving a slider never makes the trees jump.
+	float gg_object_independence;   // 0 = every tree follows the rolling gusts ... 1 = each tree sways on its own (DX11)
+	float gg_object_randomness;     // Wind Randomness as the trees use it (eased copy of wind.randomness)
 	// GGMAX 1.65: DX11-style Fog Opacity (FogA). In non-realistic-sky modes DX11 fog is a
 	// recolor of the surface toward the user fog RGB scaled by THIS value (0 = fog off);
 	// with realistic sky it blends the user fog RGB over the sampled sky color. See fogHF.hlsli.

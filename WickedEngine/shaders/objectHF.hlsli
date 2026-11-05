@@ -433,7 +433,8 @@ struct VertexSurface
 			{
 				ggWeight = gg_tree_wind_weight(pos_wind.y, input.GetInstance().transform.GetMatrix()[1][1]);
 			}
-			position.xyz += sample_wind_object(position.xyz, ggWeight, gg_tree_wind_amplitude(ggMatWind));
+			// GGMAX (Lee 11-05): the sway is per TREE now - looked up at the instance origin (see globals.hlsli)
+			position.xyz += sample_wind_object(gg_instance_origin(input.GetInstance().transformRaw), ggWeight, gg_tree_wind_amplitude(ggMatWind));
 		}
 #endif // DISABLE_WIND
 	}

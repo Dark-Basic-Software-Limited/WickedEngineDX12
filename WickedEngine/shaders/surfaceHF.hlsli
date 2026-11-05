@@ -1099,9 +1099,14 @@ struct Surface
 				ggW1 = gg_tree_wind_weight(data1.y, ggScaleY);
 				ggW2 = gg_tree_wind_weight(data2.y, ggScaleY);
 			}
-			pre0 += sample_wind_object_prev(pre0, ggW0, ggAmp);
-			pre1 += sample_wind_object_prev(pre1, ggW1, ggAmp);
-			pre2 += sample_wind_object_prev(pre2, ggW2, ggAmp);
+			// GGMAX (Lee 11-05): per-tree sway at the instance origin, as objectHF - the CURRENT origin for the
+			// previous frame too (no transformRawPrev; a tree-pool slot rebind would jump transformPrev)
+			// The sway is per TREE, so it is evaluated once here instead of three times and scaled by each corner's
+			// weight - the same result as three calls (weight 0 gives 0).
+			const float3 ggWind = sample_wind_object_prev(gg_instance_origin(inst.transformRaw), 1, ggAmp);
+			pre0 += ggWind * ggW0;
+			pre1 += ggWind * ggW1;
+			pre2 += ggWind * ggW2;
 		}
 		pre = attribute_at_bary(pre0, pre1, pre2, bary);
 #else
@@ -1185,9 +1190,11 @@ struct Surface
 				ggW1 = gg_tree_wind_weight(data1.y, ggScaleY);
 				ggW2 = gg_tree_wind_weight(data2.y, ggScaleY);
 			}
-			P0 += sample_wind_object(P0, ggW0, ggAmp);
-			P1 += sample_wind_object(P1, ggW1, ggAmp);
-			P2 += sample_wind_object(P2, ggW2, ggAmp);
+			// GGMAX (Lee 11-05): per-tree sway at the instance origin, as objectHF - once per triangle (see the prev block)
+			const float3 ggWind = sample_wind_object(gg_instance_origin(inst.transformRaw), 1, ggAmp);
+			P0 += ggWind * ggW0;
+			P1 += ggWind * ggW1;
+			P2 += ggWind * ggW2;
 		}
 #endif // SURFACE_LOAD_ENABLE_WIND
 
@@ -1233,9 +1240,11 @@ struct Surface
 				ggW1 = gg_tree_wind_weight(data1.y, ggScaleY);
 				ggW2 = gg_tree_wind_weight(data2.y, ggScaleY);
 			}
-			P0 += sample_wind_object(P0, ggW0, ggAmp);
-			P1 += sample_wind_object(P1, ggW1, ggAmp);
-			P2 += sample_wind_object(P2, ggW2, ggAmp);
+			// GGMAX (Lee 11-05): per-tree sway at the instance origin, as objectHF - once per triangle (see the prev block)
+			const float3 ggWind = sample_wind_object(gg_instance_origin(inst.transformRaw), 1, ggAmp);
+			P0 += ggWind * ggW0;
+			P1 += ggWind * ggW1;
+			P2 += ggWind * ggW2;
 		}
 #endif // SURFACE_LOAD_ENABLE_WIND
 

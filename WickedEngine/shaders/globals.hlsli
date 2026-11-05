@@ -2141,46 +2141,95 @@ float gg_tree_wind_amplitude(float matWind)
 	                       : (matWind * matWind * GG_TREE_WIND_AMP_REF);
 }
 
-// GGMAX 3.57: OBJECT-PATH wind, used by every material with USE_WIND (objectHF + surfaceHF).
-// Differs from bare sample_wind in two deliberate ways, both required at GameGuru world scale:
-//   1. the lookup position is scaled, so the gust field has a usable wavelength instead of the
-//      stock ~5 cm one (the volume mirror-wraps every 1.0 in texcoord space);
-//   2. the wind DIRECTION is normalized and the amplitude comes from gg_object_amplitude, so
-//      tree sway strength is OUR scalar and does not ride on |windDirection| - that vector is
-//      shared with grass, rain and spring bones and must not be inflated to drive trees.
-// With the 1.0/1.0 defaults this still returns a sane (small) displacement, so a material that
-// enables wind before GameGuru sets the scalars degrades quietly rather than exploding.
-float3 gg_wind_direction_unit()
+// GGMAX 3.57: OBJECT-PATH wind, used by every material with USE_WIND (objectHF + surfaceHF). Unlike bare sample_wind
+// (grass), the wind DIRECTION is normalized and the amplitude comes from gg_object_amplitude, so tree sway strength is
+// OUR scalar and does not ride on |windDirection| - that vector is shared with grass and must not be inflated to drive
+// trees. (The 3.57 scaled lookup into the wind volume is gone since the 11-05 per-tree sway below.)
+// ★★★ GGMAX (Lee 2026-11-05): PER-TREE sway. Until now every tree read one scalar of the shared wind volume along ONE
+// direction, and one volume texel spans 1250 world units, so neighbouring trees rocked back and forth in lockstep, all
+// the same way. DX11 gave each tree its own phase from its world position, on separate X and Z waves
+// (GGTreesConstants.hlsli TreeWaveX/Z), so trees side by side moved independently - testers liked that. Lee also wants
+// low randomness with large gusts to give gentle gusts whose direction changes as they move through the level.
+// The sway of a tree (origin = its world position) blends two procedural parts - trees no longer read the wind VOLUME
+// (windCS drifts along a fixed diagonal at ~1250 units/s whatever the wind does; grass still uses it, unchanged):
+//   GUSTS - a pattern of gust length L (Wind Gust Size: gg_object_space_rcp = 1/L) laid in FIXED map axes and carried
+//           downwind by the accumulated gust offset (Wind Speed x GG_WIND_GUST_TRAVEL_PER_SPEED units/s). As a gust
+//           passes, the sway direction tilts up to ~26 degrees and the sway grows or eases (+-30%). Every tree sways at
+//           the Wind Speed frequency; Wind Randomness spreads the timing between areas over a fixed ~3000 units (0 = the
+//           whole level in step, as 3.61). The spread does not roll with the gusts, so no tree's sway ever stalls.
+//   OWN   - DX11's TreeWave: along-wind sum of three sines, cross-wind sum of two at 0.57 of the size, every term phased
+//           by a smooth function of the tree's position (three terms; ~0.05-0.1 radians per world unit: trees 100+ units
+//           apart are unrelated, the parts of one tree a few units apart stay together, a dragged tree changes smoothly.
+//           DX11 used the raw position - 1 radian per unit - which tears multi-part objects and strobes when moved).
+// gg_object_independence (GameGuru: high Wind Randomness x small Gust Size) mixes them with cos/sin weights; both parts
+// peak at ~1.0 x the Tree Wind Modifier amplitude (the DX11 calibration).
+// Nothing jumps when a slider moves: wiScene ACCUMULATES the sway phase and the gust offset (so Wind Speed and Wind
+// Direction change only rates and drift), and EASES independence, randomness and the gust length (~0.7 s). The previous
+// frame (motion vectors) takes both back by exactly this frame's step.
+// ⚠ objectHF (raster) and surfaceHF (visibility-buffer motion vectors) MUST pass the same origin - the instance's
+//   transformRaw translation; the previous frame uses the CURRENT origin (there is no transformRawPrev, and a tree-pool
+//   slot rebind would otherwise jump it).
+// ⚠ No wind direction, Tree Wind Modifier 0 (on painted trees) or Wind Speed 0 = no sway and no cost; the sway fades in
+//   over Wind Speed 0..0.25 so the bottom of the slider does not snap. (The Object Library preview zeroes the direction.)
+#define GG_WIND_TILT            0.45   // radians of sway-direction tilt at the crest of a gust (~26 degrees)
+#define GG_WIND_GUST_DEPTH      0.30   // the sway grows/eases by this much as gusts pass
+#define GG_WIND_GUST_PEAK_SCALE 0.77   // brings the gust part's peak (1 + depth) to ~1.0, the own part's (DX11) peak
+#define GG_WIND_OWN_ACROSS      0.57   // DX11: Z sway amount 0.20 vs X 0.35
+#define GG_WIND_SPREAD_RCP      (6.28318530718 / 3000.0)
+#define GG_WIND_OWN_PHASE(o, a, b, c, e, f, g, h, i, j) (8.0 * sin((o).x * (a) + (o).z * (b) + (c)) + 7.0 * sin((o).x * (e) + (o).z * (f) + (g)) + 3.0 * sin((o).x * (h) + (o).z * (i) + (j)))
+float3 gg_object_wind(float3 origin, float weight, float amplitude, bool prev)
 {
-	const float3 dir = GetWeather().wind.direction;
-	const float len = length(dir);
-	return (len > 1e-6f) ? (dir / len) : float3(1, 0, 0);
-}
-float3 sample_wind_object(float3 position, float weight, float amplitude)
-{
+	const float2 rawdir = GetWeather().wind.direction.xz;
+	const float w = GetWeather().wind.speed;
 	[branch]
-	if (weight > 0)
-	{
-		const float n = texture_wind.SampleLevel(sampler_linear_mirror, position * GetWeather().wind.gg_object_space_rcp, 0).r;
-		return n * gg_wind_direction_unit() * weight * amplitude;
-	}
-	else
-	{
+	if (weight <= 0 || amplitude <= 0 || w <= 0 || dot(rawdir, rawdir) < 1e-12)
 		return 0;
-	}
+	const float2 d2 = rawdir * rsqrt(dot(rawdir, rawdir));
+	const float3 d = float3(d2.x, 0, d2.y);
+	const float3 p = float3(-d2.y, 0, d2.x);
+	const float k = saturate(GetWeather().gg_object_independence);
+	const float dt = prev ? GetDeltaTime() : 0.0;   // the previous frame = this frame's state taken back one step
+	const float ph = GetScene().gg_object_sway_phase - w * dt;
+
+	// GUSTS: fixed-axes pattern, carried downwind by the accumulated offset
+	const float2 offset = float2(GetWeather().ocean.gg_object_gust_offset_x, GetWeather().ocean.gg_object_gust_offset_z)
+		- d2 * (w * GG_WIND_GUST_TRAVEL_PER_SPEED * dt);
+	const float2 q = (origin.xz - offset) * (GetWeather().wind.gg_object_space_rcp * 6.28318530718);
+	const float g1 = sin(q.x * 0.81 + q.y * 0.59 + 0.6 * sin(q.y * 0.47 - q.x * 0.21));
+	const float g2 = sin(q.y * 0.93 - q.x * 0.52 + 1.9);
+	const float g3 = sin(q.x * 1.37 - q.y * 0.71 + 4.1);
+	const float tilt = GG_WIND_TILT * (0.5 * g1 + 0.3 * g2 + 0.2 * g3);
+	const float strength = 1.0 + GG_WIND_GUST_DEPTH * (0.5 * g2 - 0.3 * g3 + 0.2 * g1);
+	const float2 s = origin.xz * GG_WIND_SPREAD_RCP;
+	const float spread = GetWeather().gg_object_randomness * 1.5 * (0.6 * sin(s.x * 0.83 + s.y * 0.56 + 0.7) + 0.4 * sin(s.y * 1.12 - s.x * 0.41 + 2.3));
+	float st, ct;
+	sincos(tilt, st, ct);
+	const float3 gust = (GG_WIND_GUST_PEAK_SCALE * strength * sin(ph + spread)) * (ct * d + st * p);
+
+	// OWN: DX11 TreeWave, phased by this tree's position
+	const float phx = GG_WIND_OWN_PHASE(origin, 0.0041, 0.0027, 0.3, -0.0019, 0.0047, 2.1, 0.0113, -0.0071, 0.9);
+	const float phz = GG_WIND_OWN_PHASE(origin, 0.0033, -0.0039, 4.0, 0.0045, 0.0013, 5.2, -0.0067, -0.0109, 1.7);
+	const float phs = GG_WIND_OWN_PHASE(origin, -0.0029, -0.0035, 1.1, 0.0024, -0.0044, 3.3, 0.0097, 0.0081, 2.6);
+	const float ox = 0.335 * (sin(1.5 * ph + phx) + cos(0.8 * ph + phx) + sin(1.2 * ph + phs));
+	const float oz = 0.5 * (sin(ph + phz) + cos(1.5 * ph + phz));
+	const float3 own = ox * d + (GG_WIND_OWN_ACROSS * oz) * p;
+
+	float sk, ck;
+	sincos(k * 1.57079632679, sk, ck);
+	return (gust * ck + own * sk) * (weight * amplitude * saturate(w * 4.0));
 }
-float3 sample_wind_object_prev(float3 position, float weight, float amplitude)
+// origin = the instance's world translation (transformRaw .w column), the same in every caller
+float3 sample_wind_object(float3 origin, float weight, float amplitude)
 {
-	[branch]
-	if (weight > 0)
-	{
-		const float n = texture_wind_prev.SampleLevel(sampler_linear_mirror, position * GetWeather().wind.gg_object_space_rcp, 0).r;
-		return n * gg_wind_direction_unit() * weight * amplitude;
-	}
-	else
-	{
-		return 0;
-	}
+	return gg_object_wind(origin, weight, amplitude, false);
+}
+float3 sample_wind_object_prev(float3 origin, float weight, float amplitude)
+{
+	return gg_object_wind(origin, weight, amplitude, true);
+}
+float3 gg_instance_origin(ShaderTransform raw)
+{
+	return float3(raw.mat0.w, raw.mat1.w, raw.mat2.w);
 }
 
 

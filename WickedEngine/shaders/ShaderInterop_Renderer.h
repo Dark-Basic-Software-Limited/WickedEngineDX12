@@ -50,7 +50,9 @@ struct alignas(16) ShaderScene
 	// GGMAX 3.148: "Specular Shine" (1 = stock, the default; 0 = the DX11 fork's softer highlight face-on) - see
 	// brdf.hlsli BRDF_GetSpecular and lightingHF.hlsli GGShineEnvScale. Took the place of gg_probeparallax_pad1.
 	float gg_specular_shine;
-	int gg_probeparallax_pad2;
+	// GGMAX (Lee 2026-11-05): the trees' sway phase - Wind Speed accumulated over time by wiScene (so a slider change
+	// alters the rate, never jumps the pose), wrapped at 20 pi. Took the place of the unused int gg_probeparallax_pad2.
+	float gg_object_sway_phase;
 
 	ShaderWeather weather;
 

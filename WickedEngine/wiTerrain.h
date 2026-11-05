@@ -114,7 +114,12 @@ namespace wi::terrain
 	// the bake has finished rather than leaving it resident.
 	void gg_ReleaseBakeScratch();
 
-	static constexpr int chunk_width = 64 + 3; // + 3: filler vertices for lod apron and grid perimeter
+	// GGMAX 3.159 (BR-0009 density prototype): 64 -> 128 quads per chunk side, with GG's chunk_scale 80 -> 40 the
+	// chunk footprint and COUNT stay ~the same and the vertex spacing halves. chunk_width-3 must stay a power of two
+	// (the LOD index builder steps by 2^lod) and chunk_width^2 must stay <= 65536 (16-bit chunk + bake indices).
+	static constexpr int chunk_width = 128 + 3; // + 3: filler vertices for lod apron and grid perimeter
+	static_assert(((chunk_width - 3) & (chunk_width - 4)) == 0, "chunk_width - 3 must be a power of two");
+	static_assert(chunk_width * chunk_width <= 65536, "chunk vertex count must fit 16-bit indices");
 	static constexpr float chunk_half_width = (chunk_width - 1) * 0.5f;
 	static constexpr float chunk_width_rcp = 1.0f / (chunk_width - 1);
 	static constexpr uint32_t vertexCount = chunk_width * chunk_width;

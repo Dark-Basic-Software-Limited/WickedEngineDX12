@@ -744,7 +744,7 @@ namespace wi
 			}
 			else
 			{
-				device->BindResource(&mesh.generalBuffer, 0, cmd, mesh.ib.subresource_srv);
+				device->BindResource(&mesh.GetTopologyBuffer(), 0, cmd, mesh.ib.subresource_srv); // GGMAX 3.159 (BR-0009 m1): ib may live in a shared topology
 			}
 			if (mesh.streamoutBuffer.IsValid())
 			{

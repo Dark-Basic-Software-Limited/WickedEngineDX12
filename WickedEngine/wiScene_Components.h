@@ -781,6 +781,34 @@ namespace wi::scene
 		BufferView so_nor;
 		BufferView so_tan;
 		BufferView so_pre;
+		// GGMAX 3.159 (BR-0009 round 2, m1): topology SHARED by meshes whose indices and UVs are byte-identical
+		// (wiTerrain chunks: every chunk copies one static index list and has chunk-local UVs). When set, this
+		// mesh's own generalBuffer holds only the per-mesh streams (positions, normals, tangents...) and ib,
+		// ib_provoke, ib_reorder and vb_uvs are COPIES of the views below - offsets relative to the shared
+		// buffer, descriptors owned by it. Index-buffer binds must go through GetTopologyBuffer()/Alias()/
+		// Allocation(). Runtime only, never serialized; null = stock behaviour for every other mesh.
+		struct SharedTopology
+		{
+			wi::graphics::GPUBuffer buffer;
+			wi::allocator::PageAllocator::Allocation bufferOffsetAllocation;
+			wi::graphics::GPUBuffer bufferOffsetAllocationAlias;
+			BufferView ib_provoke;
+			BufferView ib_reorder;
+			BufferView ib;
+			BufferView vb_uvs;
+			XMFLOAT2 uv_range_min = XMFLOAT2(0, 0);
+			XMFLOAT2 uv_range_max = XMFLOAT2(1, 1);
+			size_t vertex_count = 0;
+			wi::vector<uint32_t> indices;      // CPU copies: Matches() proves a mesh may use this topology
+			wi::vector<XMFLOAT2> uvset_0;
+			wi::vector<XMFLOAT2> uvset_1;
+			bool Matches(const MeshComponent& mesh) const;
+		};
+		std::shared_ptr<SharedTopology> gg_shared_topology;
+		static std::shared_ptr<SharedTopology> CreateSharedTopology(const MeshComponent& prototype);
+		const wi::graphics::GPUBuffer& GetTopologyBuffer() const { return gg_shared_topology ? gg_shared_topology->buffer : generalBuffer; }
+		const wi::allocator::PageAllocator::Allocation& GetTopologyAllocation() const { return gg_shared_topology ? gg_shared_topology->bufferOffsetAllocation : generalBufferOffsetAllocation; }
+		const wi::graphics::GPUBuffer& GetTopologyAlias() const { return gg_shared_topology ? gg_shared_topology->bufferOffsetAllocationAlias : generalBufferOffsetAllocationAlias; }
 		// ★ GGMAX 3.107: which streamout HALVES a skinning dispatch has really written - bit 0 =
 		// the half so_pos started on, bit 1 = the other (matched by offset, because the two swap).
 		// streamoutBuffer is created UNINITIALISED, so a half whose bit is clear holds garbage and

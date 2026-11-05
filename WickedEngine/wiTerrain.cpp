@@ -35,6 +35,21 @@ namespace wi::terrain
 	// the editor/test game always regenerate with BVHs.
 	bool gg_generation_skip_bvh = false;
 
+	// GGMAX 3.159 (BR-0009 round 2, m2): give terrain chunk meshes a CPU triangle pick BVH at all?
+	// true = stock Wicked. GG sets it false in GGTerrainWicked_Init: wiScene's ray Intersects /
+	// IntersectsAll / IntersectsFirst walk a chunk's regular LOD0 grid directly (exact, ~the same
+	// cost as the BVH), so the BVH - 4.46 MB and 36 ms per chunk at 128+3 - buys nothing. Launch-time
+	// only: turning it on at run time would make the heal build every chunk on the main thread.
+	bool gg_terrain_pick_bvh = true;
+
+	// GGMAX 3.159 (BR-0009 round 2, m1): chunk meshes share ONE GPU copy of their byte-identical
+	// topology (all-LOD indices, provoking indices, reorder table, UVs) - see
+	// MeshComponent::SharedTopology. false = stock (every chunk uploads its own). GG sets it at Init.
+	bool gg_share_chunk_topology = false;
+	std::atomic<uint32_t> gg_topology_shared_chunks{ 0 };   // chunk meshes created with the shared topology
+	std::atomic<uint32_t> gg_topology_unshared_chunks{ 0 }; // ... without it (flag off, or Matches() failed)
+	std::atomic<uint32_t> gg_topology_builds{ 0 };          // shared topologies built
+
 	// GGMAX 2.60: skip grass seeding/creation at chunk generation. The Terrain Generator
 	// sets it (user request): grass is invisible at generator view distances, it carries a
 	// known bug there, and the seeding costs ~0.3 ms/chunk. Generator chunks are wiped on
@@ -1007,7 +1022,9 @@ namespace wi::terrain
 				// ~6s of a generator fill). While the generator owns the screen, chunks are MEANT
 				// to be BVH-less (drag picks brute-force; the exit wipe regenerates WITH BVHs), so
 				// the heal honors the same flag. Every other mode: unchanged.
-				if (!gg_generation_skip_bvh && !chunk_mesh->bvh.IsValid())
+				// GGMAX 3.159 (BR-0009 m2): with gg_terrain_pick_bvh off (GG) chunks never get a BVH - the
+				// heal MUST honour that too, or it moves 36 ms/chunk (at 128+3) onto the main thread.
+				if (gg_terrain_pick_bvh && !gg_generation_skip_bvh && !chunk_mesh->bvh.IsValid())
 				{
 					chunk_mesh->SetBVHEnabled(true);
 				}
@@ -1300,8 +1317,19 @@ namespace wi::terrain
 
 					chunk_data.heightmap_data.resize(vertexCount);
 
-					wi::HairParticleSystem grass = grass_properties;
-					grass.vertex_lengths.resize(vertexCount);
+					// GGMAX 3.159 (BR-0009 round 2, m3): seed the engine's per-chunk grass ONLY when engine grass is
+					// enabled - its one consumer is the IsGrassEnabled()-gated placement below. GG disables engine grass
+					// (GGTerrainWicked.cpp SetGrassEnabled(false)) and builds its own hair systems from the chunk mesh, so
+					// the seed (perlin per vertex, vertex_lengths, a CPU copy of the LOD0 list via CreateFromMesh - up to
+					// ~0.6 MB/chunk at 128+3) was pure waste in every GG mode except the generator (2.60 skip). One
+					// snapshot gates the resize, the per-vertex store and the CreateFromMesh, so they can never disagree.
+					const bool gg_seed_grass = IsGrassEnabled() && !gg_generation_skip_grass;
+					wi::HairParticleSystem grass;
+					if (gg_seed_grass)
+					{
+						grass = grass_properties;
+						grass.vertex_lengths.resize(vertexCount);
+					}
 					std::atomic<uint32_t> grass_valid_vertex_count{ 0 };
 
 					// Shadow casting will only be enabled for sloped terrain chunks:
@@ -1423,27 +1451,30 @@ namespace wi::terrain
 
 						XMFLOAT3 vertex_pos(chunk_data.position.x + x, height, chunk_data.position.z + z);
 
-						float spline_factor = 0;
-						if (!chunk_data.spline_blendmap_layers.empty())
+						if (gg_seed_grass) // GGMAX 3.159 (BR-0009 m3): same snapshot as the vertex_lengths resize above
 						{
-							for (auto& y : chunk_data.spline_blendmap_layers)
+							float spline_factor = 0;
+							if (!chunk_data.spline_blendmap_layers.empty())
 							{
-								spline_factor += float(y.pixels[index]) / 255.0f;
+								for (auto& y : chunk_data.spline_blendmap_layers)
+								{
+									spline_factor += float(y.pixels[index]) / 255.0f;
+								}
+								spline_factor /= float(chunk_data.spline_blendmap_layers.size());
 							}
-							spline_factor /= float(chunk_data.spline_blendmap_layers.size());
-						}
 
-						const float grass_noise_frequency = 0.1f;
-						const float grass_noise = gg_generation_skip_grass ? 0.0f : (perlin_noise.compute(vertex_pos.x * grass_noise_frequency, vertex_pos.y * grass_noise_frequency, vertex_pos.z * grass_noise_frequency) * 0.5f + 0.5f); // GGMAX 2.60
-						const float region_grass = std::pow(materialBlendWeights.x * (1 - materialBlendWeights.w), 8.0f) * grass_noise * (1 - saturate(spline_factor));
-						if (region_grass > 0.1f)
-						{
-							grass_valid_vertex_count.fetch_add(1);
-							grass.vertex_lengths[index] = region_grass;
-						}
-						else
-						{
-							grass.vertex_lengths[index] = 0;
+							const float grass_noise_frequency = 0.1f;
+							const float grass_noise = perlin_noise.compute(vertex_pos.x * grass_noise_frequency, vertex_pos.y * grass_noise_frequency, vertex_pos.z * grass_noise_frequency) * 0.5f + 0.5f;
+							const float region_grass = std::pow(materialBlendWeights.x * (1 - materialBlendWeights.w), 8.0f) * grass_noise * (1 - saturate(spline_factor));
+							if (region_grass > 0.1f)
+							{
+								grass_valid_vertex_count.fetch_add(1);
+								grass.vertex_lengths[index] = region_grass;
+							}
+							else
+							{
+								grass.vertex_lengths[index] = 0;
+							}
 						}
 						chunk_data.heightmap_data[index] = uint16_t(inverse_lerp(bottomLevel, topLevel, height) * 65535);
 					});
@@ -1453,16 +1484,31 @@ namespace wi::terrain
 					object.SetCastShadow(slope_cast_shadow.load());
 					mesh.SetDoubleSidedShadow(slope_cast_shadow.load());
 
+					// GGMAX 3.159 (BR-0009 round 2, m1): every chunk's indices (one static list) and UVs (chunk-local) are
+					// byte-identical, so they are uploaded ONCE and shared; each chunk's own GPU buffer keeps only its
+					// positions/normals/tangents (~1.46 -> ~0.34 MB per chunk at 128+3). Built here on the generator job,
+					// like every chunk's CreateRenderData. Matches() guards it: anything different gets the stock path.
+					if (gg_share_chunk_topology)
+					{
+						if (!gg_chunk_topology || !gg_chunk_topology->Matches(mesh))
+						{
+							gg_chunk_topology = wi::scene::MeshComponent::CreateSharedTopology(mesh);
+							gg_topology_builds.fetch_add(1);
+						}
+						mesh.gg_shared_topology = gg_chunk_topology;
+					}
+
 					wi::jobsystem::Execute(ctx, [&](wi::jobsystem::JobArgs args) {
 						wi::Timer gg_t_rd; // GGMAX 2.58: timed inside the async job (overlaps physics below)
 						mesh.CreateRenderData();
+						if (mesh.gg_shared_topology) gg_topology_shared_chunks.fetch_add(1); else gg_topology_unshared_chunks.fetch_add(1); // GGMAX 3.159
 						chunk_data.sphere.center = mesh.aabb.getCenter();
 						chunk_data.sphere.center.x += chunk_data.position.x;
 						chunk_data.sphere.center.y += chunk_data.position.y;
 						chunk_data.sphere.center.z += chunk_data.position.z;
 						chunk_data.sphere.radius = mesh.aabb.getRadius();
 						gg_genprof_renderdata_us.fetch_add(uint64_t(gg_t_rd.elapsed_milliseconds() * 1000.0));
-						if (!gg_generation_skip_bvh) // GGMAX 2.58: 8.2 ms/chunk — the generator skips it
+						if (gg_terrain_pick_bvh && !gg_generation_skip_bvh) // GGMAX 2.58: 8.2 ms/chunk — the generator skips it; 3.159 (BR-0009 m2): GG builds none (grid walk)
 						{
 							wi::Timer gg_t_bvh; // GGMAX 2.58a: SetBVHEnabled BUILDS the CPU triangle BVH synchronously
 							mesh.SetBVHEnabled(true);
@@ -1472,7 +1518,7 @@ namespace wi::terrain
 					});
 
 					// If there were any vertices in this chunk that could be valid for grass, store the grass particle system:
-					if (!gg_generation_skip_grass && grass_valid_vertex_count.load() > 0) // GGMAX 2.60
+					if (gg_seed_grass && grass_valid_vertex_count.load() > 0) // GGMAX 2.60 / 3.159 (BR-0009 m3)
 					{
 						wi::Timer gg_t_grass; // GGMAX 2.58
 						chunk_data.grass = std::move(grass); // the grass will be added to the scene later, only when the chunk is close to the camera (center chunk's neighbors)

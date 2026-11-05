@@ -45,6 +45,11 @@ namespace wi::terrain
 	extern bool  gg_generation_center_override_enabled;
 	extern bool gg_generation_skip_bvh; // GGMAX 2.58: generator-only, see wiTerrain.cpp
 	extern bool gg_generation_skip_grass; // GGMAX 2.60: generator-only, see wiTerrain.cpp
+	extern bool gg_terrain_pick_bvh;      // GGMAX 3.159 (BR-0009 m2): chunk pick BVHs (stock true; GG: false = grid walk)
+	extern bool gg_share_chunk_topology;  // GGMAX 3.159 (BR-0009 m1): chunks share one GPU topology copy (stock false; GG: true)
+	extern std::atomic<uint32_t> gg_topology_shared_chunks;   // GGMAX 3.159: TERRAIN_GENPROF counters
+	extern std::atomic<uint32_t> gg_topology_unshared_chunks;
+	extern std::atomic<uint32_t> gg_topology_builds;
 	void gg_WaitVirtualTextureJob();      // GGMAX 2.94: join the async VT job before any external Terrain teardown
 	extern bool gg_skip_generation_update; // GGMAX 2.94f: set by the GG bridge from its idle gate; skips the ENGINE-side Generation_Update for the same frame
 	extern uint32_t gg_bake_resolution;   // GGMAX 3.02: per-chunk texture size in bake mode (0 = 256)
@@ -494,6 +499,9 @@ namespace wi::terrain
 		int gg_removal_margin = 0;
 		bool generation_high_priority = false; // GGMAX: run the generation job + its per-chunk dispatches on the HIGH priority job pool (Low pool threads are THREAD_PRIORITY_LOWEST and starve while the CPU is busy, e.g. during level load). Set only for burst scenarios like an initial build.
 		std::shared_ptr<Generator> generator;
+		// GGMAX 3.159 (BR-0009 m1): the chunk topology every chunk mesh shares (gg_share_chunk_topology). Touched only
+		// by the generator job (one sequential job); chunk meshes hold their own reference, so it outlives this one.
+		std::shared_ptr<wi::scene::MeshComponent::SharedTopology> gg_chunk_topology;
 
 		wi::vector<VirtualTexture*> virtual_textures_in_use;
 		wi::graphics::Sampler sampler;

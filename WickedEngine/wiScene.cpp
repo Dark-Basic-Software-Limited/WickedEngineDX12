@@ -7671,6 +7671,209 @@ namespace wi::scene
 	std::atomic<unsigned long long> gg_dbg_isect_tris{ 0 };       // triangles actually tested
 	std::atomic<unsigned long long> gg_dbg_isect_skintris{ 0 };   // ...of which CPU-skinned
 
+	// GGMAX 3.159 (BR-0009 round 2, m2): EXACT ray walk over a wiTerrain chunk's LOD0 grid, so terrain chunks need no
+	// CPU triangle pick BVH (4.46 MB and 36 ms per chunk at chunk_width 128+3; wi::terrain::gg_terrain_pick_bvh).
+	// A chunk's LOD0 is the wiTerrain ChunkIndices grid: quad (x,z) = triangles 2*(x*Q+z) and +1 (x outer, z inner),
+	// vertex (x,z) = index x + z*W on an exact XZ lattice, and both triangles of a quad lie inside the quad's XZ cell.
+	// A hit's XZ therefore lies in its triangle's cell, so testing the two triangles of every cell the ray's XZ
+	// projection crosses finds exactly the hits the BVH (LOD0) finds - with the SAME per-triangle code.
+	// Debug: gg_terrain_pick_mode 0 = normal (BVH if built, else grid walk, else brute force), 1 = force the walk on
+	// terrain grids even if a BVH exists, 2 = force brute force on terrain grids (harness TERRAIN_PICK_SELFTEST).
+	int gg_terrain_pick_mode = 0;
+	std::atomic<unsigned long long> gg_dbg_isect_gridwalks{ 0 };  // terrain chunk candidates resolved by the grid walk
+	std::atomic<unsigned long long> gg_dbg_isect_gridcells{ 0 };  // grid cells visited (2 triangles each)
+
+	struct GGTerrainGrid
+	{
+		int Q = 0;                 // quads per side (chunk_width - 1)
+		float x0 = 0, z0 = 0;      // local XZ of vertex (0,0)
+		float step = 0;            // vertex spacing (chunk_scale)
+		float ymin = 0, ymax = 0;  // local height range (mesh AABB)
+		uint32_t indexOffset = 0;  // LOD0 subset index offset
+	};
+
+	// The gate. True only for a wiTerrain chunk (FILTER_TERRAIN object) whose mesh LOD0 is the ChunkIndices grid on an
+	// exact lattice and whose object transform is a pure translation (local ray t == world distance, so the
+	// front-to-back early-outs can compare against world distances). Anything else keeps the stock path.
+	static bool gg_GetTerrainGrid(const ObjectComponent& object, const MeshComponent& mesh, const XMFLOAT4X4& M, GGTerrainGrid& g)
+	{
+		if ((object.GetFilterMask() & wi::enums::FILTER_TERRAIN) == 0)
+			return false;
+		constexpr int W = wi::terrain::chunk_width;
+		constexpr int Q = W - 1;
+		if (mesh.vertex_positions.size() != size_t(W) * size_t(W))
+			return false;
+		if (mesh.subsets_per_lod != 1 || mesh.subsets.empty())
+			return false;
+		const MeshComponent::MeshSubset& s = mesh.subsets[0];
+		if (s.indexCount != uint32_t(Q) * uint32_t(Q) * 6u)
+			return false;
+		if (size_t(s.indexOffset) + size_t(s.indexCount) > mesh.indices.size())
+			return false;
+		auto quadOK = [&](int x, int z)
+		{
+			const uint32_t* t = mesh.indices.data() + s.indexOffset + size_t(x * Q + z) * 6;
+			const uint32_t LL = uint32_t(x + z * W), LR = LL + 1, TL = LL + uint32_t(W), TR = TL + 1;
+			return t[0] == TL && t[1] == LL && t[2] == LR && t[3] == TL && t[4] == LR && t[5] == TR;
+		};
+		if (!quadOK(0, 0) || !quadOK(1, 0) || !quadOK(0, 1) || !quadOK(Q - 1, Q - 1))
+			return false;
+		const float mt = 1e-5f;
+		if (std::abs(M._11 - 1) > mt || std::abs(M._22 - 1) > mt || std::abs(M._33 - 1) > mt ||
+			std::abs(M._12) > mt || std::abs(M._13) > mt || std::abs(M._21) > mt ||
+			std::abs(M._23) > mt || std::abs(M._31) > mt || std::abs(M._32) > mt)
+			return false;
+		const XMFLOAT3& p0 = mesh.vertex_positions[0];
+		const float step = mesh.vertex_positions[1].x - p0.x;
+		if (!(step > 0))
+			return false;
+		const float tol = step * 1e-4f;
+		const XMFLOAT3& pl = mesh.vertex_positions[size_t(W) * size_t(W) - 1];
+		if (std::abs((mesh.vertex_positions[W].z - p0.z) - step) > tol ||
+			std::abs(mesh.vertex_positions[W].x - p0.x) > tol ||
+			std::abs(pl.x - (p0.x + Q * step)) > tol * Q ||
+			std::abs(pl.z - (p0.z + Q * step)) > tol * Q)
+			return false;
+		g.Q = Q;
+		g.x0 = p0.x;
+		g.z0 = p0.z;
+		g.step = step;
+		g.ymin = mesh.aabb._min.y;
+		g.ymax = mesh.aabb._max.y;
+		g.indexOffset = s.indexOffset;
+		return true;
+	}
+
+	// GGMAX 3.159: the same BVH / walk / brute-force choice the ray Intersects functions make, for diagnostics
+	// (harness RAY_COST, which must not report walked chunks as brute-forced triangles).
+	bool gg_TerrainPickUsesWalk(const ObjectComponent& object, const MeshComponent& mesh, const XMFLOAT4X4& M)
+	{
+		GGTerrainGrid g;
+		if (!gg_GetTerrainGrid(object, mesh, M, g))
+			return false;
+		const bool usebvh = mesh.bvh.IsValid() && gg_terrain_pick_mode == 0;
+		return !usebvh && gg_terrain_pick_mode != 2;
+	}
+
+	// Walks the local ray segment [0, tLimit] across the grid COLUMN BY COLUMN along the dominant XZ axis, in increasing
+	// t, calling cell(tri0) for every cell (triangles tri0, tri0+1) the segment crosses in that column, with a one-cell
+	// margin on the minor axis (covers float rounding, exact corner/edge crossings). A (near-)vertical ray visits the
+	// 3x3 cells around its XZ. cell() returning true stops at once (IntersectsFirst). Before each column, stop(tSafe)
+	// is asked with a conservative entry distance: every hit in this or a later column is at t >= tSafe, so a caller
+	// holding a closer hit can stop (front-to-back early-out). The box clip is a robust slab test: a zero direction
+	// component (every editor snap ray has D.y == 0) is a parallel in/out test, never 0 * inf.
+	template<typename CellFn, typename StopFn>
+	static void gg_TerrainGridWalk(const GGTerrainGrid& g, const XMFLOAT3& O, const XMFLOAT3& D, float tLimit, CellFn&& cell, StopFn&& stop)
+	{
+		const float pad = g.step * 1e-3f;
+		const float boxMin[3] = { g.x0 - pad, g.ymin - pad - std::abs(g.ymin) * 1e-5f, g.z0 - pad };
+		const float boxMax[3] = { g.x0 + float(g.Q) * g.step + pad, g.ymax + pad + std::abs(g.ymax) * 1e-5f, g.z0 + float(g.Q) * g.step + pad };
+		const float o[3] = { O.x, O.y, O.z };
+		const float d[3] = { D.x, D.y, D.z };
+		float t0 = 0.0f;
+		float t1 = tLimit;
+		for (int a = 0; a < 3; ++a)
+		{
+			if (std::abs(d[a]) < 1e-12f)
+			{
+				if (!(o[a] >= boxMin[a] && o[a] <= boxMax[a]))
+					return; // parallel to this slab and outside it (also rejects NaN)
+				continue;
+			}
+			const float inv = 1.0f / d[a];
+			float ta = (boxMin[a] - o[a]) * inv;
+			float tb = (boxMax[a] - o[a]) * inv;
+			if (ta > tb)
+				std::swap(ta, tb);
+			t0 = std::max(t0, ta);
+			t1 = std::min(t1, tb);
+			if (!(t0 <= t1))
+				return; // misses the box (also rejects NaN)
+		}
+
+		const float invStep = 1.0f / g.step;
+		const float uA = (O.x + D.x * t0 - g.x0) * invStep;
+		const float vA = (O.z + D.z * t0 - g.z0) * invStep;
+		const float du = D.x * invStep; // cells per unit t
+		const float dv = D.z * invStep;
+		const int Qm1 = g.Q - 1;
+		auto clampi = [](int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); };
+		const bool majorU = std::abs(du) >= std::abs(dv);
+		const float dM = majorU ? du : dv;
+		const float dm = majorU ? dv : du;
+		const float mA = majorU ? uA : vA;
+		const float nA = majorU ? vA : uA;
+		unsigned long long cells = 0;
+		auto visit = [&](int c, int r) -> bool // c = major-axis index, r = minor-axis index
+		{
+			const int x = majorU ? c : r;
+			const int z = majorU ? r : c;
+			cells++;
+			return cell(uint32_t(2 * (x * g.Q + z)));
+		};
+		auto slack = [&](float t) { return 1e-3f * g.step + std::abs(t) * 1e-5f; };
+
+		if (std::abs(dM) * (t1 - t0) < 1e-4f)
+		{
+			// (near-)vertical ray: the whole segment sits over one XZ point
+			if (!stop(t0 - slack(t0)))
+			{
+				const int cu = (int)std::floor(uA);
+				const int cv = (int)std::floor(vA);
+				bool done = false;
+				for (int x = clampi(cu - 1, 0, Qm1); x <= clampi(cu + 1, 0, Qm1) && !done; ++x)
+				{
+					for (int z = clampi(cv - 1, 0, Qm1); z <= clampi(cv + 1, 0, Qm1) && !done; ++z)
+					{
+						cells++;
+						done = cell(uint32_t(2 * (x * g.Q + z)));
+					}
+				}
+			}
+			gg_dbg_isect_gridcells.fetch_add(cells, std::memory_order_relaxed);
+			return;
+		}
+
+		const int s = dM > 0 ? 1 : -1;
+		const float mB = mA + dM * (t1 - t0);
+		// One extra column at EACH end (review fix): mA/mB carry a few ulps of rounding, so a steep ray entering or
+		// leaving within ~1e-4 units of a grid line could otherwise skip its true first/last column - and on a
+		// continuous heightfield a hit lost there is not found in the neighbour. ~12 extra triangle tests per walk.
+		int c = clampi((int)std::floor(mA) - s, 0, Qm1);
+		const int cEnd = clampi((int)std::floor(mB) + s, 0, Qm1);
+		float tPrev = t0; // the early-out uses the PREVIOUS column's computed entry: always at/before this column's true entry
+		for (;;)
+		{
+			// t range of the segment inside column c (major coordinate within [c, c+1])
+			const float mEnter = s > 0 ? std::max(float(c), mA) : std::min(float(c + 1), mA);
+			const float mExit = s > 0 ? std::min(float(c + 1), mB) : std::max(float(c), mB);
+			const float tEnter = t0 + (mEnter - mA) / dM;
+			const float tExit = t0 + (mExit - mA) / dM;
+			// Review fix: tEnter inherits mA's rounding scaled by 1/|dM| (large on steep rays), so testing it directly was
+			// not conservative. The previous column's entry is a whole cell earlier - far beyond any rounding.
+			if (stop(tPrev - slack(tPrev)))
+				break;
+			tPrev = std::max(tPrev, tEnter);
+			const float nEnter = nA + dm * (tEnter - t0);
+			const float nExit = nA + dm * (tExit - t0);
+			const int rLo = clampi((int)std::floor(std::min(nEnter, nExit)) - 1, 0, Qm1);
+			const int rHi = clampi((int)std::floor(std::max(nEnter, nExit)) + 1, 0, Qm1);
+			bool done = false;
+			for (int r = rLo; r <= rHi; ++r)
+			{
+				if (visit(c, r))
+				{
+					done = true;
+					break;
+				}
+			}
+			if (done || c == cEnd)
+				break;
+			c += s;
+		}
+		gg_dbg_isect_gridcells.fetch_add(cells, std::memory_order_relaxed);
+	}
+
 	Scene::RayIntersectionResult Scene::Intersects(const Ray& ray, uint32_t filterMask, uint32_t layerMask, uint32_t lod) const
 	{
 		RayIntersectionResult result;
@@ -7948,7 +8151,12 @@ namespace wi::scene
 					}
 				};
 
-				if (mesh->bvh.IsValid())
+				// GGMAX 3.159 (BR-0009 m2): terrain chunks walk their LOD0 grid (gg_TerrainGridWalk) - every other mesh: stock
+				GGTerrainGrid gg_grid;
+				const bool gg_isgrid = gg_GetTerrainGrid(object, *mesh, matrix_objects[objectIndex], gg_grid);
+				const bool gg_usebvh = mesh->bvh.IsValid() && !(gg_isgrid && gg_terrain_pick_mode != 0);
+				const bool gg_usewalk = gg_isgrid && !gg_usebvh && gg_terrain_pick_mode != 2;
+				if (gg_usebvh)
 				{
 					Ray ray_local = Ray(rayOrigin_local, rayDirection_local);
 
@@ -7962,6 +8170,17 @@ namespace wi::scene
 						const uint32_t indexOffset = subset.indexOffset;
 						intersect_triangle(subsetIndex, indexOffset, triangleIndex);
 					});
+				}
+				else if (gg_usewalk)
+				{
+					XMFLOAT3 gg_o, gg_d;
+					XMStoreFloat3(&gg_o, rayOrigin_local);
+					XMStoreFloat3(&gg_d, rayDirection_local);
+					const uint32_t gg_off = gg_grid.indexOffset;
+					gg_dbg_isect_gridwalks.fetch_add(1, std::memory_order_relaxed);
+					gg_TerrainGridWalk(gg_grid, gg_o, gg_d, ray.TMax,
+						[&](uint32_t tri) { intersect_triangle(0, gg_off, tri); intersect_triangle(0, gg_off, tri + 1); return false; },
+						[&](float tSafe) { return result.distance < tSafe; }); // nothing in this or a later column can be closer
 				}
 				else
 				{
@@ -8211,7 +8430,12 @@ namespace wi::scene
 					}
 				};
 
-				if (mesh->bvh.IsValid())
+				// GGMAX 3.159 (BR-0009 m2): terrain chunks walk their LOD0 grid (gg_TerrainGridWalk) - every other mesh: stock
+				GGTerrainGrid gg_grid;
+				const bool gg_isgrid = gg_GetTerrainGrid(object, *mesh, matrix_objects[objectIndex], gg_grid);
+				const bool gg_usebvh = mesh->bvh.IsValid() && !(gg_isgrid && gg_terrain_pick_mode != 0);
+				const bool gg_usewalk = gg_isgrid && !gg_usebvh && gg_terrain_pick_mode != 2;
+				if (gg_usebvh)
 				{
 					Ray ray_local = Ray(rayOrigin_local, rayDirection_local);
 
@@ -8225,6 +8449,17 @@ namespace wi::scene
 						const uint32_t indexOffset = subset.indexOffset;
 						intersect_triangle(subsetIndex, indexOffset, triangleIndex);
 						});
+				}
+				else if (gg_usewalk)
+				{
+					XMFLOAT3 gg_o, gg_d;
+					XMStoreFloat3(&gg_o, rayOrigin_local);
+					XMStoreFloat3(&gg_d, rayDirection_local);
+					const uint32_t gg_off = gg_grid.indexOffset;
+					gg_dbg_isect_gridwalks.fetch_add(1, std::memory_order_relaxed);
+					gg_TerrainGridWalk(gg_grid, gg_o, gg_d, ray.TMax,
+						[&](uint32_t tri) { intersect_triangle(0, gg_off, tri); intersect_triangle(0, gg_off, tri + 1); return false; },
+						[&](float) { return false; });
 				}
 				else
 				{
@@ -8413,7 +8648,12 @@ namespace wi::scene
 					return false;
 				};
 
-				if (mesh->bvh.IsValid())
+				// GGMAX 3.159 (BR-0009 m2): terrain chunks walk their LOD0 grid (gg_TerrainGridWalk) - every other mesh: stock
+				GGTerrainGrid gg_grid;
+				const bool gg_isgrid = gg_GetTerrainGrid(object, *mesh, matrix_objects[objectIndex], gg_grid);
+				const bool gg_usebvh = mesh->bvh.IsValid() && !(gg_isgrid && gg_terrain_pick_mode != 0);
+				const bool gg_usewalk = gg_isgrid && !gg_usebvh && gg_terrain_pick_mode != 2;
+				if (gg_usebvh)
 				{
 					Ray ray_local = Ray(rayOrigin_local, rayDirection_local);
 
@@ -8427,6 +8667,23 @@ namespace wi::scene
 						const uint32_t indexOffset = subset.indexOffset;
 						return intersect_triangle(subsetIndex, indexOffset, triangleIndex);
 					});
+				}
+				else if (gg_usewalk)
+				{
+					XMFLOAT3 gg_o, gg_d;
+					XMStoreFloat3(&gg_o, rayOrigin_local);
+					XMStoreFloat3(&gg_d, rayDirection_local);
+					const uint32_t gg_off = gg_grid.indexOffset;
+					gg_dbg_isect_gridwalks.fetch_add(1, std::memory_order_relaxed);
+					bool gg_hit = false;
+					gg_TerrainGridWalk(gg_grid, gg_o, gg_d, ray.TMax,
+						[&](uint32_t tri) { gg_hit = intersect_triangle(0, gg_off, tri) || intersect_triangle(0, gg_off, tri + 1); return gg_hit; },
+						[&](float) { return false; });
+					if (gg_hit)
+					{
+						result = true;
+						return true;
+					}
 				}
 				else
 				{

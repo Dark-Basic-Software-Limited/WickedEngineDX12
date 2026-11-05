@@ -712,6 +712,7 @@ namespace wi::scene
 		so_tan = {};
 		so_pre = {};
 		gg_so_written = 0;   // GGMAX 3.107
+		gg_shared_topology = {}; // GGMAX 3.159 (BR-0009 m1): the views above may have pointed into it
 		BLASes.clear();
 		for (MorphTarget& morph : morph_targets)
 		{
@@ -721,7 +722,16 @@ namespace wi::scene
 	}
 	void MeshComponent::CreateRenderData()
 	{
+		// GGMAX 3.159 (BR-0009 m1): a mesh handed a SharedTopology keeps it across the rebuild (DeleteRenderData
+		// clears it) if - and only if - its indices and UVs still match it byte for byte; otherwise stock path.
+		std::shared_ptr<SharedTopology> gg_topo = std::move(gg_shared_topology);
 		DeleteRenderData();
+		if (gg_topo && !gg_topo->Matches(*this))
+		{
+			gg_topo = {};
+		}
+		gg_shared_topology = gg_topo;
+		const bool gg_own_topology = !gg_topo;
 
 		GraphicsDevice* device = wi::graphics::GetDevice();
 
@@ -839,11 +849,17 @@ namespace wi::scene
 
 		// SV_PrimitiveID avoiding workaround: provoking vertex can refer to triangel index
 		//	SV_PrimitiveID needs geometry shader emulation on some platforms (on PC is can happen automatically by driver), but with this that can be avoided.
-		wi::vector<unsigned int> provoke(indices.size()); // mesh needs to be drawn with this as index buffer when SV_PrimitiveID is required
-		wi::vector<unsigned int> reorder(vertex_positions.size() + indices.size() / 3); // This can be used as vertexID lookup from current index
-		reorder.resize(meshopt_generateProvokingIndexBuffer(&provoke[0], &reorder[0], &indices[0], indices.size(), vertex_positions.size()));
+		wi::vector<unsigned int> provoke; // mesh needs to be drawn with this as index buffer when SV_PrimitiveID is required
+		wi::vector<unsigned int> reorder; // This can be used as vertexID lookup from current index
+		if (gg_own_topology) // GGMAX 3.159 (BR-0009 m1): a shared topology already holds both (pure functions of the indices)
+		{
+			provoke.resize(indices.size());
+			reorder.resize(vertex_positions.size() + indices.size() / 3);
+			reorder.resize(meshopt_generateProvokingIndexBuffer(&provoke[0], &reorder[0], &indices[0], indices.size(), vertex_positions.size()));
+		}
 
-		const size_t uv_count = std::max(vertex_uvset_0.size(), vertex_uvset_1.size());
+		// GGMAX 3.159 (BR-0009 m1): with a shared topology the UV stream lives in the shared buffer (0 here)
+		const size_t uv_count = gg_own_topology ? std::max(vertex_uvset_0.size(), vertex_uvset_1.size()) : 0;
 
 		// Bounds computation:
 		XMFLOAT3 _min = XMFLOAT3(std::numeric_limits<float>::max(), std::numeric_limits<float>::max(), std::numeric_limits<float>::max());
@@ -914,7 +930,13 @@ namespace wi::scene
 		// Determine UV range for normalization:
 		size_t uv_stride = sizeof(Vertex_UVS);
 		Format uv_format = Vertex_UVS::FORMAT;
-		if (!vertex_uvset_0.empty() || !vertex_uvset_1.empty())
+		if (!gg_own_topology)
+		{
+			// GGMAX 3.159 (BR-0009 m1): the shared UV stream was quantised against the topology's range
+			uv_range_min = gg_topo->uv_range_min;
+			uv_range_max = gg_topo->uv_range_max;
+		}
+		else if (!vertex_uvset_0.empty() || !vertex_uvset_1.empty())
 		{
 			const XMFLOAT2* uv0_stream = vertex_uvset_0.empty() ? vertex_uvset_1.data() : vertex_uvset_0.data();
 			const XMFLOAT2* uv1_stream = vertex_uvset_1.empty() ? vertex_uvset_0.data() : vertex_uvset_1.data();
@@ -960,7 +982,7 @@ namespace wi::scene
 			AlignTo(vertex_positions.size() * position_stride, alignment) + // position will be first to have 0 offset for flexible alignment!
 			AlignTo(provoke.size() * GetProvokingIndexStride(), alignment) +
 			AlignTo(reorder.size() * GetIndexStride(), alignment) +
-			AlignTo(indices.size() * GetIndexStride(), alignment) +
+			AlignTo((gg_own_topology ? indices.size() : 0) * GetIndexStride(), alignment) + // GGMAX 3.159 (BR-0009 m1)
 			AlignTo(vertex_normals.size() * sizeof(Vertex_NOR), alignment) +
 			AlignTo(vertex_tangents.size() * sizeof(Vertex_TAN), alignment) +
 			AlignTo(uv_count * uv_stride, alignment) +
@@ -1154,66 +1176,69 @@ namespace wi::scene
 				break;
 			}
 
-			// Create provoking index buffer GPU data:
-			if (GetProvokingIndexFormat() == IndexBufferFormat::UINT32)
+			if (gg_own_topology) // GGMAX 3.159 (BR-0009 m1): a shared topology holds the provoke/reorder/index sections
 			{
-				ib_provoke.offset = buffer_offset;
-				ib_provoke.size = provoke.size() * sizeof(uint32_t);
-				uint32_t* indexdata = (uint32_t*)(buffer_data + buffer_offset);
-				buffer_offset += AlignTo(ib_provoke.size, alignment);
-				std::memcpy(indexdata, provoke.data(), ib_provoke.size);
-			}
-			else
-			{
-				ib_provoke.offset = buffer_offset;
-				ib_provoke.size = provoke.size() * sizeof(uint16_t);
-				uint16_t* indexdata = (uint16_t*)(buffer_data + buffer_offset);
-				buffer_offset += AlignTo(ib_provoke.size, alignment);
-				for (size_t i = 0; i < provoke.size(); ++i)
+				// Create provoking index buffer GPU data:
+				if (GetProvokingIndexFormat() == IndexBufferFormat::UINT32)
 				{
-					std::memcpy(indexdata + i, &provoke[i], sizeof(uint16_t));
+					ib_provoke.offset = buffer_offset;
+					ib_provoke.size = provoke.size() * sizeof(uint32_t);
+					uint32_t* indexdata = (uint32_t*)(buffer_data + buffer_offset);
+					buffer_offset += AlignTo(ib_provoke.size, alignment);
+					std::memcpy(indexdata, provoke.data(), ib_provoke.size);
 				}
-			}
-
-			// Create reorder index buffer GPU data:
-			if (GetIndexFormat() == IndexBufferFormat::UINT32)
-			{
-				ib_reorder.offset = buffer_offset;
-				ib_reorder.size = reorder.size() * sizeof(uint32_t);
-				uint32_t* indexdata = (uint32_t*)(buffer_data + buffer_offset);
-				buffer_offset += AlignTo(ib_reorder.size, alignment);
-				std::memcpy(indexdata, reorder.data(), ib_reorder.size);
-			}
-			else
-			{
-				ib_reorder.offset = buffer_offset;
-				ib_reorder.size = reorder.size() * sizeof(uint16_t);
-				uint16_t* indexdata = (uint16_t*)(buffer_data + buffer_offset);
-				buffer_offset += AlignTo(ib_reorder.size, alignment);
-				for (size_t i = 0; i < reorder.size(); ++i)
+				else
 				{
-					std::memcpy(indexdata + i, &reorder[i], sizeof(uint16_t));
+					ib_provoke.offset = buffer_offset;
+					ib_provoke.size = provoke.size() * sizeof(uint16_t);
+					uint16_t* indexdata = (uint16_t*)(buffer_data + buffer_offset);
+					buffer_offset += AlignTo(ib_provoke.size, alignment);
+					for (size_t i = 0; i < provoke.size(); ++i)
+					{
+						std::memcpy(indexdata + i, &provoke[i], sizeof(uint16_t));
+					}
 				}
-			}
 
-			// Create index buffer GPU data:
-			if (GetIndexFormat() == IndexBufferFormat::UINT32)
-			{
-				ib.offset = buffer_offset;
-				ib.size = indices.size() * sizeof(uint32_t);
-				uint32_t* indexdata = (uint32_t*)(buffer_data + buffer_offset);
-				buffer_offset += AlignTo(ib.size, alignment);
-				std::memcpy(indexdata, indices.data(), ib.size);
-			}
-			else
-			{
-				ib.offset = buffer_offset;
-				ib.size = indices.size() * sizeof(uint16_t);
-				uint16_t* indexdata = (uint16_t*)(buffer_data + buffer_offset);
-				buffer_offset += AlignTo(ib.size, alignment);
-				for (size_t i = 0; i < indices.size(); ++i)
+				// Create reorder index buffer GPU data:
+				if (GetIndexFormat() == IndexBufferFormat::UINT32)
 				{
-					std::memcpy(indexdata + i, &indices[i], sizeof(uint16_t));
+					ib_reorder.offset = buffer_offset;
+					ib_reorder.size = reorder.size() * sizeof(uint32_t);
+					uint32_t* indexdata = (uint32_t*)(buffer_data + buffer_offset);
+					buffer_offset += AlignTo(ib_reorder.size, alignment);
+					std::memcpy(indexdata, reorder.data(), ib_reorder.size);
+				}
+				else
+				{
+					ib_reorder.offset = buffer_offset;
+					ib_reorder.size = reorder.size() * sizeof(uint16_t);
+					uint16_t* indexdata = (uint16_t*)(buffer_data + buffer_offset);
+					buffer_offset += AlignTo(ib_reorder.size, alignment);
+					for (size_t i = 0; i < reorder.size(); ++i)
+					{
+						std::memcpy(indexdata + i, &reorder[i], sizeof(uint16_t));
+					}
+				}
+
+				// Create index buffer GPU data:
+				if (GetIndexFormat() == IndexBufferFormat::UINT32)
+				{
+					ib.offset = buffer_offset;
+					ib.size = indices.size() * sizeof(uint32_t);
+					uint32_t* indexdata = (uint32_t*)(buffer_data + buffer_offset);
+					buffer_offset += AlignTo(ib.size, alignment);
+					std::memcpy(indexdata, indices.data(), ib.size);
+				}
+				else
+				{
+					ib.offset = buffer_offset;
+					ib.size = indices.size() * sizeof(uint16_t);
+					uint16_t* indexdata = (uint16_t*)(buffer_data + buffer_offset);
+					buffer_offset += AlignTo(ib.size, alignment);
+					for (size_t i = 0; i < indices.size(); ++i)
+					{
+						std::memcpy(indexdata + i, &indices[i], sizeof(uint16_t));
+					}
 				}
 			}
 
@@ -1248,7 +1273,7 @@ namespace wi::scene
 			}
 
 			// vertexBuffer - UV SETS
-			if (!vertex_uvset_0.empty() || !vertex_uvset_1.empty())
+			if (gg_own_topology && (!vertex_uvset_0.empty() || !vertex_uvset_1.empty())) // GGMAX 3.159 (BR-0009 m1)
 			{
 				const XMFLOAT2* uv0_stream = vertex_uvset_0.empty() ? vertex_uvset_1.data() : vertex_uvset_0.data();
 				const XMFLOAT2* uv1_stream = vertex_uvset_1.empty() ? vertex_uvset_0.data() : vertex_uvset_1.data();
@@ -1475,13 +1500,25 @@ namespace wi::scene
 
 		const Format ib_format = GetIndexFormat() == IndexBufferFormat::UINT32 ? Format::R32_UINT : Format::R16_UINT;
 
-		assert(ib_reorder.IsValid());
-		ib_reorder.subresource_srv = device->CreateSubresource(&generalBuffer, SubresourceType::SRV, ib_reorder.offset, ib_reorder.size, &ib_format);
-		ib_reorder.descriptor_srv = device->GetDescriptorIndex(&generalBuffer, SubresourceType::SRV, ib_reorder.subresource_srv);
+		if (gg_own_topology)
+		{
+			assert(ib_reorder.IsValid());
+			ib_reorder.subresource_srv = device->CreateSubresource(&generalBuffer, SubresourceType::SRV, ib_reorder.offset, ib_reorder.size, &ib_format);
+			ib_reorder.descriptor_srv = device->GetDescriptorIndex(&generalBuffer, SubresourceType::SRV, ib_reorder.subresource_srv);
 
-		assert(ib.IsValid());
-		ib.subresource_srv = device->CreateSubresource(&generalBuffer, SubresourceType::SRV, ib.offset, ib.size, &ib_format);
-		ib.descriptor_srv = device->GetDescriptorIndex(&generalBuffer, SubresourceType::SRV, ib.subresource_srv);
+			assert(ib.IsValid());
+			ib.subresource_srv = device->CreateSubresource(&generalBuffer, SubresourceType::SRV, ib.offset, ib.size, &ib_format);
+			ib.descriptor_srv = device->GetDescriptorIndex(&generalBuffer, SubresourceType::SRV, ib.subresource_srv);
+		}
+		else
+		{
+			// GGMAX 3.159 (BR-0009 m1): COPIES of the shared topology's views - offsets relative to its buffer,
+			// subresources/descriptors owned by it (freeing this mesh's generalBuffer never touches them).
+			ib_provoke = gg_topo->ib_provoke;
+			ib_reorder = gg_topo->ib_reorder;
+			ib = gg_topo->ib;
+			vb_uvs = gg_topo->vb_uvs;
+		}
 
 		assert(vb_pos_wind.IsValid());
 		vb_pos_wind.subresource_srv = device->CreateSubresource(&generalBuffer, SubresourceType::SRV, vb_pos_wind.offset, vb_pos_wind.size, &position_format);
@@ -1497,7 +1534,7 @@ namespace wi::scene
 			vb_tan.subresource_srv = device->CreateSubresource(&generalBuffer, SubresourceType::SRV, vb_tan.offset, vb_tan.size, &Vertex_TAN::FORMAT);
 			vb_tan.descriptor_srv = device->GetDescriptorIndex(&generalBuffer, SubresourceType::SRV, vb_tan.subresource_srv);
 		}
-		if (vb_uvs.IsValid())
+		if (gg_own_topology && vb_uvs.IsValid()) // GGMAX 3.159 (BR-0009 m1): a shared vb_uvs already has its descriptor
 		{
 			vb_uvs.subresource_srv = device->CreateSubresource(&generalBuffer, SubresourceType::SRV, vb_uvs.offset, vb_uvs.size, &uv_format);
 			vb_uvs.descriptor_srv = device->GetDescriptorIndex(&generalBuffer, SubresourceType::SRV, vb_uvs.subresource_srv);
@@ -1540,6 +1577,56 @@ namespace wi::scene
 			CreateStreamoutRenderData();
 		}
 	}
+	// GGMAX 3.159 (BR-0009 round 2, m1): see MeshComponent::SharedTopology (wiScene_Components.h).
+	bool MeshComponent::SharedTopology::Matches(const MeshComponent& mesh) const
+	{
+		if (mesh.vertex_positions.size() != vertex_count)
+			return false; // index/reorder formats key on the vertex count
+		if (mesh.indices.size() != indices.size() ||
+			mesh.vertex_uvset_0.size() != uvset_0.size() ||
+			mesh.vertex_uvset_1.size() != uvset_1.size())
+			return false; // provoke format keys on the index count
+		if (!indices.empty() && std::memcmp(mesh.indices.data(), indices.data(), indices.size() * sizeof(indices[0])) != 0)
+			return false;
+		if (!uvset_0.empty() && std::memcmp(mesh.vertex_uvset_0.data(), uvset_0.data(), uvset_0.size() * sizeof(uvset_0[0])) != 0)
+			return false;
+		if (!uvset_1.empty() && std::memcmp(mesh.vertex_uvset_1.data(), uvset_1.data(), uvset_1.size() * sizeof(uvset_1[0])) != 0)
+			return false;
+		return true;
+	}
+	std::shared_ptr<MeshComponent::SharedTopology> MeshComponent::CreateSharedTopology(const MeshComponent& prototype)
+	{
+		// Build it with the STOCK writer on a scratch mesh that has only the shared streams (no normals, so no
+		// MikkTSpace): the provoke/reorder/index/UV bytes are then identical to what each chunk would have uploaded
+		// itself, by construction. The scratch positions section (vertex_count * 12 B) is wasted, once.
+		MeshComponent tmp;
+		tmp.SetQuantizedPositionsDisabled(true);
+		tmp.vertex_positions = prototype.vertex_positions;
+		tmp.indices = prototype.indices;
+		tmp.vertex_uvset_0 = prototype.vertex_uvset_0;
+		tmp.vertex_uvset_1 = prototype.vertex_uvset_1;
+		tmp.subsets = prototype.subsets;
+		tmp.subsets_per_lod = prototype.subsets_per_lod;
+		tmp.CreateRenderData();
+
+		std::shared_ptr<SharedTopology> t = std::make_shared<SharedTopology>();
+		t->buffer = std::move(tmp.generalBuffer);
+		t->bufferOffsetAllocation = std::move(tmp.generalBufferOffsetAllocation);
+		t->bufferOffsetAllocationAlias = std::move(tmp.generalBufferOffsetAllocationAlias);
+		t->ib_provoke = tmp.ib_provoke;
+		t->ib_reorder = tmp.ib_reorder;
+		t->ib = tmp.ib;
+		t->vb_uvs = tmp.vb_uvs;
+		t->uv_range_min = tmp.uv_range_min;
+		t->uv_range_max = tmp.uv_range_max;
+		t->vertex_count = prototype.vertex_positions.size();
+		t->indices = prototype.indices;
+		t->uvset_0 = prototype.vertex_uvset_0;
+		t->uvset_1 = prototype.vertex_uvset_1;
+		wi::graphics::GetDevice()->SetName(&t->buffer, "MeshComponent::SharedTopology (GGMAX BR-0009)");
+		return t;
+	}
+
 	void MeshComponent::CreateStreamoutRenderData()
 	{
 		GraphicsDevice* device = wi::graphics::GetDevice();
@@ -1657,7 +1744,7 @@ namespace wi::scene
 				geometry.type = RaytracingAccelerationStructureDesc::BottomLevel::Geometry::Type::TRIANGLES;
 				geometry.triangles.vertex_buffer = generalBuffer;
 				geometry.triangles.vertex_byte_offset = vb_pos_wind.offset;
-				geometry.triangles.index_buffer = generalBuffer;
+				geometry.triangles.index_buffer = GetTopologyBuffer(); // GGMAX 3.159 (BR-0009 m1): ib.offset is relative to it
 				geometry.triangles.index_format = GetIndexFormat();
 				geometry.triangles.index_count = subset.indexCount;
 				geometry.triangles.index_offset = ib.offset / GetIndexStride() + subset.indexOffset;

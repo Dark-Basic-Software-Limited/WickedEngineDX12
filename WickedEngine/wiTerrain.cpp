@@ -13,6 +13,8 @@
 #include <mutex>
 #include <thread>
 #include <condition_variable>
+#include <shared_mutex>
+#include "wiTerrain_ggdetail.h"
 #include <string>
 #include <atomic>
 #include <deque>
@@ -610,6 +612,7 @@ namespace wi::terrain
 		uint32_t nmask = 0;                    // edge bits 1:-x 2:+x 4:-z 8:+z set = that neighbour is a detail chunk
 		bool doubleSidedShadow = false;
 		Entity material = INVALID_ENTITY;      // the chunk entity (its material / virtual texture)
+		bool external = false;                 // round 9: an external ring's build - stop before CreateRenderData (the host packs)
 	};
 	// One background build. The record keeps it in flight; done is set last, after mesh and stats are complete.
 	struct GGDetailJob
@@ -709,6 +712,10 @@ namespace wi::terrain
 		int busy = 0;
 	};
 	static GGDetailPool& gg_DetailPool() { static GGDetailPool* p = new GGDetailPool(); return *p; }
+	// round 9: the EXTERNAL ring's own pool (the live pool's Drain - Generation_Restart, teardown - clears ITS queue only)
+	static GGDetailPool& gg_DetailPoolExt() { static GGDetailPool* p = new GGDetailPool(); return *p; }
+	// round 9: the height-data fence (wiTerrain_ggdetail.h). Never destroyed: detached build threads may hold it at exit.
+	std::shared_mutex& gg_DetailHeightLock() { static std::shared_mutex* m = new std::shared_mutex(); return *m; }
 
 	static inline Chunk gg_MakeChunk(int x, int z) { Chunk c; c.x = x; c.z = z; return c; }
 
@@ -901,10 +908,20 @@ namespace wi::terrain
 			need[P(p.x, p.y - ns)] = 1;
 			need[P(p.x, p.y + ns)] = 1;
 		}
+		// round 9: hold the height-data fence SHARED per 64-row block - GameGuru frees arrays its height function reads
+		// (flat areas, the main heightmap) under it EXCLUSIVE, so a level load / terrain reset can never pull them away
+		// mid-sample. Released between blocks so a waiting free gets through within one block.
+		std::shared_lock<std::shared_mutex> gg_hl(gg_DetailHeightLock(), std::defer_lock);
 		for (int pj = 0; pj < NP; ++pj)
 		{
-			if ((pj & 63) == 0 && job.cancelled.load())
-				return;
+			if ((pj & 63) == 0)
+			{
+				if (gg_hl.owns_lock())
+					gg_hl.unlock();
+				if (job.cancelled.load())
+					return;
+				gg_hl.lock();
+			}
 			const float lz = lc(pj - ns);
 			for (int pi = 0; pi < NP; ++pi)
 			{
@@ -920,6 +937,8 @@ namespace wi::terrain
 				h[k] = lerp(in.bottomLevel, in.topLevel, height); // EXACTLY the chunk generator's expression
 			}
 		}
+		if (gg_hl.owns_lock())
+			gg_hl.unlock();
 
 		// 4. vertex attributes
 		mesh.SetQuantizedPositionsDisabled(true); // as the chunk mesh: neighbouring AABBs differ
@@ -952,6 +971,14 @@ namespace wi::terrain
 		job.sample_ms = (float)gg_t_build.elapsed_milliseconds();
 		if (job.cancelled.load())
 			return;
+		if (in.external)
+		{
+			// round 9: an external ring's mesh - the host packs it into its own buffers (wiTerrain_ggdetail.h)
+			job.tris = (uint32_t)(mesh.indices.size() / 3);
+			job.verts = (uint32_t)vc;
+			job.build_ms = (float)gg_t_build.elapsed_milliseconds();
+			return;
+		}
 		wi::Timer gg_t_upload;
 		mesh.CreateRenderData(); // own index buffer: every chunk's LOD topology differs
 		job.upload_ms = (float)gg_t_upload.elapsed_milliseconds();
@@ -1336,6 +1363,42 @@ namespace wi::terrain
 		}
 	}
 
+	// one mesh's topology (see gg_DetailMeshCheck): open edges not on the chunk border, duplicate directed edges,
+	// non-positive triangles in x,z, relative area error against the chunk square
+	static void gg_DetailCheckOne(const MeshComponent& m, float half, int& openInside, int& dupEdges, int& badTris, float& areaErr)
+	{
+		openInside = 0; dupEdges = 0; badTris = 0; areaErr = 0;
+		const double full = double(2.0f * half) * double(2.0f * half);
+		const auto& P = m.vertex_positions;
+		const size_t nt = m.indices.size() / 3;
+		wi::unordered_map<uint64_t, int> edges;
+		edges.reserve(nt * 3);
+		double area = 0;
+		for (size_t k = 0; k < nt; ++k)
+		{
+			const uint32_t i0 = m.indices[k * 3], i1 = m.indices[k * 3 + 1], i2 = m.indices[k * 3 + 2];
+			const XMFLOAT3 &a = P[i0], &b = P[i1], &cc = P[i2];
+			const double cr = double(b.x - a.x) * double(cc.z - a.z) - double(b.z - a.z) * double(cc.x - a.x);
+			if (!(cr > 0)) badTris++;
+			area += 0.5 * cr;
+			edges[(uint64_t(i0) << 32) | i1]++;
+			edges[(uint64_t(i1) << 32) | i2]++;
+			edges[(uint64_t(i2) << 32) | i0]++;
+		}
+		auto onBorder = [&](const XMFLOAT3& p, const XMFLOAT3& q) {
+			return (std::abs(p.x - q.x) < 0.01f && std::abs(std::abs(p.x) - half) < 0.01f) ||
+				(std::abs(p.z - q.z) < 0.01f && std::abs(std::abs(p.z) - half) < 0.01f);
+		};
+		for (auto& [key, count] : edges)
+		{
+			if (count > 1) dupEdges++;
+			const uint32_t i0 = uint32_t(key >> 32), i1 = uint32_t(key & 0xffffffffu);
+			if (edges.find((uint64_t(i1) << 32) | i0) == edges.end() && !onBorder(P[i0], P[i1]))
+				openInside++;
+		}
+		areaErr = float(std::abs(area - full) / full);
+	}
+
 	// GGMAX PROTOTYPE (BR-0009 round 8): watertightness of every DRAWN detail mesh, topologically. Each directed edge
 	// must appear once; an edge with no reverse twin is open and must lie on the chunk border (both ends on the same
 	// side) - an open edge INSIDE the chunk is a crack (a T-junction or hole between LOD tiles). Every triangle must
@@ -1361,36 +1424,333 @@ namespace wi::terrain
 			auto rit = gg_detail_recs.find(c);
 			if (rit != gg_detail_recs.end())
 				*foldTris += (int)rit->second.unexpected;
-			const auto& P = m->vertex_positions;
-			const size_t nt = m->indices.size() / 3;
-			*tris += nt;
-			wi::unordered_map<uint64_t, int> edges;
-			edges.reserve(nt * 3);
-			double area = 0;
-			for (size_t k = 0; k < nt; ++k)
-			{
-				const uint32_t i0 = m->indices[k * 3], i1 = m->indices[k * 3 + 1], i2 = m->indices[k * 3 + 2];
-				const XMFLOAT3 &a = P[i0], &b = P[i1], &cc = P[i2];
-				const double cr = double(b.x - a.x) * double(cc.z - a.z) - double(b.z - a.z) * double(cc.x - a.x);
-				if (!(cr > 0)) (*badTris)++;
-				area += 0.5 * cr;
-				edges[(uint64_t(i0) << 32) | i1]++;
-				edges[(uint64_t(i1) << 32) | i2]++;
-				edges[(uint64_t(i2) << 32) | i0]++;
-			}
-			auto onBorder = [&](const XMFLOAT3& p, const XMFLOAT3& q) {
-				return (std::abs(p.x - q.x) < 0.01f && std::abs(std::abs(p.x) - half) < 0.01f) ||
-					(std::abs(p.z - q.z) < 0.01f && std::abs(std::abs(p.z) - half) < 0.01f);
-			};
-			for (auto& [key, count] : edges)
-			{
-				if (count > 1) (*dupEdges)++;
-				const uint32_t i0 = uint32_t(key >> 32), i1 = uint32_t(key & 0xffffffffu);
-				if (edges.find((uint64_t(i1) << 32) | i0) == edges.end() && !onBorder(P[i0], P[i1]))
-					(*openInside)++;
-			}
-			*areaErr = std::max(*areaErr, float(std::abs(area - full) / full));
+			*tris += m->indices.size() / 3;
+			int oi = 0, de = 0, bt = 0;
+			float ae = 0;
+			gg_DetailCheckOne(*m, half, oi, de, bt, ae);
+			*openInside += oi; *dupEdges += de; *badTris += bt;
+			*areaErr = std::max(*areaErr, ae);
 		}
+		(void)full;
+	}
+
+	// =============================================================================================================
+	// GGMAX PROTOTYPE (BR-0009 round 9): EXTERNAL DETAIL RING (wiTerrain_ggdetail.h). GameGuru's Terrain Bake tears the
+	// live terrain - and the live detail meshes - down and draws its own chunk copies on the 40/80-unit grid (Lee
+	// 2026-11-06: a sculpted spike became a wide pyramid). This ring gives those copies the same near-camera detail:
+	// the live ring's builder (gg_BuildDetailMesh, in.external), tile/LOD rule (gg_DetailTileStep), signature
+	// (gg_DetailSig) and generation-swap rule (a new set publishes only when every ring chunk has its mesh), driven by the
+	// same settings globals, with no Terrain and no entities. Ring chunks facing a chunk the host draws coarse use the
+	// 40-unit edge (factor steps), exactly the host's full perimeter, so the seams hold by construction. No dirty path:
+	// the bake never regenerates in place - an edit marks it stale (Freeze) and it is rebuilt from scratch.
+	// =============================================================================================================
+	bool gg_detail_ext_check = false;
+	struct GGDetailExtJob
+	{
+		GGDetailJob b;
+		std::shared_ptr<GGDetailExtMesh> out;  // set by the build thread before b.done
+	};
+	struct GGDetailExtRing
+	{
+		GGDetailExtDesc desc;
+		wi::unordered_map<Chunk, XMFLOAT3> origin;   // the host's chunks (present = drawn with its full perimeter)
+		struct Rec
+		{
+			std::shared_ptr<const GGDetailExtMesh> drawn;   // in the published set
+			std::shared_ptr<GGDetailExtJob> job;            // a build for the target signature
+		};
+		wi::unordered_map<Chunk, Rec> recs;          // ska flat map: no reference across an insert
+		wi::vector<std::shared_ptr<const GGDetailExtMesh>> published;
+		GGDetailLod L;
+		bool have_centre = false, have_cc = false;
+		Chunk cc;
+		uint32_t pending = 0, pending_frames = 0, swaps = 0, builds = 0;
+		float last_build_ms = 0, max_build_ms = 0;
+		bool frozen = false, failed = false, on = false;
+	};
+
+	GGDetailExtRing* gg_DetailExt_Create(GGDetailExtDesc desc)
+	{
+		GGDetailExtRing* r = new GGDetailExtRing();
+		r->desc = std::move(desc);
+		for (const GGDetailExtChunk& c : r->desc.chunks)
+			r->origin[gg_MakeChunk(c.cx, c.cz)] = c.origin;
+		return r;
+	}
+
+	bool gg_DetailExt_Update(GGDetailExtRing* r, const XMFLOAT3& eye)
+	{
+		if (r == nullptr || r->frozen)
+			return false;
+		bool changed = false;
+		r->on = gg_detail_ring >= 0 && gg_detail_factor >= 2 && !r->failed && (bool)r->desc.pack;
+		const int R = gg_detail_ring;
+		const float stride = float(chunk_width - 1) * r->desc.chunk_scale;
+		const float hyst = std::max(0.0f, gg_detail_lod_hyst);
+		const bool retarget = r->pending == 0 || r->pending_frames > 90;   // as the live ring
+
+		// ring centre + LOD centre: the live ring's rules (gg_UpdateDetailMeshes)
+		const Chunk camc = gg_MakeChunk((int)std::floor(eye.x / stride + 0.5f), (int)std::floor(eye.z / stride + 0.5f));
+		if (!r->on || !r->have_cc)
+		{
+			r->cc = camc;
+			r->have_cc = r->on;
+		}
+		else if (retarget && !(camc == r->cc))
+		{
+			const float reach = 0.5f * stride + hyst;
+			if (std::abs(eye.x - float(r->cc.x) * stride) > reach || std::abs(eye.z - float(r->cc.z) * stride) > reach)
+				r->cc = camc;
+		}
+		const Chunk cc = r->cc;
+		auto inRing = [&](const Chunk& c) { return r->on && std::max(std::abs(c.x - cc.x), std::abs(c.z - cc.z)) <= R; };
+		auto present = [&](const Chunk& c) { return r->origin.find(c) != r->origin.end(); };
+		auto isDetail = [&](const Chunk& c) { return inRing(c) && present(c); };
+
+		GGDetailLod L;
+		L.F = std::min(std::max(gg_detail_factor, 1), 16);
+		L.stride = stride;
+		L.step0 = gg_DetailValidStep(gg_detail_lod_step0, L.F);
+		L.step1 = std::max(L.step0, gg_DetailValidStep(gg_detail_lod_step1, L.F));
+		L.dist0 = std::max(0.0f, gg_detail_lod_dist0);
+		L.dist1 = std::max(L.dist0, gg_detail_lod_dist1);
+		if (!r->on || !r->have_centre || (retarget && (std::abs(eye.x - r->L.cx) > hyst || std::abs(eye.z - r->L.cz) > hyst)))
+		{
+			r->L.cx = std::round(eye.x);
+			r->L.cz = std::round(eye.z);
+			r->have_centre = r->on;
+		}
+		L.cx = r->L.cx;
+		L.cz = r->L.cz;
+		r->L = L;
+
+		if (!r->on)
+		{
+			for (auto& it : r->recs)
+				if (it.second.job)
+					it.second.job->b.cancelled.store(true);
+			r->recs.clear();
+			if (!r->published.empty())
+			{
+				r->published.clear();
+				changed = true;
+			}
+			r->pending = 0;
+			r->pending_frames = 0;
+			return changed;
+		}
+
+		wi::vector<Chunk> ring;
+		for (int d = 0; d <= R; ++d)
+			for (int dz = -d; dz <= d; ++dz)
+				for (int dx = -d; dx <= d; ++dx)
+					if (std::max(std::abs(dx), std::abs(dz)) == d)
+						ring.push_back(gg_MakeChunk(cc.x + dx, cc.z + dz));
+
+		uint32_t pending = 0, launched = 0;
+		uint32_t load = gg_DetailPoolExt().Load();
+		bool blocked = false;
+		wi::vector<Chunk> ready;
+		const float half = chunk_half_width * r->desc.chunk_scale;
+		for (const Chunk& c : ring)
+		{
+			auto oit = r->origin.find(c);
+			if (oit == r->origin.end())
+				continue;   // the host draws nothing there
+			const XMFLOAT3 org = oit->second;
+			uint32_t nmask = 0;
+			if (isDetail(gg_MakeChunk(c.x - 1, c.z))) nmask |= 1;
+			if (isDetail(gg_MakeChunk(c.x + 1, c.z))) nmask |= 2;
+			if (isDetail(gg_MakeChunk(c.x, c.z - 1))) nmask |= 4;
+			if (isDetail(gg_MakeChunk(c.x, c.z + 1))) nmask |= 8;
+			const uint64_t sig = gg_DetailSig(L, c, nmask, 1);   // 1: no chunk entity here
+			GGDetailExtRing::Rec& rec = r->recs[c];             // (may insert: no reference to another record is held)
+			if (rec.job && rec.job->b.sig != sig)
+			{
+				rec.job->b.cancelled.store(true);   // superseded: its result is dropped when it finishes
+				rec.job.reset();
+			}
+			const bool current = rec.drawn && rec.drawn->sig == sig;
+			const bool isReady = rec.job != nullptr && rec.job->b.done.load();
+			if (!current)
+			{
+				pending++;
+				if (!isReady)
+					blocked = true;
+			}
+			if (isReady)
+				ready.push_back(c);
+			if (!current && rec.job == nullptr && launched < (uint32_t)std::max(1, gg_detail_budget) && load < 9)
+			{
+				auto job = std::make_shared<GGDetailExtJob>();
+				GGDetailJob& b = job->b;
+				b.sig = sig;
+				b.in.position = org;
+				b.in.scale = r->desc.chunk_scale;
+				b.in.bottomLevel = r->desc.bottomLevel;
+				b.in.topLevel = r->desc.topLevel;
+				b.in.modifiers = r->desc.modifiers;
+				b.in.L = L;
+				b.in.cx = c.x;
+				b.in.cz = c.z;
+				b.in.nmask = nmask;
+				b.in.external = true;
+				rec.job = job;
+				auto pack = r->desc.pack;   // each job owns a copy: it may outlive the ring
+				const bool check = gg_detail_ext_check;
+				const int cx = c.x, cz = c.z;
+				gg_DetailPoolExt().Push([job, org, half, pack, check, cx, cz] {
+					GGDetailJob& jb = job->b;
+					if (!jb.cancelled.load())
+						gg_BuildDetailMesh(jb);
+					if (!jb.cancelled.load() && jb.verts > 0)
+					{
+						auto m = std::make_shared<GGDetailExtMesh>();
+						m->cx = cx;
+						m->cz = cz;
+						m->sig = jb.sig;
+						m->verts = jb.verts;
+						m->tris = jb.tris;
+						m->unexpected = jb.unexpected;
+						m->build_ms = jb.build_ms;
+						for (int e = 0; e < 4; ++e)
+							gg_DetailBorder(jb.mesh, org, half, e, m->border[e]);
+						if (check)
+							gg_DetailCheckOne(jb.mesh, half, m->openInside, m->dupEdges, m->badTris, m->areaErr);
+						m->gpu = pack(org, jb.mesh);
+						job->out = m;
+					}
+					jb.mesh = MeshComponent();   // the CPU arrays go now, not with the job
+					jb.done.store(true);
+				});
+				launched++;
+				load++;
+			}
+		}
+		r->pending = pending;
+		r->pending_frames = pending > 0 ? r->pending_frames + 1 : 0;
+
+		// publish a COMPLETE generation only (the live rule): the old set draws until every ring chunk has its new mesh
+		if (!blocked)
+		{
+			bool any = false;
+			for (const Chunk& c : ready)
+			{
+				auto rit = r->recs.find(c);
+				if (rit == r->recs.end() || rit->second.job == nullptr)
+					continue;
+				GGDetailExtRing::Rec& rec = rit->second;
+				if (rec.job->out == nullptr || rec.job->out->gpu == nullptr)
+				{
+					r->failed = true;   // pack() could not create the buffers: the host keeps drawing its own grid
+				}
+				else
+				{
+					rec.drawn = rec.job->out;
+					r->builds++;
+					r->last_build_ms = rec.drawn->build_ms;
+					r->max_build_ms = std::max(r->max_build_ms, rec.drawn->build_ms);
+				}
+				rec.job.reset();
+				any = true;
+			}
+			for (auto it = r->recs.begin(); it != r->recs.end();)
+			{
+				if (!inRing(it->first))
+				{
+					if (it->second.job)
+						it->second.job->b.cancelled.store(true);
+					it = r->recs.erase(it);
+					any = true;
+					continue;
+				}
+				++it;
+			}
+			if (r->failed)
+			{
+				for (auto& it : r->recs)
+					if (it.second.job)
+						it.second.job->b.cancelled.store(true);
+				r->recs.clear();
+				r->published.clear();
+				return true;
+			}
+			if (any)
+			{
+				r->published.clear();
+				for (auto& it : r->recs)
+					if (it.second.drawn)
+						r->published.push_back(it.second.drawn);
+				r->swaps++;
+				changed = true;
+			}
+		}
+		return changed;
+	}
+
+	const wi::vector<std::shared_ptr<const GGDetailExtMesh>>& gg_DetailExt_Published(const GGDetailExtRing* r)
+	{
+		static const wi::vector<std::shared_ptr<const GGDetailExtMesh>> none;
+		return r != nullptr ? r->published : none;
+	}
+
+	void gg_DetailExt_Freeze(GGDetailExtRing* r)
+	{
+		if (r == nullptr)
+			return;
+		r->frozen = true;
+		for (auto& it : r->recs)
+		{
+			if (it.second.job)
+			{
+				it.second.job->b.cancelled.store(true);
+				it.second.job.reset();
+			}
+		}
+	}
+
+	void gg_DetailExt_Destroy(GGDetailExtRing* r)
+	{
+		if (r == nullptr)
+			return;
+		gg_DetailExt_Freeze(r);
+		gg_DetailPoolExt().Drain();   // queued builds dropped, running ones finish (each owns its inputs and pack copy)
+		delete r;
+	}
+
+	void gg_DetailExt_GetStats(const GGDetailExtRing* r, GGDetailExtStats& s)
+	{
+		s = GGDetailExtStats();
+		s.threads = gg_DetailPoolExt().Threads();
+		s.poolLoad = gg_DetailPoolExt().Load();
+		if (r == nullptr)
+			return;
+		s.on = r->on;
+		s.frozen = r->frozen;
+		s.failed = r->failed;
+		s.published = (uint32_t)r->published.size();
+		s.pending = r->pending;
+		s.swaps = r->swaps;
+		s.builds = r->builds;
+		for (const auto& m : r->published)
+		{
+			s.tris += m->tris;
+			s.verts += m->verts;
+		}
+		s.last_build_ms = r->last_build_ms;
+		s.max_build_ms = r->max_build_ms;
+		s.centre_x = r->L.cx;
+		s.centre_z = r->L.cz;
+	}
+
+	void gg_DetailPolyCompare(const wi::vector<XMFLOAT2>& A, const wi::vector<XMFLOAT2>& B, float* maxGap, int* tjunctions)
+	{
+		float y = 0;
+		bool exact = false;
+		for (const XMFLOAT2& a : A)
+			if (gg_DetailPolyAt(B, a.x, y, exact)) { *maxGap = std::max(*maxGap, std::abs(a.y - y)); if (!exact) (*tjunctions)++; }
+		for (const XMFLOAT2& b : B)
+			if (gg_DetailPolyAt(A, b.x, y, exact)) { *maxGap = std::max(*maxGap, std::abs(b.y - y)); if (!exact) (*tjunctions)++; }
 	}
 
 	uint32_t gg_terrain_tile_share_mips = 32; // USER-TUNED 2026-07-28: "human scaled" underfoot detail (~4m repeat)

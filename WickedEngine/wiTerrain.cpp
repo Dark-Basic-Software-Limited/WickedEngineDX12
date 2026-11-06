@@ -822,6 +822,67 @@ namespace wi::terrain
 		}
 	}
 
+	// GGMAX PROTOTYPE (BR-0009 round 7): the seam instrument (harness TERRAIN_DETAIL_SEAMS). For every chunk drawing a
+	// detail mesh and each of its 4 edges, compares the DRAWN border against the neighbour's DRAWN border at the same
+	// world XZ: a detail neighbour vertex for vertex, a chunk-mesh neighbour by linear interpolation along its border
+	// strip (full resolution in every LOD list). Reports the largest height gap per kind; 0 (float noise) = watertight.
+	void gg_DetailSeamTest(Terrain* t, float* maxGapDetail, float* maxGapCoarse, float* maxXZ, int* edgesDetail, int* edgesCoarse)
+	{
+		*maxGapDetail = 0; *maxGapCoarse = 0; *maxXZ = 0; *edgesDetail = 0; *edgesCoarse = 0;
+		if (t == nullptr || t->scene == nullptr)
+			return;
+		Scene& scene = *t->scene;
+		auto drawn = [&](const ChunkData& cd, int& width) -> const MeshComponent* {
+			auto it = wi::scene::gg_detail_render_mesh.find(cd.entity);
+			const MeshComponent* m = scene.meshes.GetComponent(it != wi::scene::gg_detail_render_mesh.end() ? it->second : cd.entity);
+			if (m == nullptr) return nullptr;
+			width = (int)std::lround(std::sqrt(double(m->vertex_positions.size())));
+			return (size_t(width) * size_t(width) == m->vertex_positions.size() && width > 1) ? m : nullptr;
+		};
+		// world position of border vertex k of edge e (0:-x 1:+x 2:-z 3:+z) of a W-wide lattice
+		auto border = [](const MeshComponent& m, const XMFLOAT3& p, int W, int e, int k) {
+			int i = 0, j = 0;
+			switch (e) { case 0: i = 0; j = k; break; case 1: i = W - 1; j = k; break; case 2: i = k; j = 0; break; default: i = k; j = W - 1; break; }
+			const XMFLOAT3& v = m.vertex_positions[size_t(i) + size_t(j) * size_t(W)];
+			return XMFLOAT3(v.x + p.x, v.y + p.y, v.z + p.z);
+		};
+		for (auto& [c, cd] : t->chunks)
+		{
+			if (wi::scene::gg_detail_render_mesh.find(cd.entity) == wi::scene::gg_detail_render_mesh.end())
+				continue;
+			int W = 0;
+			const MeshComponent* m = drawn(cd, W);
+			if (m == nullptr) continue;
+			for (int e = 0; e < 4; ++e)
+			{
+				const int dx = e == 0 ? -1 : (e == 1 ? 1 : 0), dz = e == 2 ? -1 : (e == 3 ? 1 : 0);
+				auto nit = t->chunks.find(gg_MakeChunk(c.x + dx, c.z + dz));
+				if (nit == t->chunks.end()) continue;
+				int NW = 0;
+				const MeshComponent* nm = drawn(nit->second, NW);
+				if (nm == nullptr) continue;
+				const int ne = e ^ 1; // the neighbour's matching edge
+				const bool nDetail = wi::scene::gg_detail_render_mesh.find(nit->second.entity) != wi::scene::gg_detail_render_mesh.end();
+				(nDetail ? *edgesDetail : *edgesCoarse) += 1;
+				for (int k = 0; k < W; ++k)
+				{
+					const XMFLOAT3 a = border(*m, cd.position, W, e, k);
+					// along-edge coordinate in the neighbour's lattice: k * (NW-1)/(W-1)
+					const float u = float(k) * float(NW - 1) / float(W - 1);
+					const int k0 = std::min(NW - 2, (int)std::floor(u));
+					const float f = u - float(k0);
+					const XMFLOAT3 b0 = border(*nm, nit->second.position, NW, ne, k0);
+					const XMFLOAT3 b1 = border(*nm, nit->second.position, NW, ne, k0 + 1);
+					const float by = b0.y + (b1.y - b0.y) * f;
+					const float bx = b0.x + (b1.x - b0.x) * f, bz = b0.z + (b1.z - b0.z) * f;
+					float& g = nDetail ? *maxGapDetail : *maxGapCoarse;
+					g = std::max(g, std::abs(a.y - by));
+					*maxXZ = std::max(*maxXZ, std::max(std::abs(a.x - bx), std::abs(a.z - bz)));
+				}
+			}
+		}
+	}
+
 	uint32_t gg_terrain_tile_share_mips = 32; // USER-TUNED 2026-07-28: "human scaled" underfoot detail (~4m repeat)
 	// GGMAX 1.53c: hold — delays the halving ladder by this many rungs before it descends from
 	// the cap, pushing the FIRST visible scale cross-fade ~1.4x further out per +1 while the

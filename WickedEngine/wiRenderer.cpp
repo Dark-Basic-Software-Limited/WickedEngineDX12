@@ -1162,6 +1162,19 @@ bool gg_force_bindpose_tangents = false;
 // GGMAX 1.62e: suspect kill-switch for the streamout-stomping hunt — 0 skips the whole
 // RefreshWetmaps update pass (object + hair loops). Harness SET_WETMAPS <0|1>.
 bool gg_wetmap_updates_enabled = true;
+// GGMAX 3.159 (BR-0009 FPS): RefreshWetmaps updates EVERY object wetmap EVERY frame - for terrain that is every vertex
+// of every chunk in the ring (625 x 17,161 at chunk_width 128+3: 0.75 ms on the desktop, Island Showdown). A chunk
+// whose wetness cannot change is skipped: (1) wholly ABOVE the highest the ocean can reach (or no ocean) and never
+// latched wet - it only dries, from 0, so it stays 0 (no rain); (2) wholly DEEP under the lowest the ocean can reach
+// (by the shader's own shore term, 0.12 x radius) after 4 updates - underwater the shader only max()es toward a
+// depth-independent constant and never dries. Rain disables both. 0 = stock. Harness SET_TERRAINWETCULL.
+int gg_terrain_wetmap_cull = 0;
+int gg_terrain_reflection_lod_offset = 0; // GGMAX 3.159 (BR-0009 FPS): planar reflections draw terrain this many LODs coarser (DrawScene). Harness SET_TERRAINREFLLOD.
+float gg_terrain_wetmap_wave_bound = 1000.0f; // world units the displaced ocean surface may sit above/below waterHeight
+std::atomic<uint64_t> gg_dbg_wetmap_dispatched{ 0 };  // object wetmap dispatches (running totals)
+std::atomic<uint64_t> gg_dbg_wetmap_vertices{ 0 };    // ...their vertices
+std::atomic<uint64_t> gg_dbg_wetmap_skip_dry{ 0 };    // terrain chunks skipped: above the water, never wet
+std::atomic<uint64_t> gg_dbg_wetmap_skip_deep{ 0 };   // terrain chunks skipped: deep under, converged
 // GG "Laptop" mode: how many frames the delayed FAR cascades (1..N) are held between refreshes.
 // 2 = default delayed shadows (far cascades refresh every other frame); 4 = "twice as aggressive"
 // (the editor "Laptop" checkbox). Clamped >=2 at the setter. Cascade 0 always refreshes every frame,
@@ -4000,6 +4013,7 @@ void Workaround(const int bug , CommandList cmd)
 // RenderMeshes at all). Read by the harness DUMP_OUTLINE command via the bridge below.
 std::atomic<uint64_t> gg_dbg_userstencil_draws[RENDERPASS_COUNT] = {};
 std::atomic<uint64_t> gg_dbg_total_draws[RENDERPASS_COUNT] = {};
+std::atomic<uint64_t> gg_dbg_terrain_tris[RENDERPASS_COUNT][2] = {}; // GGMAX 3.159 (BR-0009): [pass][0 main camera, 1 other]
 
 // GGMAX 2.31: per-MESH draw tracer, read back by the harness WHYNOTDRAWN command.
 // Built because a per-object visibility instrument proved insufficient: on the invisible
@@ -4093,6 +4107,7 @@ void RenderMeshes(
 		uint8_t userStencilRefOverride = 0;
 		bool forceAlphatestForDithering = false;
 		uint8_t lod = 0;
+		bool gg_terrain = false; // GGMAX 3.159 (BR-0009): a wiTerrain chunk batch (gg_dbg_terrain_tris)
 		AABB aabb;
 	} instancedBatch = {};
 
@@ -4544,6 +4559,12 @@ void RenderMeshes(
 			{
 				gg_polycount_accum.fetch_add(uint64_t(subset.indexCount / 3u) * instancedBatch.instanceCount, std::memory_order_relaxed);
 			}
+			// GGMAX 3.159 (BR-0009 FPS hunt): terrain chunk triangles per render pass (main camera / other) - POLYS sees
+			// only the main colour pass, but the prepass, reflections and shadows draw chunks too. Running totals.
+			if (instancedBatch.gg_terrain && renderPass < RENDERPASS_COUNT)
+			{
+				gg_dbg_terrain_tris[renderPass][(flags & DRAWSCENE_MAINCAMERA) ? 0 : 1].fetch_add(uint64_t(subset.indexCount / 3u) * instancedBatch.instanceCount * ((pso_backside != nullptr && pso_backside->IsValid()) ? 2u : 1u), std::memory_order_relaxed);
+			}
 
 			if (pso_backside != nullptr &&pso_backside->IsValid())
 			{
@@ -4601,6 +4622,7 @@ void RenderMeshes(
 			instancedBatch.forceAlphatestForDithering = 0;
 			instancedBatch.aabb = AABB();
 			instancedBatch.lod = lod;
+			instancedBatch.gg_terrain = (instance.GetFilterMask() & FILTER_TERRAIN) != 0; // GGMAX 3.159
 		}
 
 		const float dither = gg_no_fade ? instance.GetTransparency() : std::max(instance.GetTransparency(), std::max(0.0f, batch.GetDistance() - instance.fadeDistance) / instance.radius);
@@ -9536,7 +9558,18 @@ void DrawScene(
 			}
 
 			if (ggQ) gg_dbg_watch_q[renderPass][GG_Q_ADDED].fetch_add(1, std::memory_order_relaxed);
-			renderQueue.add(object.mesh_index, instanceIndex, distance, object.sort_bits);
+			// GGMAX 3.159 (BR-0009 FPS): the planar-reflection passes (the only DrawScene callers that pass
+			// SKIP_PLANAR_REFLECTION_OBJECTS - depth prepass and colour alike, so they agree) draw terrain chunks
+			// gg_terrain_reflection_lod_offset LODs coarser than the main view. The reflection is frustum-culled only
+			// and renders at a fraction of the screen, so the main-view LOD over-tessellates it. 0 = stock.
+			uint8_t gg_lod_override = 0xFF;
+			if (skip_planar_reflection_objects && gg_terrain_reflection_lod_offset > 0 && (object.GetFilterMask() & FILTER_TERRAIN))
+			{
+				const uint32_t gg_lc = vis.scene->meshes[object.mesh_index].GetLODCount();
+				if (gg_lc > 1)
+					gg_lod_override = (uint8_t)std::min<uint32_t>(gg_lc - 1, uint32_t(object.lod) + uint32_t(gg_terrain_reflection_lod_offset));
+			}
+			renderQueue.add(object.mesh_index, instanceIndex, distance, object.sort_bits, 0xFF, gg_lod_override);
 		}
 		if (!renderQueue.empty())
 		{
@@ -13484,6 +13517,7 @@ void RefreshWetmaps(const Visibility& vis, CommandList cmd)
 		return;
 
 	device->EventBegin("RefreshWetmaps", cmd);
+	auto gg_wetrange = wi::profiler::BeginRangeGPU("RefreshWetmaps", cmd); // GGMAX 3.159: it was invisible to the profiler (GPU idle)
 
 	BindCommonResources(cmd);
 	device->BindComputeShader(&shaders[CSTYPE_WETMAP_UPDATE], cmd);
@@ -13505,10 +13539,50 @@ void RefreshWetmaps(const Visibility& vis, CommandList cmd)
 		if (push.wetmap < 0)
 			continue;
 
+		// GGMAX 3.159 (BR-0009 FPS): terrain chunks whose wetness cannot change (see gg_terrain_wetmap_cull)
+		if ((object.GetFilterMask() & FILTER_TERRAIN) && objectIndex < vis.scene->aabb_objects.size())
+		{
+			const AABB& gg_box = vis.scene->aabb_objects[objectIndex];
+			const bool gg_ocean = vis.scene->weather.IsOceanEnabled();
+			const float gg_wh = vis.scene->weather.oceanParameters.waterHeight;
+			// the bound is never below the ocean's own hard displacement bound (review: typed-in extreme Tile/Wave sizes
+			// reach ~2400 units); deep counts only while the ocean really displaces (no displacement map = the shader dries)
+			const float gg_bound = std::max(gg_terrain_wetmap_wave_bound, vis.scene->ocean.gg_height_bound);
+			const bool gg_above = !gg_ocean || gg_box._min.y > gg_wh + gg_bound;
+			const bool gg_deep = gg_ocean && vis.scene->ocean.IsValid() && gg_box._max.y < gg_wh - gg_bound - 0.12f * object.radius;
+			if (gg_terrain_wetmap_cull != 0 && !(push.rain_amount > 0))
+			{
+				if (gg_above && !object.gg_wetmap_latched)
+				{
+					gg_dbg_wetmap_skip_dry.fetch_add(1, std::memory_order_relaxed);
+					continue;
+				}
+				if (gg_deep && object.gg_wetmap_deep_updates >= 4)
+				{
+					gg_dbg_wetmap_skip_deep.fetch_add(1, std::memory_order_relaxed);
+					continue;
+				}
+			}
+			// state is kept whether or not the cull is on, so switching it on mid-session is safe
+			if (!gg_above || push.rain_amount > 0)
+				object.gg_wetmap_latched = true; // from here it may hold wetness, so it must keep updating to dry
+			if (gg_deep)
+			{
+				if (object.gg_wetmap_deep_updates < 255)
+					object.gg_wetmap_deep_updates++;
+			}
+			else
+			{
+				object.gg_wetmap_deep_updates = 0;
+			}
+		}
+
 		push.instanceID = objectIndex;
 		device->PushConstants(&push, sizeof(push), cmd);
 
 		device->Dispatch((vertexCount + 63u) / 64u, 1, 1, cmd);
+		gg_dbg_wetmap_dispatched.fetch_add(1, std::memory_order_relaxed);
+		gg_dbg_wetmap_vertices.fetch_add(vertexCount, std::memory_order_relaxed);
 	}
 
 	// Note: only visible hair particles will be updated, becasue invisible ones will not have valid vertices
@@ -13534,6 +13608,7 @@ void RefreshWetmaps(const Visibility& vis, CommandList cmd)
 		device->Dispatch((vertexCount + 63u) / 64u, 1, 1, cmd);
 	}
 
+	wi::profiler::EndRange(gg_wetrange); // GGMAX 3.159
 	device->EventEnd(cmd);
 }
 

@@ -5746,6 +5746,8 @@ namespace wi::scene
 					device->CreateBuffer(&desc, nullptr, &object.wetmap);
 					device->SetName(&object.wetmap, "wetmap");
 					object.wetmap_cleared = false;
+					object.gg_wetmap_latched = false; // GGMAX 3.159: a fresh (zeroed) wetmap has never been wet
+					object.gg_wetmap_deep_updates = 0;
 				}
 				else if(!object.IsWetmapEnabled() && object.wetmap.IsValid())
 				{

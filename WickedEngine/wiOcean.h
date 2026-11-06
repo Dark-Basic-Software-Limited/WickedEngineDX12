@@ -79,6 +79,11 @@ namespace wi
 
 		bool IsValid() const { return displacementMap.IsValid(); }
 
+		// GGMAX 3.159 (BR-0009): a HARD upper bound on |vertical displacement| for these params, set by Create:
+		// height = Re(sum_k ht(k) e^ikx) with |ht(k)| <= |h0(k)| + |h0(-k)|, so |height| <= 2 * sum |h0|. The terrain wetmap
+		// cull (wiRenderer RefreshWetmaps) widens its wave bound to it. 0 until the ocean is created.
+		float gg_height_bound = 0.0f;
+
 		// occlusion result history bitfield (32 bit->32 frame history)
 		mutable uint32_t occlusionHistory = ~0u;
 		mutable int occlusionQueries[wi::graphics::GraphicsDevice::GetBufferCount()];

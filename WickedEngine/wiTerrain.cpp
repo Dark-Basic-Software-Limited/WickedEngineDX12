@@ -42,6 +42,10 @@ namespace wi::terrain
 	// only: turning it on at run time would make the heal build every chunk on the main thread.
 	bool gg_terrain_pick_bvh = true;
 
+	// GGMAX 3.159 (BR-0009 FPS): the game's per-chunk LOD bias rule (world AABB -> lod_bias), applied to chunks the
+	// moment they merge. nullptr = stock (terrain.lod_bias). GG also re-applies it every frame for camera movement.
+	float (*gg_chunk_lod_bias_fn)(const XMFLOAT3& aabb_min, const XMFLOAT3& aabb_max) = nullptr;
+
 	// GGMAX 3.159 (BR-0009 round 2, m1): chunk meshes share ONE GPU copy of their byte-identical
 	// topology (all-LOD indices, provoking indices, reorder table, UVs) - see
 	// MeshComponent::SharedTopology. false = stock (every chunk uploads its own). GG sets it at Init.
@@ -890,6 +894,20 @@ namespace wi::terrain
 		// lift the merge_pending flags so mesh-baking consumers may process these chunks
 		for (auto it = chunks.begin(); it != chunks.end(); it++)
 		{
+			// GGMAX 3.159 (BR-0009 FPS, review A1): a chunk merged THIS frame gets the game's LOD bias before the LOD
+			// is computed (RunObjectUpdateSystem runs after this), not one frame late at terrain.lod_bias - no pop.
+			if (it->second.merge_pending && gg_chunk_lod_bias_fn != nullptr)
+			{
+				ObjectComponent* gg_o = scene->objects.GetComponent(it->second.entity);
+				const MeshComponent* gg_m = scene->meshes.GetComponent(it->second.entity);
+				if (gg_o != nullptr && gg_m != nullptr)
+				{
+					const XMFLOAT3& p = it->second.position;
+					const XMFLOAT3 mn(gg_m->aabb._min.x + p.x, gg_m->aabb._min.y + p.y, gg_m->aabb._min.z + p.z);
+					const XMFLOAT3 mx(gg_m->aabb._max.x + p.x, gg_m->aabb._max.y + p.y, gg_m->aabb._max.z + p.z);
+					gg_o->lod_bias = gg_chunk_lod_bias_fn(mn, mx);
+				}
+			}
 			it->second.merge_pending = false;
 		}
 

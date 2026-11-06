@@ -1275,6 +1275,11 @@ namespace wi::scene
 
 		uint16_t lod = 0;
 		mutable bool wetmap_cleared = false;
+		// GGMAX 3.159 (BR-0009 FPS): wetmap cull state for terrain chunks (wiRenderer RefreshWetmaps). latched = this
+		// wetmap has had an update that could make it non-zero (so it must keep updating to dry); deep_updates = updates
+		// spent while wholly deep under water (converges to a constant). Runtime only; reset when the buffer is created.
+		mutable bool gg_wetmap_latched = false;
+		mutable uint8_t gg_wetmap_deep_updates = 0;
 		bool mesh_blend_required = false;
 
 		// these will only be valid for a single frame:

@@ -46,6 +46,7 @@ namespace wi::terrain
 	extern bool gg_generation_skip_bvh; // GGMAX 2.58: generator-only, see wiTerrain.cpp
 	extern bool gg_generation_skip_grass; // GGMAX 2.60: generator-only, see wiTerrain.cpp
 	extern bool gg_terrain_pick_bvh;      // GGMAX 3.159 (BR-0009 m2): chunk pick BVHs (stock true; GG: false = grid walk)
+	extern float (*gg_chunk_lod_bias_fn)(const XMFLOAT3& aabb_min, const XMFLOAT3& aabb_max); // GGMAX 3.159 (BR-0009 FPS): per-chunk LOD bias at merge
 	extern bool gg_share_chunk_topology;  // GGMAX 3.159 (BR-0009 m1): chunks share one GPU topology copy (stock false; GG: true)
 	extern std::atomic<uint32_t> gg_topology_shared_chunks;   // GGMAX 3.159: TERRAIN_GENPROF counters
 	extern std::atomic<uint32_t> gg_topology_unshared_chunks;

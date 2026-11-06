@@ -1586,6 +1586,11 @@ namespace wi::renderer
 	extern bool gg_force_bindpose_tangents;
 	// GGMAX 1.62e: wetmap update pass kill-switch (streamout-stomp suspect A/B; SET_WETMAPS)
 	extern bool gg_wetmap_updates_enabled;
+	extern int gg_terrain_wetmap_cull;               // GGMAX 3.159 (BR-0009 FPS): skip terrain wetmaps that cannot change
+	extern float gg_terrain_wetmap_wave_bound;
+	extern int gg_terrain_reflection_lod_offset; // GGMAX 3.159 (BR-0009 FPS)
+	extern std::atomic<uint64_t> gg_dbg_wetmap_dispatched, gg_dbg_wetmap_vertices, gg_dbg_wetmap_skip_dry, gg_dbg_wetmap_skip_deep;
+	extern std::atomic<uint64_t> gg_dbg_terrain_tris[wi::enums::RENDERPASS_COUNT][2]; // GGMAX 3.159: terrain triangles per pass [main cam, other]
 
 };
 

@@ -122,6 +122,13 @@ namespace wi
 		wi::vector<XMFLOAT2> h0_data(height_map_size);
 		wi::vector<float> omega_data(height_map_size);
 		initHeightMap(h0_data.data(), omega_data.data());
+		{
+			// GGMAX 3.159 (BR-0009): see gg_height_bound (wiOcean.h)
+			double gg_sum = 0;
+			for (const XMFLOAT2& h : h0_data)
+				gg_sum += std::sqrt(double(h.x) * h.x + double(h.y) * h.y);
+			gg_height_bound = float(2.0 * gg_sum);
+		}
 
 		int hmap_dim = params.dmap_dim;
 		int input_full_size = (hmap_dim + 4) * (hmap_dim + 1);

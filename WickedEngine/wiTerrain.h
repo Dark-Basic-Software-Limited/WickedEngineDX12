@@ -116,6 +116,10 @@ namespace wi::terrain
 	uint32_t gg_BakeMipCount(uint32_t resolution);
 	// GGMAX 3.113: terrain compositor SPLAT blend - weights are averaged, not stacked as opacities.
 	extern bool gg_splat_blend;
+	// GGMAX PROTOTYPE (BR-0009 round 6): GPU blendmap at half resolution, (chunk_width-1)/2+1 texels a side
+	// (66 at 131): texel j = vertex 2j, so border texels ARE the border vertices (chunk seams stay closed).
+	// CPU layers stay per-vertex. Stock off; GameGuru sets it. Only CreateChunkRegionTexture reads it.
+	extern bool gg_blendmap_half_res;
 	// Frees the shared uncompressed bake scratch - ~340 MB at 8192 with mips, so call it once
 	// the bake has finished rather than leaving it resident.
 	void gg_ReleaseBakeScratch();

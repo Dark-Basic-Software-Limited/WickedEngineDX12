@@ -494,6 +494,12 @@ namespace wi::terrain
 	// push.gg_tile_share bit 0): blendmap weights are splat weights summing to 1 and are AVERAGED, instead of
 	// the stock front-to-back opacity stack. GameGuru sets it (its auto-blend writes DX11 splat weights).
 	bool gg_splat_blend = false;
+	bool gg_blendmap_half_res = false; // GGMAX PROTOTYPE (BR-0009 round 6), see wiTerrain.h
+	// texels a side of the GPU blendmap (every reader samples it at normalised chunk UV, never by texel index)
+	static inline uint32_t gg_BlendmapWidth()
+	{
+		return gg_blendmap_half_res ? uint32_t((chunk_width - 1) / 2 + 1) : uint32_t(chunk_width);
+	}
 	uint32_t gg_terrain_tile_share_mips = 32; // USER-TUNED 2026-07-28: "human scaled" underfoot detail (~4m repeat)
 	// GGMAX 1.53c: hold — delays the halving ladder by this many rungs before it descends from
 	// the cap, pushing the FIRST visible scale cross-fade ~1.4x further out per +1 while the
@@ -1875,11 +1881,12 @@ namespace wi::terrain
 		}
 
 		const uint32_t required_layers = uint32_t(chunk_data.blendmap_layers.size() + chunk_data.spline_blendmap_layers.size());
-		if (!chunk_data.blendmap.IsValid() || chunk_data.blendmap.desc.array_size != required_layers)
+		const uint32_t gg_bw = gg_BlendmapWidth(); // GGMAX PROTOTYPE (BR-0009 round 6): 66 at 131 when half-res is on
+		if (!chunk_data.blendmap.IsValid() || chunk_data.blendmap.desc.array_size != required_layers || chunk_data.blendmap.desc.width != gg_bw)
 		{
 			TextureDesc desc;
-			desc.width = (uint32_t)chunk_width;
-			desc.height = (uint32_t)chunk_width;
+			desc.width = gg_bw;
+			desc.height = gg_bw;
 			desc.array_size = required_layers;
 			desc.format = Format::R8_UNORM;
 			desc.bind_flags = BindFlag::SHADER_RESOURCE;
@@ -1895,6 +1902,55 @@ namespace wi::terrain
 			{
 				data[offset + i].data_ptr = chunk_data.spline_blendmap_layers[i].pixels.data();
 				data[offset + i].row_pitch = chunk_width * sizeof(uint8_t);
+			}
+
+			// GGMAX PROTOTYPE (BR-0009 round 6): half-res upload. Texel (tx,ty) is centred on vertex (2tx,2ty); interior
+			// texels take a [1 2 1]x[1 2 1] tent (point decimation would drop odd-vertex paint strokes), border rows and
+			// columns filter ALONG the edge only and corners are point samples - so a border texel is built from border
+			// vertices alone, which neighbouring chunks share: seams stay closed. ("Centred on vertex 2tx" is the CPU side: the
+			// readers sample at uv = i/130 with no texel-centre remap - the stock convention - so on screen a texel sits up to
+			// ~1 vertex (~39 units at scale 40) from vertex 2tx near the chunk edges: the same world error as main's 67-texel
+			// map at scale 80. A remap (uv*(bw-1)+0.5)/bw in all three readers would remove it; review 11-06.) HEAP scratch (the generator thread's
+			// frame is already large); CreateTexture copies initial data before it returns, so it may die with the scope.
+			wi::vector<uint8_t> gg_half;
+			const uint32_t W = (uint32_t)chunk_width;
+			if (gg_bw != W && required_layers > 0)
+			{
+				gg_half.resize(size_t(required_layers) * gg_bw * gg_bw);
+				for (uint32_t l = 0; l < required_layers; ++l)
+				{
+					const wi::vector<uint8_t>& px = l < offset ? chunk_data.blendmap_layers[l].pixels : chunk_data.spline_blendmap_layers[l - offset].pixels;
+					uint8_t* dst = gg_half.data() + size_t(l) * gg_bw * gg_bw;
+					if (px.size() != size_t(W) * W) { std::memset(dst, 0, size_t(gg_bw) * gg_bw); } // wrong-sized layer: empty, never an overread
+					else
+					{
+						for (uint32_t ty = 0; ty < gg_bw; ++ty)
+						{
+							const uint32_t vy = 2 * ty;
+							const bool yEdge = ty == 0 || ty == gg_bw - 1;
+							for (uint32_t tx = 0; tx < gg_bw; ++tx)
+							{
+								const uint32_t vx = 2 * tx;
+								const bool xEdge = tx == 0 || tx == gg_bw - 1;
+								uint32_t sum = 0, wsum = 0;
+								for (int dy = yEdge ? 0 : -1; dy <= (yEdge ? 0 : 1); ++dy)
+								{
+									const uint32_t wy = dy == 0 ? 2u : 1u;
+									const uint8_t* row = px.data() + size_t(vy + dy) * W;
+									for (int dx = xEdge ? 0 : -1; dx <= (xEdge ? 0 : 1); ++dx)
+									{
+										const uint32_t w = wy * (dx == 0 ? 2u : 1u);
+										sum += w * row[vx + dx];
+										wsum += w;
+									}
+								}
+								dst[size_t(ty) * gg_bw + tx] = uint8_t((sum + wsum / 2) / wsum);
+							}
+						}
+					}
+					data[l].data_ptr = dst;
+					data[l].row_pitch = gg_bw * sizeof(uint8_t);
+				}
 			}
 
 			bool success = device->CreateTexture(&desc, data.data(), &chunk_data.blendmap);
@@ -1976,7 +2032,8 @@ namespace wi::terrain
 				const uint32_t gg_req_layers = uint32_t(chunk_data.blendmap_layers.size() + chunk_data.spline_blendmap_layers.size());
 				const bool gg_will_create =
 					(!chunk_data.heightmap.IsValid() && !chunk_data.heightmap_data.empty()) ||
-					(!chunk_data.blendmap.IsValid() || chunk_data.blendmap.desc.array_size != gg_req_layers);
+					(!chunk_data.blendmap.IsValid() || chunk_data.blendmap.desc.array_size != gg_req_layers ||
+					 chunk_data.blendmap.desc.width != gg_BlendmapWidth()); // GGMAX PROTOTYPE (BR-0009 round 6): mirror
 				if (gg_will_create)
 				{
 					wi::Timer gg_t_regionmain;

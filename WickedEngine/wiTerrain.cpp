@@ -545,6 +545,45 @@ namespace wi::terrain
 	float gg_detail_lod_dist0 = 1500;   // world units, LOD centre -> nearest point of a tile (Lee 2026-11-06 19:15: 1500 / 3750;
 	float gg_detail_lod_dist1 = 3750;   // GG drives both from the per-level Terrain Detail Distance, dist1 = 2.5 x dist0)
 	float gg_detail_lod_hyst = 400;     // the LOD / ring centre follows the camera once it strays this far
+	// GGMAX round 10 (Lee 2026-11-06: "blend the normals/lighting ... a gaussian effect"): GG's sculpt / heightmap data is
+	// BILINEAR on its own grid (the 4096 sculpt map over the editable area = ~24 units a texel at the default size), so
+	// the surface's slope jumps at every texel edge; normals from +-8-unit differences reproduce those jumps and the
+	// lighting shows hard, triangle-like facets although the shape is right. > 0 = each detail vertex's normal is a Sobel
+	// (smoothed) slope at +-this many world units instead: positions untouched, the shading rolls over the texel edges.
+	// 0 = the round-8 central differences at the finest spacing. World units; GG sets it (harness SET_TERRAINNORMALSMOOTH).
+	float gg_detail_normal_radius = 0.0f;
+	// GGMAX round 10t (Lee 2026-11-06, the "fingers" at the foot of a steep sculpt): the detail meshes' TANGENT was the
+	// chunk convention corner[x+1] - corner[z+1] = (s, h(x+s,z) - h(x,z+s), -s) - a one-sided difference between two
+	// samples s apart in different directions. On a steep wall's foot one sample lands on the ground and the other up
+	// the wall, so the tangent flipped between up and down from vertex to vertex; interpolated over the long wall
+	// triangles it turned the material normal map's x axis around in saw-teeth (TANGENTVIS 1) = the fingers in the
+	// lighting. 1 = the same convention taken from the vertex NORMAL, T = (n.y, n.z - n.x, -n.y) normalised: the
+	// diagonal direction (1, dh/dx - dh/dz, -1) of the surface the normal describes - identical to first order on gentle
+	// ground, orthogonal to N by construction, and as smooth as the normal. 0 = the old difference (A/B).
+	int gg_detail_tangent_from_normal = 1;
+	// GGMAX round 10c (Lee 2026-11-06, the "fingers" at the foot of a steep sculpt - the cause found by elimination:
+	// not the normals, not the tangent, not GG's bilinear creases; AO OFF removes them and a 4-unit lattice halves
+	// them): the detail lattice POINT-samples the height, and a sharp crease (a wall meeting the ground) that runs
+	// obliquely across the lattice is aliased - every vertex lands either on the ground or up the wall, the foot
+	// becomes a staircase, and the long wall triangles rising from each step are real ridges that AO then darkens.
+	// 1 = anti-alias the creases: a vertex whose +-step0 second difference exceeds gg_detail_crease_k x the vertex
+	// spacing (the slope bends by more than k within a cell) takes a 5 x 5 tent-weighted AREA sample of the height
+	// over +-2/3 of the spacing instead of its point sample - the crease's sub-cell position survives as intermediate
+	// heights, so the foot runs smoothly instead of in steps. Only crease vertices pay (24 extra samples each); gentle
+	// ground is untouched (point samples, bit-identical). Chunk-edge vertices keep their point samples (both chunks
+	// must compute them identically; a neighbour's pad samples can differ from its own by an ulp). 0 = off (A/B).
+	int gg_detail_crease_aa = 1;
+	float gg_detail_crease_k = 0.5f;
+	std::atomic<uint32_t> gg_detail_aa_verts{ 0 };   // crease vertices area-sampled by the last build to finish
+	// GGMAX round 10d (Lee 2026-11-06, the "fingers" - the cause, from GG's own height function dumped at 1 unit and
+	// re-meshed offline): every quad was split along the SAME diagonal (TL-LR, the chunk's). A steep sculpt's foot that
+	// runs against that diagonal is cut into a row of saw-teeth one cell apart - long thin triangles rising from each
+	// tooth = the fingers, which AO darkens. 1 = each interior quad takes its SHORTER 3D diagonal (the one joining the
+	// two corners of closest height, the classic heightfield rule): the foot follows the outline instead. Vertices and
+	// normals are unchanged (only the index order), ties keep the chunk's diagonal (a plane is the same either way), the
+	// zipper bands at tile edges keep theirs. 0 = the fixed diagonal (A/B).
+	int gg_detail_adaptive_diagonal = 1;
+	std::atomic<uint32_t> gg_detail_flipped_quads{ 0 }; // interior quads the last build to finish flipped
 	uint32_t gg_detail_count = 0;       // chunks drawing a detail mesh this frame
 	uint32_t gg_detail_builds = 0;      // detail meshes swapped in since start
 	uint32_t gg_detail_last_built = 0;  // swapped in by the last frame that swapped any
@@ -573,6 +612,10 @@ namespace wi::terrain
 		float dist0 = 0, dist1 = 0;
 		int F = 5;                     // lattice steps per chunk cell (gg_detail_factor)
 		int step0 = 1, step1 = 2;      // validated: each divides the tile size and is <= F
+		int nsteps = 0;                // round 10: Sobel normal stencil in lattice steps (0 = central differences at step0)
+		int tmode = 1;                 // round 10t: gg_detail_tangent_from_normal (captured per target)
+		float aak = 0;                 // round 10c: crease anti-aliasing threshold (0 = off; captured per target)
+		int adiag = 1;                 // round 10d: gg_detail_adaptive_diagonal (captured per target)
 	};
 	// a step a tile can use: <= F (never coarser than the chunk grid, which every ring-border edge must match) and a
 	// divisor of the tile size 10*F (so tile corners and edges land on its vertices)
@@ -583,6 +626,14 @@ namespace wi::terrain
 		while (TS % s != 0)
 			s--;
 		return s;
+	}
+	// round 10: gg_detail_normal_radius in lattice steps (>= step0, so never finer than the mesh); 0 = off
+	static inline int gg_DetailNormalSteps(int F, int step0, float chunk_scale)
+	{
+		if (!(gg_detail_normal_radius > 0.0f) || F < 1 || !(chunk_scale > 0.0f))
+			return 0;
+		const float unit = chunk_scale / float(F);
+		return std::max(step0, std::min(64, (int)std::lround(gg_detail_normal_radius / unit)));
 	}
 	// lattice step of tile (tx, tz) of chunk (x, z). tx / tz may be -1 or 13: the neighbour chunk's border tile, which
 	// is first normalised to ITS chunk so the arithmetic is bit-identical to that chunk's own (a step that flipped at a
@@ -725,7 +776,7 @@ namespace wi::terrain
 	{
 		uint64_t h = 1469598103934665603ull;
 		auto mix = [&h](uint64_t v) { h ^= v; h *= 1099511628211ull; };
-		mix(uint64_t(e)); mix(uint64_t(L.F)); mix(uint64_t(L.step0)); mix(uint64_t(nmask));
+		mix(uint64_t(e)); mix(uint64_t(L.F)); mix(uint64_t(L.step0)); mix(uint64_t(nmask)); mix(uint64_t(L.nsteps)); mix(uint64_t(L.tmode)); { uint32_t kb; std::memcpy(&kb, &L.aak, 4); mix(uint64_t(kb)); } mix(uint64_t(L.adiag));
 		const int T = gg_detail_tiles;
 		for (int tz = 0; tz < T; ++tz)
 			for (int tx = 0; tx < T; ++tx)
@@ -801,7 +852,9 @@ namespace wi::terrain
 		const int D = C * F;                  // lattice steps a chunk side (650)
 		const int N = D + 1;                  // lattice vertices a side
 		const int ns = L.step0;               // normal step: central differences at the finest spacing in use
-		const int NP = N + 2 * ns;            // + a ring outside the chunk for those differences
+		const int nd = std::max(L.nsteps, 0); // round 10: > 0 = Sobel normals at +-nd lattice steps (smoothed)
+		const int pad = std::max(ns, nd);     // the ring outside the chunk those differences reach into
+		const int NP = N + 2 * pad;
 		const float scale = in.scale;
 		const float invF = 1.0f / float(F);
 		// local coordinate of lattice column i: the chunk vertex formula at fractional coord i/F - so i = c*F lands on
@@ -829,6 +882,7 @@ namespace wi::terrain
 		wi::vector<uint32_t> vid(size_t(N) * size_t(N), ~0u);
 		wi::vector<XMINT2> vlat; // lattice coordinate of each vertex
 		wi::vector<uint32_t> idx;
+		wi::vector<uint32_t> quadAt; // round 10d: idx offset of each interior quad's 6 indices (TL LL LR TL LR TR)
 		vlat.reserve(65536);
 		idx.reserve(65536 * 6);
 		auto V = [&](int i, int j) -> uint32_t {
@@ -865,6 +919,8 @@ namespace wi::terrain
 					{
 						const int x0 = bx + a * s, z0 = bz + b * s;
 						const uint32_t LL = V(x0, z0), LR = V(x0 + s, z0), TL = V(x0, z0 + s), TR = V(x0 + s, z0 + s);
+						if (L.adiag != 0)
+							quadAt.push_back((uint32_t)idx.size());
 						tri(TL, LL, LR, 1);
 						tri(TL, LR, TR, 1);
 					}
@@ -899,14 +955,30 @@ namespace wi::terrain
 		//    expression (lerp(bottomLevel, topLevel, height)), so shared border vertices are bit-identical
 		wi::vector<uint8_t> need(size_t(NP) * size_t(NP), 0);
 		wi::vector<float> h(size_t(NP) * size_t(NP), 0.0f);
-		auto P = [&](int i, int j) { return size_t(j + ns) * size_t(NP) + size_t(i + ns); };
+		auto P = [&](int i, int j) { return size_t(j + pad) * size_t(NP) + size_t(i + pad); };
 		for (const XMINT2& p : vlat)
 		{
 			need[P(p.x, p.y)] = 1;
-			need[P(p.x - ns, p.y)] = 1;
-			need[P(p.x + ns, p.y)] = 1;
-			need[P(p.x, p.y - ns)] = 1;
-			need[P(p.x, p.y + ns)] = 1;
+			if (nd > 0)
+			{
+				for (int dz = -nd; dz <= nd; dz += nd)
+					for (int dx = -nd; dx <= nd; dx += nd)
+						need[P(p.x + dx, p.y + dz)] = 1;   // the 3 x 3 Sobel stencil
+				if (L.aak > 0.0f)
+				{
+					need[P(p.x - ns, p.y)] = 1;            // round 10c: the crease test's +-ns cross
+					need[P(p.x + ns, p.y)] = 1;
+					need[P(p.x, p.y - ns)] = 1;
+					need[P(p.x, p.y + ns)] = 1;
+				}
+			}
+			else
+			{
+				need[P(p.x - ns, p.y)] = 1;
+				need[P(p.x + ns, p.y)] = 1;
+				need[P(p.x, p.y - ns)] = 1;
+				need[P(p.x, p.y + ns)] = 1;
+			}
 		}
 		// round 9: hold the height-data fence SHARED per 64-row block - GameGuru frees arrays its height function reads
 		// (flat areas, the main heightmap) under it EXCLUSIVE, so a level load / terrain reset can never pull them away
@@ -922,14 +994,14 @@ namespace wi::terrain
 					return;
 				gg_hl.lock();
 			}
-			const float lz = lc(pj - ns);
+			const float lz = lc(pj - pad);
 			for (int pi = 0; pi < NP; ++pi)
 			{
 				const size_t k = size_t(pj) * size_t(NP) + size_t(pi);
 				if (need[k] == 0)
 					continue;
 				float height = 0;
-				const XMFLOAT2 world_pos = XMFLOAT2(in.position.x + lc(pi - ns), in.position.z + lz);
+				const XMFLOAT2 world_pos = XMFLOAT2(in.position.x + lc(pi - pad), in.position.z + lz);
 				for (auto& modifier : in.modifiers)
 				{
 					modifier->Apply(world_pos, height);
@@ -940,6 +1012,88 @@ namespace wi::terrain
 		if (gg_hl.owns_lock())
 			gg_hl.unlock();
 
+		// 3b. round 10c: anti-alias sharp creases (gg_detail_crease_aa). Decisions read the point samples only, so the
+		//     order never matters; area samples go through the same modifiers + lerp, under the height-data fence,
+		//     re-taken every 256 crease vertices so a waiting free gets through. The result moves the vertex POSITION
+		//     only (aaY): h - and so every normal - stays the point-sampled height function, which both chunks of a
+		//     shared edge sample identically (an area-sampled interior vertex of one chunk is a pad sample of the next).
+		uint32_t aa_count = 0;
+		wi::vector<float> aaY;       // per vertex: the area-sampled height (valid where aaHas)
+		wi::vector<uint8_t> aaHas;
+		if (L.aak > 0.0f && ns >= 1)
+		{
+			const float sw = scale * invF * float(ns);       // vertex spacing at step0 (world)
+			const float thr = L.aak * sw;                    // second difference threshold (world)
+			static const float tap[5] = { -2.0f / 3.0f, -1.0f / 3.0f, 0.0f, 1.0f / 3.0f, 2.0f / 3.0f };
+			static const float tw[5] = { 1.0f / 9.0f, 2.0f / 9.0f, 3.0f / 9.0f, 2.0f / 9.0f, 1.0f / 9.0f };
+			aaY.resize(vc, 0.0f);
+			aaHas.resize(vc, 0);
+			for (size_t v = 0; v < vc; ++v)
+			{
+				const XMINT2 p = vlat[v];
+				if (p.x <= 0 || p.y <= 0 || p.x >= D || p.y >= D)
+					continue;                                // chunk edges keep the point sample (see the global)
+				const float c = h[P(p.x, p.y)];
+				const float cxx = std::abs(h[P(p.x + ns, p.y)] + h[P(p.x - ns, p.y)] - 2.0f * c);
+				const float czz = std::abs(h[P(p.x, p.y + ns)] + h[P(p.x, p.y - ns)] - 2.0f * c);
+				if (cxx + czz <= thr)
+					continue;
+				if ((aa_count & 255) == 0)
+				{
+					if (gg_hl.owns_lock())
+						gg_hl.unlock();
+					if (job.cancelled.load())
+						return;
+					gg_hl.lock();
+				}
+				const float wx0 = in.position.x + lc(p.x), wz0 = in.position.z + lc(p.y);
+				float sum = 0;
+				for (int b = 0; b < 5; ++b)
+				{
+					for (int a = 0; a < 5; ++a)
+					{
+						float s;
+						if (a == 2 && b == 2)
+							s = c;                               // the point sample itself
+						else
+						{
+							float height = 0;
+							const XMFLOAT2 wp = XMFLOAT2(wx0 + tap[a] * sw, wz0 + tap[b] * sw);
+							for (auto& modifier : in.modifiers)
+								modifier->Apply(wp, height);
+							s = lerp(in.bottomLevel, in.topLevel, height);
+						}
+						sum += tw[a] * tw[b] * s;
+					}
+				}
+				aaY[v] = sum;
+				aaHas[v] = 1;
+				aa_count++;
+			}
+			if (gg_hl.owns_lock())
+				gg_hl.unlock();
+		}
+		auto posY = [&](size_t v) { const XMINT2 q = vlat[v]; return (!aaHas.empty() && aaHas[v]) ? aaY[v] : h[P(q.x, q.y)]; };
+		gg_detail_aa_verts.store(aa_count);
+
+		// 3c. round 10d: each interior quad on its shorter 3D diagonal (gg_detail_adaptive_diagonal). The replacement
+		//     triangles keep the emitters' winding (lattice cross > 0): (LL LR TR) and (LL TR TL).
+		uint32_t flipped = 0;
+		for (const uint32_t o : quadAt)
+		{
+			const uint32_t TLv = idx[o], LLv = idx[o + 1], LRv = idx[o + 2], TRv = idx[o + 5];
+			auto hv = [&](uint32_t v) { return posY(v); };   // the drawn heights
+			const float dMain = std::abs(hv(TLv) - hv(LRv));   // the chunk's diagonal
+			const float dAlt = std::abs(hv(LLv) - hv(TRv));
+			if (dAlt + 1e-3f * (1.0f + dMain) < dMain)
+			{
+				idx[o] = LLv; idx[o + 1] = LRv; idx[o + 2] = TRv;
+				idx[o + 3] = LLv; idx[o + 4] = TRv; idx[o + 5] = TLv;
+				flipped++;
+			}
+		}
+		gg_detail_flipped_quads.store(flipped);
+
 		// 4. vertex attributes
 		mesh.SetQuantizedPositionsDisabled(true); // as the chunk mesh: neighbouring AABBs differ
 		mesh.SetDoubleSidedShadow(in.doubleSidedShadow);
@@ -947,19 +1101,48 @@ namespace wi::terrain
 		mesh.vertex_normals.resize(vc);
 		mesh.vertex_tangents.resize(vc);
 		mesh.vertex_uvset_0.resize(vc);
-		const float nstep = scale * invF * float(ns);
+		const int d = nd > 0 ? nd : ns;       // the normal stencil's reach
+		const float nstep = scale * invF * float(d);
 		const float scale_rcp = 1.0f / scale; // = Terrain::chunk_scale_rcp (private), the same expression
 		for (size_t v = 0; v < vc; ++v)
 		{
 			const XMINT2 p = vlat[v];
 			const float x = lc(p.x), z = lc(p.y);
-			const float y = h[P(p.x, p.y)];
-			XMFLOAT3 n(h[P(p.x - ns, p.y)] - h[P(p.x + ns, p.y)], 2.0f * nstep, h[P(p.x, p.y - ns)] - h[P(p.x, p.y + ns)]);
+			const float y = posY(v);   // round 10c: the area sample at a crease vertex, else the point sample
+			XMFLOAT3 n;
+			if (nd > 0)
+			{
+				// round 10: Sobel - the +-d central difference, averaged 1:2:1 across the other axis = the slope of the
+				// surface smoothed over ~2d, so a crease in GG's bilinear height data no longer lands on one vertex row
+				const float sx = (h[P(p.x + d, p.y - d)] + 2.0f * h[P(p.x + d, p.y)] + h[P(p.x + d, p.y + d)])
+					- (h[P(p.x - d, p.y - d)] + 2.0f * h[P(p.x - d, p.y)] + h[P(p.x - d, p.y + d)]);
+				const float sz = (h[P(p.x - d, p.y + d)] + 2.0f * h[P(p.x, p.y + d)] + h[P(p.x + d, p.y + d)])
+					- (h[P(p.x - d, p.y - d)] + 2.0f * h[P(p.x, p.y - d)] + h[P(p.x + d, p.y - d)]);
+				n = XMFLOAT3(-0.25f * sx, 2.0f * nstep, -0.25f * sz);
+			}
+			else
+			{
+				n = XMFLOAT3(h[P(p.x - ns, p.y)] - h[P(p.x + ns, p.y)], 2.0f * nstep, h[P(p.x, p.y - ns)] - h[P(p.x, p.y + ns)]);
+			}
 			XMStoreFloat3(&n, XMVector3Normalize(XMLoadFloat3(&n)));
 			mesh.vertex_positions[v] = XMFLOAT3(x, y, z);
 			mesh.vertex_normals[v] = n;
-			// the chunk's tangent convention (corner[x+1] - corner[z+1], w = 1), at the normal step
-			mesh.vertex_tangents[v] = XMFLOAT4(nstep, h[P(p.x + ns, p.y)] - h[P(p.x, p.y + ns)], -nstep, 1);
+			if (L.tmode != 0)
+			{
+				// round 10t: the chunk's tangent convention, derived from the normal (see gg_detail_tangent_from_normal).
+				// Degenerate only on a vertical wall facing the lattice diagonal (n.y = 0, n.x = n.z), where (1, 0, -1)
+				// is itself orthogonal to n.
+				float tx = n.y, ty = n.z - n.x, tz = -n.y;
+				float len2 = tx * tx + ty * ty + tz * tz;
+				if (!(len2 > 1e-8f)) { tx = 1; ty = 0; tz = -1; len2 = 2; }
+				const float inv = 1.0f / std::sqrt(len2);
+				mesh.vertex_tangents[v] = XMFLOAT4(tx * inv, ty * inv, tz * inv, 1);
+			}
+			else
+			{
+				// the chunk's tangent convention (corner[x+1] - corner[z+1], w = 1), at the normal stencil's reach
+				mesh.vertex_tangents[v] = XMFLOAT4(nstep, h[P(p.x + d, p.y)] - h[P(p.x, p.y + d)], -nstep, 1);
+			}
 			mesh.vertex_uvset_0[v] = XMFLOAT2(x * scale_rcp * chunk_width_rcp + 0.5f, z * scale_rcp * chunk_width_rcp + 0.5f);
 		}
 		mesh.indices = std::move(idx);
@@ -1034,6 +1217,10 @@ namespace wi::terrain
 		L.stride = stride;
 		L.step0 = gg_DetailValidStep(gg_detail_lod_step0, L.F);
 		L.step1 = std::max(L.step0, gg_DetailValidStep(gg_detail_lod_step1, L.F));
+		L.nsteps = gg_DetailNormalSteps(L.F, L.step0, L.stride / float(chunk_width - 1));   // round 10
+		L.tmode = gg_detail_tangent_from_normal != 0 ? 1 : 0;                              // round 10t
+		L.aak = (gg_detail_crease_aa != 0 && gg_detail_crease_k > 0.0f) ? gg_detail_crease_k : 0.0f; // round 10c
+		L.adiag = gg_detail_adaptive_diagonal != 0 ? 1 : 0;                                    // round 10d
 		L.dist0 = std::max(0.0f, gg_detail_lod_dist0);
 		L.dist1 = std::max(L.dist0, gg_detail_lod_dist1);
 		if (!on || !gg_detail_have_centre || (retarget && (std::abs(camera.Eye.x - gg_detail_L.cx) > hyst || std::abs(camera.Eye.z - gg_detail_L.cz) > hyst)))
@@ -1512,6 +1699,10 @@ namespace wi::terrain
 		L.stride = stride;
 		L.step0 = gg_DetailValidStep(gg_detail_lod_step0, L.F);
 		L.step1 = std::max(L.step0, gg_DetailValidStep(gg_detail_lod_step1, L.F));
+		L.nsteps = gg_DetailNormalSteps(L.F, L.step0, L.stride / float(chunk_width - 1));   // round 10
+		L.tmode = gg_detail_tangent_from_normal != 0 ? 1 : 0;                              // round 10t
+		L.aak = (gg_detail_crease_aa != 0 && gg_detail_crease_k > 0.0f) ? gg_detail_crease_k : 0.0f; // round 10c
+		L.adiag = gg_detail_adaptive_diagonal != 0 ? 1 : 0;                                    // round 10d
 		L.dist0 = std::max(0.0f, gg_detail_lod_dist0);
 		L.dist1 = std::max(L.dist0, gg_detail_lod_dist1);
 		if (!r->on || !r->have_centre || (retarget && (std::abs(eye.x - r->L.cx) > hyst || std::abs(eye.z - r->L.cz) > hyst)))

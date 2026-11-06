@@ -1169,6 +1169,7 @@ bool gg_wetmap_updates_enabled = true;
 // (by the shader's own shore term, 0.12 x radius) after 4 updates - underwater the shader only max()es toward a
 // depth-independent constant and never dries. Rain disables both. 0 = stock. Harness SET_TERRAINWETCULL.
 int gg_terrain_wetmap_cull = 0;
+bool gg_wireframe_terrain_only = false; // GGMAX PROTOTYPE (BR-0009 round 7): the wireframe OVERLAY draws terrain chunks (FILTER_TERRAIN) only. Harness SET_TERRAINWIREFRAME / editor U.
 int gg_terrain_reflection_lod_offset = 0; // GGMAX 3.159 (BR-0009 FPS): planar reflections draw terrain this many LODs coarser (DrawScene). Harness SET_TERRAINREFLLOD.
 float gg_terrain_wetmap_wave_bound = 1000.0f; // world units the displaced ocean surface may sit above/below waterHeight
 std::atomic<uint64_t> gg_dbg_wetmap_dispatched{ 0 };  // object wetmap dispatches (running totals)
@@ -9526,6 +9527,8 @@ void DrawScene(
 				if (ggQ) gg_dbg_watch_q[renderPass][GG_Q_NOTRENDERABLE].fetch_add(1, std::memory_order_relaxed);
 				continue;
 			}
+			if (gg_wireframe_terrain_only && (flags & DRAWSCENE_WIREFRAME_OVERLAY) && (object.GetFilterMask() & FILTER_TERRAIN) == 0)
+				continue; // GGMAX PROTOTYPE (BR-0009 round 7): terrain-only wireframe overlay
 			if (foreground != object.IsForeground())
 			{
 				if (ggQ) gg_dbg_watch_q[renderPass][GG_Q_FOREGROUND].fetch_add(1, std::memory_order_relaxed);

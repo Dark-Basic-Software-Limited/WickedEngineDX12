@@ -19,6 +19,12 @@ using namespace wi::ecs;
 using namespace wi::scene;
 using namespace wi::graphics;
 
+namespace wi::scene
+{
+	// GGMAX PROTOTYPE (BR-0009 round 7): object entity -> detail mesh the renderer draws instead (wiScene.cpp)
+	extern wi::unordered_map<wi::ecs::Entity, wi::ecs::Entity> gg_detail_render_mesh;
+}
+
 namespace wi::terrain
 {
 	// GGMAX 2.53: generation-center override (see wiTerrain.h) — written by the game's
@@ -500,6 +506,322 @@ namespace wi::terrain
 	{
 		return gg_blendmap_half_res ? uint32_t((chunk_width - 1) / 2 + 1) : uint32_t(chunk_width);
 	}
+	// =============================================================================================================
+	// GGMAX PROTOTYPE (BR-0009 round 7): NEAR-CAMERA DETAIL MESHES.
+	// Lee 2026-11-06: "match the DX11 sculpt result as close as practicable" (DX11 GGTerrain draws 8-unit vertices
+	// near the camera; the chunk grid is 40/80). Chunks within gg_detail_ring chunks (Chebyshev) of the camera chunk
+	// get a second mesh, gg_detail_factor x denser per side, sampled from the SAME height modifiers. The renderer
+	// draws it instead of the chunk mesh (wi::scene::gg_detail_render_mesh, consulted ONLY where Scene picks
+	// object.mesh_index); the chunk keeps its ObjectComponent (material/VT, occlusion, shadow flags, wetmap) and its
+	// coarse MeshComponent, so every CPU consumer (picks, GG blend/grass/bake passes) is untouched.
+	// Seams: an edge whose neighbour is ALSO detailed is sampled exactly on both sides (identical world positions);
+	// an edge facing a coarse chunk is stitched - the extra vertices lie on the straight coarse edge (that chunk's
+	// border strip is full resolution in every LOD list), so there are no cracks, only T-junctions.
+	// -1 = off (stock). GameGuru sets these (GGTerrainWicked_Init / harness SET_TERRAINDETAIL).
+	int gg_detail_ring = -1;
+	int gg_detail_factor = 5;           // 5 x 40-unit chunk grid = 8 units, DX11's finest GGTerrain spacing
+	int gg_detail_budget = 2;           // detail meshes built per frame at most (camera chunk first)
+	uint32_t gg_detail_count = 0;       // chunks drawing a detail mesh this frame
+	uint32_t gg_detail_builds = 0;      // detail meshes built since start
+	uint32_t gg_detail_last_built = 0;  // built in the last frame that built any
+	float gg_detail_last_ms = 0;        // main-thread ms of that frame's builds
+	uint64_t gg_detail_tris = 0;        // triangles per detail mesh (last build)
+	float gg_detail_sample_ms = 0;      // last build: height sampling / CreateRenderData+topology ms
+	float gg_detail_upload_ms = 0;
+	struct GGDetailInputs
+	{
+		XMFLOAT3 position = XMFLOAT3(0, 0, 0);  // the chunk's world position
+		float scale = 1, bottomLevel = 0, topLevel = 1;
+		wi::vector<std::shared_ptr<Modifier>> modifiers; // copies of the shared_ptrs: the job never touches Terrain
+		int S = 2;
+		uint32_t nmask = 0;
+		bool doubleSidedShadow = false;
+		Entity material = INVALID_ENTITY;      // the chunk entity (its material / virtual texture)
+	};
+	// One background build. The record keeps it in flight; done is set last, after mesh is complete.
+	struct GGDetailJob
+	{
+		std::atomic<bool> done{ false };
+		GGDetailInputs in;
+		Entity chunk_entity = INVALID_ENTITY;
+		MeshComponent mesh;
+	};
+	struct GGDetailRec
+	{
+		Entity mesh_entity = INVALID_ENTITY;   // the detail MeshComponent (an entity of its own, no object/transform)
+		Entity chunk_entity = INVALID_ENTITY;  // the chunk entity it was built for (a Generation_Restart reuses coords)
+		uint32_t nmask = 0;                    // edge bits 1:-x 2:+x 4:-z 8:+z set = that neighbour is detailed too
+		int factor = 0;
+		bool dirty = true;                     // the chunk was regenerated (sculpt) since the last launch
+		std::shared_ptr<GGDetailJob> job;      // a build in flight (or finished, not yet swapped in)
+	};
+	static wi::unordered_map<Chunk, GGDetailRec> gg_detail_recs;
+	static wi::jobsystem::context gg_detail_ctx;  // every detail build job (Generation_Cancel waits on it)
+	static std::mutex gg_detail_topology_lock;
+	static std::shared_ptr<MeshComponent::SharedTopology> gg_detail_topology; // indices + UVs, identical per factor
+
+	static inline Chunk gg_MakeChunk(int x, int z) { Chunk c; c.x = x; c.z = z; return c; }
+
+	static void gg_DetailClearAll(Scene* scene)
+	{
+		for (auto& it : gg_detail_recs)
+		{
+			if (scene != nullptr && it.second.mesh_entity != INVALID_ENTITY)
+				scene->Entity_Remove(it.second.mesh_entity);
+		}
+		gg_detail_recs.clear(); // jobs still in flight keep their own reference; their result is dropped
+		wi::scene::gg_detail_render_mesh.clear();
+		gg_detail_count = 0;
+	}
+
+	// Builds one detail mesh into `mesh` (a fresh MeshComponent). Runs as a background job (like the generator's
+	// chunk builds: heights through the same modifiers, CreateRenderData on the worker); nested parallel dispatches.
+	static void gg_BuildDetailMesh(const GGDetailInputs& in, MeshComponent& mesh)
+	{
+		const int S = in.S;
+		const int C = chunk_width - 1;  // chunk cells per side
+		const int D = C * S;            // detail cells per side
+		const int N = D + 1;            // detail vertices per side
+		const int NP = N + 2;           // + one ring outside the chunk, for central-difference normals
+		const float scale = in.scale;
+		const float invS = 1.0f / float(S);
+		// local coordinate of detail column i: the chunk vertex formula at fractional coord i/S - so i = c*S lands on
+		// exactly the float the chunk (and its neighbour) computes for chunk vertex c
+		auto lc = [&](int i) { return (float(i) * invS - chunk_half_width) * scale; };
+		wi::Timer gg_t_sample;
+		wi::vector<float> h(size_t(NP) * size_t(NP));
+		wi::jobsystem::context ctx;
+		ctx.priority = wi::jobsystem::Priority::Low; // as the generator: never ahead of the frame's own jobs
+		wi::jobsystem::Dispatch(ctx, uint32_t(NP), 4, [&](wi::jobsystem::JobArgs a) {
+			const int pj = int(a.jobIndex);
+			const float lz = lc(pj - 1);
+			for (int pi = 0; pi < NP; ++pi)
+			{
+				float height = 0;
+				const XMFLOAT2 world_pos = XMFLOAT2(in.position.x + lc(pi - 1), in.position.z + lz);
+				for (auto& modifier : in.modifiers)
+				{
+					modifier->Apply(world_pos, height);
+				}
+				h[size_t(pj) * NP + pi] = in.bottomLevel + (in.topLevel - in.bottomLevel) * height; // the chunk's lerp(bottomLevel, topLevel, height)
+			}
+		});
+		wi::jobsystem::Wait(ctx);
+		gg_detail_sample_ms = (float)gg_t_sample.elapsed_milliseconds();
+		auto H = [&](int i, int j) -> float& { return h[size_t(j + 1) * NP + size_t(i + 1)]; };
+		// stitch every edge that faces a coarse chunk: vertices between two chunk vertices lie on their straight line
+		auto stitch = [&](bool alongZ, int fixed) {
+			for (int k = 1; k < D; ++k)
+			{
+				if (k % S == 0)
+					continue;
+				const int k0 = (k / S) * S;
+				const float f = float(k - k0) * invS;
+				const float a = alongZ ? H(fixed, k0) : H(k0, fixed);
+				const float b = alongZ ? H(fixed, k0 + S) : H(k0 + S, fixed);
+				(alongZ ? H(fixed, k) : H(k, fixed)) = a + (b - a) * f;
+			}
+		};
+		if ((in.nmask & 1) == 0) stitch(true, 0);
+		if ((in.nmask & 2) == 0) stitch(true, D);
+		if ((in.nmask & 4) == 0) stitch(false, 0);
+		if ((in.nmask & 8) == 0) stitch(false, D);
+
+		const size_t vc = size_t(N) * size_t(N);
+		mesh.SetQuantizedPositionsDisabled(true); // as the chunk mesh: neighbouring AABBs differ
+		mesh.SetDoubleSidedShadow(in.doubleSidedShadow);
+		mesh.vertex_positions.resize(vc);
+		mesh.vertex_normals.resize(vc);
+		mesh.vertex_tangents.resize(vc);
+		mesh.vertex_uvset_0.resize(vc);
+		const float step = scale * invS;
+		const float scale_rcp = 1.0f / scale; // = Terrain::chunk_scale_rcp (private), the same expression
+		wi::jobsystem::Dispatch(ctx, uint32_t(N), 4, [&](wi::jobsystem::JobArgs a) {
+			const int j = int(a.jobIndex);
+			const float z = lc(j);
+			for (int i = 0; i < N; ++i)
+			{
+				const size_t index = size_t(i) + size_t(j) * size_t(N); // the chunk's layout: x fastest
+				const float x = lc(i);
+				const float y = H(i, j);
+				XMFLOAT3 n(H(i - 1, j) - H(i + 1, j), 2.0f * step, H(i, j - 1) - H(i, j + 1));
+				XMStoreFloat3(&n, XMVector3Normalize(XMLoadFloat3(&n)));
+				mesh.vertex_positions[index] = XMFLOAT3(x, y, z);
+				mesh.vertex_normals[index] = n;
+				// the chunk's tangent convention (corner[x+1] - corner[z+1], w = 1), at this spacing
+				mesh.vertex_tangents[index] = XMFLOAT4(step, H(i + 1, j) - H(i, j + 1), -step, 1);
+				mesh.vertex_uvset_0[index] = XMFLOAT2(x * scale_rcp * chunk_width_rcp + 0.5f, z * scale_rcp * chunk_width_rcp + 0.5f);
+			}
+		});
+		// the chunk's LOD0 quad order and winding (x outer, z inner; TL LL LR / TL LR TR) - the same lattice shape the
+		// pick grid walk (wiScene gg_GetTerrainGrid) recognises
+		mesh.indices.resize(size_t(D) * size_t(D) * 6);
+		wi::jobsystem::Dispatch(ctx, uint32_t(D), 4, [&](wi::jobsystem::JobArgs a) {
+			const int x = int(a.jobIndex);
+			uint32_t* o = mesh.indices.data() + size_t(x) * size_t(D) * 6;
+			for (int z = 0; z < D; ++z)
+			{
+				const uint32_t LL = uint32_t(x + z * N), LR = LL + 1, TL = LL + uint32_t(N), TR = TL + 1;
+				*o++ = TL; *o++ = LL; *o++ = LR;
+				*o++ = TL; *o++ = LR; *o++ = TR;
+			}
+		});
+		wi::jobsystem::Wait(ctx);
+		mesh.subsets.emplace_back();
+		mesh.subsets.back().materialID = in.material; // the chunk's material (its virtual texture, sampled by chunk UV)
+		mesh.subsets.back().indexOffset = 0;
+		mesh.subsets.back().indexCount = (uint32_t)mesh.indices.size();
+		mesh.subsets_per_lod = 1;
+		wi::Timer gg_t_upload;
+		std::shared_ptr<MeshComponent::SharedTopology> topo;
+		{
+			std::scoped_lock lock(gg_detail_topology_lock);
+			topo = gg_detail_topology;
+		}
+		if (!topo || !topo->Matches(mesh))
+		{
+			topo = MeshComponent::CreateSharedTopology(mesh);
+			std::scoped_lock lock(gg_detail_topology_lock);
+			gg_detail_topology = topo;
+		}
+		mesh.gg_shared_topology = topo;
+		mesh.CreateRenderData();
+		gg_detail_upload_ms = (float)gg_t_upload.elapsed_milliseconds();
+		gg_detail_tris = uint64_t(D) * uint64_t(D) * 2;
+	}
+
+	// Per frame, main thread, generator idle (Generation_Update after the chunk loop): retire, swap finished builds
+	// in, launch new ones. Never builds on the main thread - a sculpt stroke (a chunk regen per frame) used to cost
+	// ~75-100 ms per frame here (round 7 first cut: 11 FPS while sculpting).
+	static void gg_UpdateDetailMeshes(Terrain& t, const CameraComponent& camera)
+	{
+		Scene& scene = *t.scene;
+		const bool on = gg_detail_ring >= 0 && gg_detail_factor >= 2;
+		const int R = gg_detail_ring;
+		const int S = std::min(gg_detail_factor, 16);
+		// the chunk UNDER the camera: chunk c spans c*stride +- stride/2. (Not t.center_chunk: the stock formula adds
+		// chunk_half_width in VERTEX units before the world-unit divide, so at chunk_scale 40 it lags up to half a chunk.)
+		const float stride = float(chunk_width - 1) * t.chunk_scale;
+		const Chunk cc = gg_MakeChunk((int)std::floor(camera.Eye.x / stride + 0.5f), (int)std::floor(camera.Eye.z / stride + 0.5f));
+		auto inRing = [&](const Chunk& c) { return on && std::max(std::abs(c.x - cc.x), std::abs(c.z - cc.z)) <= R; };
+
+		// 1. retire records whose chunk is gone, regenerated under a new entity, or out of the ring
+		for (auto it = gg_detail_recs.begin(); it != gg_detail_recs.end();)
+		{
+			auto cit = t.chunks.find(it->first);
+			const bool chunk_ok = cit != t.chunks.end() && cit->second.entity == it->second.chunk_entity;
+			const bool fresh = it->second.mesh_entity == INVALID_ENTITY && it->second.job != nullptr; // first build in flight
+			if ((!chunk_ok && !fresh) || !inRing(it->first))
+			{
+				wi::scene::gg_detail_render_mesh.erase(it->second.chunk_entity);
+				if (it->second.mesh_entity != INVALID_ENTITY)
+					scene.Entity_Remove(it->second.mesh_entity);
+				it = gg_detail_recs.erase(it); // an in-flight job keeps its own reference; its result is dropped
+				continue;
+			}
+			++it;
+		}
+		gg_detail_count = 0;
+		if (!on)
+		{
+			wi::scene::gg_detail_render_mesh.clear();
+			return;
+		}
+
+		// 2. ring chunks, nearest first (the launch budget serves the camera chunk before its neighbours)
+		wi::vector<Chunk> ring;
+		for (int d = 0; d <= R; ++d)
+			for (int dz = -d; dz <= d; ++dz)
+				for (int dx = -d; dx <= d; ++dx)
+					if (std::max(std::abs(dx), std::abs(dz)) == d)
+						ring.push_back(gg_MakeChunk(cc.x + dx, cc.z + dz));
+
+		wi::Timer timer;
+		uint32_t launched = 0, swapped = 0, inflight = 0;
+		for (auto& it : gg_detail_recs)
+			if (it.second.job && !it.second.job->done.load())
+				inflight++;
+		for (const Chunk& c : ring)
+		{
+			auto cit = t.chunks.find(c);
+			if (cit == t.chunks.end())
+				continue;
+			const ChunkData& cd = cit->second;
+			const MeshComponent* cm = scene.meshes.GetComponent(cd.entity);
+			if (cd.merge_pending || cm == nullptr || cm->vertex_positions.size() != vertexCount || !scene.objects.Contains(cd.entity))
+				continue; // not merged yet
+			const bool dss = cm->IsDoubleSidedShadow();
+			uint32_t nmask = 0;
+			if (inRing(gg_MakeChunk(c.x - 1, c.z))) nmask |= 1;
+			if (inRing(gg_MakeChunk(c.x + 1, c.z))) nmask |= 2;
+			if (inRing(gg_MakeChunk(c.x, c.z - 1))) nmask |= 4;
+			if (inRing(gg_MakeChunk(c.x, c.z + 1))) nmask |= 8;
+			GGDetailRec& r = gg_detail_recs[c];
+
+			// swap a finished build in
+			if (r.job && r.job->done.load())
+			{
+				if (r.job->chunk_entity == cd.entity)
+				{
+					if (r.mesh_entity == INVALID_ENTITY || !scene.meshes.Contains(r.mesh_entity))
+					{
+						r.mesh_entity = CreateEntity();
+						scene.meshes.Create(r.mesh_entity);
+					}
+					*scene.meshes.GetComponent(r.mesh_entity) = std::move(r.job->mesh); // the old GPU buffers release deferred
+					r.chunk_entity = r.job->chunk_entity;
+					r.nmask = r.job->in.nmask;
+					r.factor = r.job->in.S;
+					swapped++;
+					gg_detail_builds++;
+				}
+				r.job.reset();
+			}
+
+			const bool have = r.mesh_entity != INVALID_ENTITY && scene.meshes.Contains(r.mesh_entity);
+			const bool stale = !have || r.dirty || r.chunk_entity != cd.entity || r.nmask != nmask || r.factor != S;
+			if (stale && !r.job && launched < (uint32_t)std::max(1, gg_detail_budget) && inflight < 6)
+			{
+				auto job = std::make_shared<GGDetailJob>();
+				job->chunk_entity = cd.entity;
+				job->in.position = cd.position;
+				job->in.scale = t.chunk_scale;
+				job->in.bottomLevel = t.bottomLevel;
+				job->in.topLevel = t.topLevel;
+				job->in.modifiers = t.modifiers;
+				job->in.S = S;
+				job->in.nmask = nmask;
+				job->in.doubleSidedShadow = dss;
+				job->in.material = cd.entity;
+				r.job = job;
+				r.dirty = false; // a regen after this point marks it again (merge loop) and relaunches after the swap
+				if (!have)
+					r.chunk_entity = cd.entity; // the retire loop must not take a first build in flight for a dead chunk
+				gg_detail_ctx.priority = wi::jobsystem::Priority::Low;
+				wi::jobsystem::Execute(gg_detail_ctx, [job](wi::jobsystem::JobArgs) {
+					gg_BuildDetailMesh(job->in, job->mesh);
+					job->done.store(true);
+				});
+				launched++;
+				inflight++;
+			}
+			if (have && r.factor == S && r.chunk_entity == cd.entity)
+			{
+				wi::scene::gg_detail_render_mesh[cd.entity] = r.mesh_entity;
+				gg_detail_count++;
+			}
+			else
+			{
+				wi::scene::gg_detail_render_mesh.erase(cd.entity); // not built yet: the chunk mesh draws meanwhile
+			}
+		}
+		if (swapped > 0)
+		{
+			gg_detail_last_built = swapped;
+			gg_detail_last_ms = (float)timer.elapsed_milliseconds(); // main-thread cost of the frame that swapped
+		}
+	}
+
 	uint32_t gg_terrain_tile_share_mips = 32; // USER-TUNED 2026-07-28: "human scaled" underfoot detail (~4m repeat)
 	// GGMAX 1.53c: hold — delays the halving ladder by this many rungs before it descends from
 	// the cap, pushing the FIRST visible scale cross-fade ~1.4x further out per +1 while the
@@ -667,6 +989,11 @@ namespace wi::terrain
 		}
 		chunks.clear();
 		virtual_textures_in_use.clear();
+		// GGMAX PROTOTYPE (BR-0009 round 7): detail builds read the height modifiers (GG's CPU heightmap) on workers. Joined
+		// HERE (a restart: level load / terrain reset), NOT in Generation_Cancel - GG cancels the generator many times per
+		// sculpt stroke (blend passes) and a join there held every stroke frame for a whole ~100 ms build (11 FPS).
+		wi::jobsystem::Wait(gg_detail_ctx);
+		gg_DetailClearAll(scene); // GGMAX PROTOTYPE (BR-0009 round 7)
 
 		if (chunkGroupEntity != INVALID_ENTITY)
 		{
@@ -857,6 +1184,8 @@ namespace wi::terrain
 			}
 			chunks.clear();
 			virtual_textures_in_use.clear();
+			wi::jobsystem::Wait(gg_detail_ctx); // GGMAX PROTOTYPE (BR-0009 round 7): see Generation_Restart
+			gg_DetailClearAll(scene); // GGMAX PROTOTYPE (BR-0009 round 7)
 			return;
 		}
 
@@ -913,6 +1242,13 @@ namespace wi::terrain
 					const XMFLOAT3 mx(gg_m->aabb._max.x + p.x, gg_m->aabb._max.y + p.y, gg_m->aabb._max.z + p.z);
 					gg_o->lod_bias = gg_chunk_lod_bias_fn(mn, mx);
 				}
+			}
+			// GGMAX PROTOTYPE (BR-0009 round 7): a regenerated chunk (sculpt) needs its detail mesh rebuilt
+			if (it->second.merge_pending)
+			{
+				auto gg_dr = gg_detail_recs.find(it->first);
+				if (gg_dr != gg_detail_recs.end())
+					gg_dr->second.dirty = true;
 			}
 			it->second.merge_pending = false;
 		}
@@ -1171,6 +1507,8 @@ namespace wi::terrain
 			it++;
 		}
 		wi::profiler::gg_trace_mark("tg-chunkloop"); // GGMAX 2.61
+
+		gg_UpdateDetailMeshes(*this, camera); // GGMAX PROTOTYPE (BR-0009 round 7): near-camera detail meshes
 
 		if (virtual_texture_any)
 		{

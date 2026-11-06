@@ -39,6 +39,10 @@ using namespace wi::primitive;
 
 namespace wi::scene
 {
+	// GGMAX PROTOTYPE (BR-0009 round 7): object entity -> the mesh the renderer draws instead of object.meshID (wiTerrain
+	// near-camera detail meshes). Empty = stock.
+	wi::unordered_map<wi::ecs::Entity, wi::ecs::Entity> gg_detail_render_mesh;
+
 	static constexpr uint32_t small_subtask_groupsize = 256u;
 
 	// GGMAX 1.55: global env-probe brightness multiplier (1 = stock), set by the game's
@@ -5735,8 +5739,22 @@ namespace wi::scene
 			{
 				// These will only be valid for a single frame:
 				object.mesh_index = (uint32_t)meshes.GetIndex(object.meshID);
+				// GGMAX PROTOTYPE (BR-0009 round 7): a terrain chunk near the camera DRAWS its detail mesh (wiTerrain.cpp
+				// gg_UpdateDetailMeshes). Only mesh_index (the renderer's mesh) swaps; meshID - what picks and the game's
+				// chunk passes read - stays the chunk grid. Read-only here (the map is written in Generation_Update, earlier
+				// in Scene::Update on the main thread).
+				if (!gg_detail_render_mesh.empty())
+				{
+					auto gg_dr = gg_detail_render_mesh.find(entity);
+					if (gg_dr != gg_detail_render_mesh.end() && meshes.Contains(gg_dr->second))
+						object.mesh_index = (uint32_t)meshes.GetIndex(gg_dr->second);
+				}
 				const MeshComponent& mesh = meshes[object.mesh_index];
 
+				// GGMAX PROTOTYPE (BR-0009 round 7): the wetmap is one value per DRAWN vertex - recreate it when the drawn
+				// mesh's vertex count changes (detail <-> chunk mesh), or the wetmap pass would index past its end.
+				if (object.IsWetmapEnabled() && object.wetmap.IsValid() && object.wetmap.desc.size != mesh.vertex_positions.size() * sizeof(uint16_t))
+					object.wetmap = {};
 				if (object.IsWetmapEnabled() && !object.wetmap.IsValid())
 				{
 					GPUBufferDesc desc;

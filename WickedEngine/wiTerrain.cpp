@@ -540,8 +540,8 @@ namespace wi::terrain
 	int gg_detail_budget = 3;           // detail builds launched per frame at most (camera chunk first)
 	int gg_detail_lod_step0 = 1;        // lattice steps between vertices within dist0 (1 = 8 units at factor 5)
 	int gg_detail_lod_step1 = 2;        // within dist1 (2 = 16 units); beyond: factor steps (the chunk grid, 40)
-	float gg_detail_lod_dist0 = 800;    // world units, LOD centre -> nearest point of a tile (Lee 2026-11-06: 800 / 2000)
-	float gg_detail_lod_dist1 = 2000;
+	float gg_detail_lod_dist0 = 1500;   // world units, LOD centre -> nearest point of a tile (Lee 2026-11-06 19:15: 1500 / 3750;
+	float gg_detail_lod_dist1 = 3750;   // GG drives both from the per-level Terrain Detail Distance, dist1 = 2.5 x dist0)
 	float gg_detail_lod_hyst = 400;     // the LOD / ring centre follows the camera once it strays this far
 	uint32_t gg_detail_count = 0;       // chunks drawing a detail mesh this frame
 	uint32_t gg_detail_builds = 0;      // detail meshes swapped in since start

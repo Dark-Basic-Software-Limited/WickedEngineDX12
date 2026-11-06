@@ -11,6 +11,8 @@
 #include "wiBacklog.h"
 
 #include <mutex>
+#include <thread>
+#include <condition_variable>
 #include <string>
 #include <atomic>
 #include <deque>
@@ -507,187 +509,455 @@ namespace wi::terrain
 		return gg_blendmap_half_res ? uint32_t((chunk_width - 1) / 2 + 1) : uint32_t(chunk_width);
 	}
 	// =============================================================================================================
-	// GGMAX PROTOTYPE (BR-0009 round 7): NEAR-CAMERA DETAIL MESHES.
+	// GGMAX PROTOTYPE (BR-0009 round 7 + round 8 LOD): NEAR-CAMERA DETAIL MESHES.
 	// Lee 2026-11-06: "match the DX11 sculpt result as close as practicable" (DX11 GGTerrain draws 8-unit vertices
 	// near the camera; the chunk grid is 40/80). Chunks within gg_detail_ring chunks (Chebyshev) of the camera chunk
-	// get a second mesh, gg_detail_factor x denser per side, sampled from the SAME height modifiers. The renderer
-	// draws it instead of the chunk mesh (wi::scene::gg_detail_render_mesh, consulted ONLY where Scene picks
+	// get a second mesh on a lattice gg_detail_factor x denser per side, sampled from the SAME height modifiers. The
+	// renderer draws it instead of the chunk mesh (wi::scene::gg_detail_render_mesh, consulted ONLY where Scene picks
 	// object.mesh_index); the chunk keeps its ObjectComponent (material/VT, occlusion, shadow flags, wetmap) and its
 	// coarse MeshComponent, so every CPU consumer (picks, GG blend/grass/bake passes) is untouched.
-	// Seams: an edge whose neighbour is ALSO detailed is sampled exactly on both sides (identical world positions);
-	// an edge facing a coarse chunk is stitched - the extra vertices lie on the straight coarse edge (that chunk's
-	// border strip is full resolution in every LOD list), so there are no cracks, only T-junctions.
-	// -1 = off (stock). GameGuru sets these (GGTerrainWicked_Init / harness SET_TERRAINDETAIL).
+	// Round 8 (Lee 2026-11-06 evening: "the mid-distance wireframe is practically filled in ... WAY too much density
+	// at this range"): DISTANCE LOD inside the detail meshes. A detail mesh is 13 x 13 TILES (10 chunk cells, 400
+	// units at scale 40); a tile's vertex spacing is gg_detail_lod_step0 lattice steps (1 = 8 units at factor 5)
+	// within gg_detail_lod_dist0 of the LOD centre, step1 within dist1, and the chunk grid's own spacing (factor
+	// steps = 40 units) beyond - the same doubling-then-coarse ladder DX11's clipmap draws (8 / 16 / 32...).
+	// Seams, by construction: a tile EDGE uses the COARSER spacing of the two tiles that share it (a neighbour chunk
+	// outside the ring, or not generated yet, counts as the chunk grid), every vertex is sampled exactly from the
+	// height function at its lattice position (with the chunk generator's own lerp, so a detail border vertex is
+	// bit-identical to the chunk mesh's), so both sides of every edge - inside a mesh, between two detail meshes and
+	// against a coarse chunk mesh - hold IDENTICAL vertices: no stitching, no T-junctions. Each tile's border band
+	// (its edge vertices -> its first interior row) is a zipper triangulation, so any two spacings meet.
+	// The LOD centre and the ring centre follow the camera with hysteresis (gg_detail_lod_hyst), and only once the
+	// previous generation has swapped in (a moving camera cannot keep superseding it). A new centre (or ring /
+	// setting) rebuilds only the ring chunks whose tile spacings changed (a per-chunk signature), and the rebuilt
+	// meshes swap in TOGETHER, in one frame, once all of them are ready - the old set (self-consistent) draws
+	// meanwhile, so a moving camera never shows a crack between a new and an old mesh. Builds run on a PRIVATE thread
+	// pool (gg_DetailPool), never in wi::jobsystem: a jobsystem Wait on a Low context runs every queued Low job inline,
+	// so GG's Generation_Cancel (every sculpt frame) could otherwise run a whole detail build on the main thread.
+	// -1 = off (stock). GameGuru sets these (GGTerrainWicked_Init / harness SET_TERRAINDETAIL, SET_TERRAINDETAILLOD).
 	int gg_detail_ring = -1;
-	int gg_detail_factor = 5;           // 5 x 40-unit chunk grid = 8 units, DX11's finest GGTerrain spacing
-	int gg_detail_budget = 2;           // detail meshes built per frame at most (camera chunk first)
+	int gg_detail_factor = 5;           // 5 x 40-unit chunk grid = 8-unit lattice, DX11's finest GGTerrain spacing
+	int gg_detail_budget = 3;           // detail builds launched per frame at most (camera chunk first)
+	int gg_detail_lod_step0 = 1;        // lattice steps between vertices within dist0 (1 = 8 units at factor 5)
+	int gg_detail_lod_step1 = 2;        // within dist1 (2 = 16 units); beyond: factor steps (the chunk grid, 40)
+	float gg_detail_lod_dist0 = 800;    // world units, LOD centre -> nearest point of a tile (Lee 2026-11-06: 800 / 2000)
+	float gg_detail_lod_dist1 = 2000;
+	float gg_detail_lod_hyst = 400;     // the LOD / ring centre follows the camera once it strays this far
 	uint32_t gg_detail_count = 0;       // chunks drawing a detail mesh this frame
-	uint32_t gg_detail_builds = 0;      // detail meshes built since start
-	uint32_t gg_detail_last_built = 0;  // built in the last frame that built any
-	float gg_detail_last_ms = 0;        // main-thread ms of that frame's builds
-	uint64_t gg_detail_tris = 0;        // triangles per detail mesh (last build)
-	float gg_detail_sample_ms = 0;      // last build: height sampling / CreateRenderData+topology ms
+	uint32_t gg_detail_builds = 0;      // detail meshes swapped in since start
+	uint32_t gg_detail_last_built = 0;  // swapped in by the last frame that swapped any
+	float gg_detail_last_ms = 0;        // main-thread ms of that frame's swaps
+	uint64_t gg_detail_tris = 0;        // triangles of the last mesh swapped in
+	float gg_detail_sample_ms = 0;      // last mesh swapped in: topology+sampling+attributes / CreateRenderData ms
 	float gg_detail_upload_ms = 0;
+	float gg_detail_build_ms = 0;       // last mesh swapped in: its whole build (one pool thread, serial)
+	float gg_detail_build_ms_max = 0;   // the slowest build of the last frame that swapped any
+	uint64_t gg_detail_drawn_tris = 0;  // this frame: triangles / vertices of every detail mesh drawn
+	uint64_t gg_detail_drawn_verts = 0;
+	uint32_t gg_detail_swaps = 0;       // generation swaps (a new centre / ring / setting fully swapped in)
+	uint32_t gg_detail_pending = 0;     // ring chunks still waiting for their rebuild (the generation swap waits)
+	uint32_t gg_detail_not_current = 0; // drawn ring meshes whose signature is not the current target's (old generation)
+	uint32_t gg_detail_threads = 0;     // private build threads
+	float gg_detail_centre_x = 0, gg_detail_centre_z = 0;
+	int gg_detail_eff_step0 = 0, gg_detail_eff_step1 = 0; // what the builder actually uses (steps validated, dists ordered)
+	float gg_detail_eff_dist0 = 0, gg_detail_eff_dist1 = 0;
+
+	static constexpr int gg_detail_tiles = 13; // tiles a side per chunk: 130 chunk cells / 10
+	static_assert((chunk_width - 1) % gg_detail_tiles == 0, "detail tiles must split the chunk cells evenly");
+	struct GGDetailLod
+	{
+		float cx = 0, cz = 0;          // LOD centre (world)
+		float stride = 0;              // chunk size (world)
+		float dist0 = 0, dist1 = 0;
+		int F = 5;                     // lattice steps per chunk cell (gg_detail_factor)
+		int step0 = 1, step1 = 2;      // validated: each divides the tile size and is <= F
+	};
+	// a step a tile can use: <= F (never coarser than the chunk grid, which every ring-border edge must match) and a
+	// divisor of the tile size 10*F (so tile corners and edges land on its vertices)
+	static inline int gg_DetailValidStep(int s, int F)
+	{
+		const int TS = ((chunk_width - 1) / gg_detail_tiles) * F;
+		s = std::max(1, std::min(s, F));
+		while (TS % s != 0)
+			s--;
+		return s;
+	}
+	// lattice step of tile (tx, tz) of chunk (x, z). tx / tz may be -1 or 13: the neighbour chunk's border tile, which
+	// is first normalised to ITS chunk so the arithmetic is bit-identical to that chunk's own (a step that flipped at a
+	// threshold on one side only would open a crack). A pure function: the main thread and every build agree.
+	static inline int gg_DetailTileStep(const GGDetailLod& L, int x, int z, int tx, int tz)
+	{
+		const int T = gg_detail_tiles;
+		if (tx < 0) { tx += T; x -= 1; } else if (tx >= T) { tx -= T; x += 1; }
+		if (tz < 0) { tz += T; z -= 1; } else if (tz >= T) { tz -= T; z += 1; }
+		const float tw = L.stride / float(T);
+		const float x0 = float(x) * L.stride - 0.5f * L.stride + float(tx) * tw;
+		const float z0 = float(z) * L.stride - 0.5f * L.stride + float(tz) * tw;
+		const float dx = std::max(0.0f, std::max(x0 - L.cx, L.cx - (x0 + tw)));
+		const float dz = std::max(0.0f, std::max(z0 - L.cz, L.cz - (z0 + tw)));
+		const float d2 = dx * dx + dz * dz;
+		if (d2 < L.dist0 * L.dist0) return L.step0;
+		if (d2 < L.dist1 * L.dist1) return L.step1;
+		return L.F;
+	}
 	struct GGDetailInputs
 	{
-		XMFLOAT3 position = XMFLOAT3(0, 0, 0);  // the chunk's world position
+		XMFLOAT3 position = XMFLOAT3(0, 0, 0);  // the chunk's world position (its centre)
 		float scale = 1, bottomLevel = 0, topLevel = 1;
 		wi::vector<std::shared_ptr<Modifier>> modifiers; // copies of the shared_ptrs: the job never touches Terrain
-		int S = 2;
-		uint32_t nmask = 0;
+		GGDetailLod L;
+		int cx = 0, cz = 0;                    // chunk coordinates
+		uint32_t nmask = 0;                    // edge bits 1:-x 2:+x 4:-z 8:+z set = that neighbour is a detail chunk
 		bool doubleSidedShadow = false;
 		Entity material = INVALID_ENTITY;      // the chunk entity (its material / virtual texture)
 	};
-	// One background build. The record keeps it in flight; done is set last, after mesh is complete.
+	// One background build. The record keeps it in flight; done is set last, after mesh and stats are complete.
 	struct GGDetailJob
 	{
 		std::atomic<bool> done{ false };
+		std::atomic<bool> cancelled{ false };  // superseded / torn down: the build stops at its next phase
 		GGDetailInputs in;
 		Entity chunk_entity = INVALID_ENTITY;
+		uint64_t sig = 0;
+		uint32_t tris = 0, verts = 0;
+		uint32_t unexpected = 0;               // triangles whose lattice winding disagreed with their emitter's (a fold)
+		float build_ms = 0, sample_ms = 0, upload_ms = 0;
 		MeshComponent mesh;
 	};
 	struct GGDetailRec
 	{
 		Entity mesh_entity = INVALID_ENTITY;   // the detail MeshComponent (an entity of its own, no object/transform)
 		Entity chunk_entity = INVALID_ENTITY;  // the chunk entity it was built for (a Generation_Restart reuses coords)
-		uint32_t nmask = 0;                    // edge bits 1:-x 2:+x 4:-z 8:+z set = that neighbour is detailed too
-		int factor = 0;
+		uint64_t sig = 0;                      // signature of the mesh in mesh_entity (0 = none)
+		uint32_t tris = 0, verts = 0, unexpected = 0;
 		bool dirty = true;                     // the chunk was regenerated (sculpt) since the last launch
 		std::shared_ptr<GGDetailJob> job;      // a build in flight (or finished, not yet swapped in)
 	};
-	static wi::unordered_map<Chunk, GGDetailRec> gg_detail_recs;
-	static wi::jobsystem::context gg_detail_ctx;  // every detail build job (Generation_Cancel waits on it)
-	static std::mutex gg_detail_topology_lock;
-	static std::shared_ptr<MeshComponent::SharedTopology> gg_detail_topology; // indices + UVs, identical per factor
+	static wi::unordered_map<Chunk, GGDetailRec> gg_detail_recs; // ska flat map: NEVER hold a reference across an insert
+	static GGDetailLod gg_detail_L;               // the current target (its centre carries the hysteresis)
+	static bool gg_detail_have_centre = false;
+	static Chunk gg_detail_cc;                    // the ring centre (hysteresis like the LOD centre)
+	static bool gg_detail_have_cc = false;
+	static uint32_t gg_detail_pending_frames = 0; // frames in a row with a generation pending
+
+	// The private build pool: plain threads at the jobsystem's Low OS priority, a FIFO of jobs, no work stealing by
+	// anyone else. Each build runs serially on one thread; up to 3 build at once. Never destroyed (its threads are
+	// detached and sleep for the life of the process); every teardown path drains it first (gg_DetailPoolDrain).
+	class GGDetailPool
+	{
+	public:
+		void Push(std::function<void()> f)
+		{
+			std::unique_lock<std::mutex> lock(m);
+			if (threads == 0)
+				Start();
+			q.push_back(std::move(f));
+			cv.notify_one();
+		}
+		// queued jobs are dropped (their records are being cleared), running ones finish
+		void Drain()
+		{
+			std::unique_lock<std::mutex> lock(m);
+			q.clear();
+			idle.wait(lock, [this] { return busy == 0; });
+		}
+		uint32_t Load()
+		{
+			std::unique_lock<std::mutex> lock(m);
+			return uint32_t(q.size()) + uint32_t(busy);
+		}
+		uint32_t Threads() const { return threads; }
+	private:
+		void Start() // m held
+		{
+			const unsigned hc = std::max(1u, std::thread::hardware_concurrency());
+			const unsigned n = std::max(1u, std::min(3u, hc / 4));
+			for (unsigned i = 0; i < n; ++i)
+			{
+				std::thread th([this] {
+#ifdef _WIN32
+					SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST); // as wi::jobsystem's Low pool
+					SetThreadDescription(GetCurrentThread(), L"gg_terrain_detail");
+#endif
+					for (;;)
+					{
+						std::function<void()> f;
+						{
+							std::unique_lock<std::mutex> lock(m);
+							cv.wait(lock, [this] { return !q.empty(); });
+							f = std::move(q.front());
+							q.pop_front();
+							busy++;
+						}
+						f();
+						{
+							std::unique_lock<std::mutex> lock(m);
+							busy--;
+							if (busy == 0)
+								idle.notify_all();
+						}
+					}
+				});
+				th.detach();
+				threads++;
+			}
+		}
+		std::mutex m;
+		std::condition_variable cv, idle;
+		std::deque<std::function<void()>> q;
+		uint32_t threads = 0;
+		int busy = 0;
+	};
+	static GGDetailPool& gg_DetailPool() { static GGDetailPool* p = new GGDetailPool(); return *p; }
 
 	static inline Chunk gg_MakeChunk(int x, int z) { Chunk c; c.x = x; c.z = z; return c; }
+
+	// what a chunk's detail mesh depends on besides the height data: its tile steps, its detail neighbours' border tile
+	// steps, the normal step, the lattice and the chunk entity. Equal signature = the drawn mesh is still right.
+	static uint64_t gg_DetailSig(const GGDetailLod& L, const Chunk& c, uint32_t nmask, Entity e)
+	{
+		uint64_t h = 1469598103934665603ull;
+		auto mix = [&h](uint64_t v) { h ^= v; h *= 1099511628211ull; };
+		mix(uint64_t(e)); mix(uint64_t(L.F)); mix(uint64_t(L.step0)); mix(uint64_t(nmask));
+		const int T = gg_detail_tiles;
+		for (int tz = 0; tz < T; ++tz)
+			for (int tx = 0; tx < T; ++tx)
+				mix(uint64_t(gg_DetailTileStep(L, c.x, c.z, tx, tz)));
+		for (int k = 0; k < T; ++k)
+		{
+			mix((nmask & 1) ? uint64_t(gg_DetailTileStep(L, c.x, c.z, -1, k)) : 0);
+			mix((nmask & 2) ? uint64_t(gg_DetailTileStep(L, c.x, c.z, T, k)) : 0);
+			mix((nmask & 4) ? uint64_t(gg_DetailTileStep(L, c.x, c.z, k, -1)) : 0);
+			mix((nmask & 8) ? uint64_t(gg_DetailTileStep(L, c.x, c.z, k, T)) : 0);
+		}
+		return h == 0 ? 1 : h;
+	}
+
+	// the wetmap is one value per DRAWN vertex, in the drawn mesh's vertex order: whenever the drawn topology changes
+	// (wiScene only compares the SIZE - an all-chunk-grid detail mesh has the chunk mesh's 131 x 131 vertices in another
+	// order), drop it; wiScene recreates it zeroed and the ocean refresh re-wets the underwater vertices the same frame.
+	static void gg_DetailResetWetmap(Scene& scene, Entity chunk_entity)
+	{
+		ObjectComponent* o = scene.objects.GetComponent(chunk_entity);
+		if (o != nullptr)
+			o->wetmap = {};
+	}
 
 	static void gg_DetailClearAll(Scene* scene)
 	{
 		for (auto& it : gg_detail_recs)
 		{
+			if (it.second.job)
+				it.second.job->cancelled.store(true);
 			if (scene != nullptr && it.second.mesh_entity != INVALID_ENTITY)
+			{
 				scene->Entity_Remove(it.second.mesh_entity);
+				gg_DetailResetWetmap(*scene, it.second.chunk_entity);
+			}
 		}
 		gg_detail_recs.clear(); // jobs still in flight keep their own reference; their result is dropped
 		wi::scene::gg_detail_render_mesh.clear();
 		gg_detail_count = 0;
+		gg_detail_drawn_tris = 0;
+		gg_detail_drawn_verts = 0;
+		gg_detail_pending = 0;
+		gg_detail_not_current = 0;
+		gg_detail_have_centre = false;
+		gg_detail_have_cc = false;
+		gg_detail_pending_frames = 0;
 	}
 
-	// Builds one detail mesh into `mesh` (a fresh MeshComponent). Runs as a background job (like the generator's
-	// chunk builds: heights through the same modifiers, CreateRenderData on the worker); nested parallel dispatches.
-	static void gg_BuildDetailMesh(const GGDetailInputs& in, MeshComponent& mesh)
+	// GGMAX PROTOTYPE (BR-0009 round 8): every path that tears the terrain down (Generation_Restart, the terrain-removed
+	// branch, GameGuru's Terrain Off / Terrain Bake via GGTerrainWicked_Shutdown): drain the build pool (a running build
+	// reads the height modifiers - GG's heightmap - until it finishes), then remove every detail mesh entity.
+	void gg_DetailShutdown(Scene* scene)
 	{
-		const int S = in.S;
-		const int C = chunk_width - 1;  // chunk cells per side
-		const int D = C * S;            // detail cells per side
-		const int N = D + 1;            // detail vertices per side
-		const int NP = N + 2;           // + one ring outside the chunk, for central-difference normals
+		for (auto& it : gg_detail_recs)
+			if (it.second.job)
+				it.second.job->cancelled.store(true);
+		gg_DetailPool().Drain();
+		gg_DetailClearAll(scene);
+	}
+
+	// Builds one detail mesh into job.mesh (a fresh MeshComponent), on a pool thread, serially (no nested parallelism:
+	// see gg_DetailPool). Heights through the same modifiers and lerp as the chunk generator; CreateRenderData here.
+	static void gg_BuildDetailMesh(GGDetailJob& job)
+	{
+		wi::Timer gg_t_build;
+		const GGDetailInputs& in = job.in;
+		MeshComponent& mesh = job.mesh;
+		const GGDetailLod& L = in.L;
+		const int F = L.F;
+		const int C = chunk_width - 1;        // chunk cells a side (130)
+		const int T = gg_detail_tiles;        // tiles a side (13)
+		const int TS = (C / T) * F;           // lattice steps a tile side (50 at factor 5)
+		const int D = C * F;                  // lattice steps a chunk side (650)
+		const int N = D + 1;                  // lattice vertices a side
+		const int ns = L.step0;               // normal step: central differences at the finest spacing in use
+		const int NP = N + 2 * ns;            // + a ring outside the chunk for those differences
 		const float scale = in.scale;
-		const float invS = 1.0f / float(S);
-		// local coordinate of detail column i: the chunk vertex formula at fractional coord i/S - so i = c*S lands on
+		const float invF = 1.0f / float(F);
+		// local coordinate of lattice column i: the chunk vertex formula at fractional coord i/F - so i = c*F lands on
 		// exactly the float the chunk (and its neighbour) computes for chunk vertex c
-		auto lc = [&](int i) { return (float(i) * invS - chunk_half_width) * scale; };
-		wi::Timer gg_t_sample;
-		wi::vector<float> h(size_t(NP) * size_t(NP));
-		wi::jobsystem::context ctx;
-		ctx.priority = wi::jobsystem::Priority::Low; // as the generator: never ahead of the frame's own jobs
-		wi::jobsystem::Dispatch(ctx, uint32_t(NP), 4, [&](wi::jobsystem::JobArgs a) {
-			const int pj = int(a.jobIndex);
-			const float lz = lc(pj - 1);
+		auto lc = [&](int i) { return (float(i) * invF - chunk_half_width) * scale; };
+
+		// 1. tile steps, with a border of the neighbours' tiles (a neighbour that is not a detail chunk = the grid, F)
+		wi::vector<int> tstep(size_t(T + 2) * size_t(T + 2), F);
+		auto TSt = [&](int tx, int tz) -> int& { return tstep[size_t(tz + 1) * size_t(T + 2) + size_t(tx + 1)]; };
+		for (int tz = -1; tz <= T; ++tz)
+		{
+			for (int tx = -1; tx <= T; ++tx)
+			{
+				const bool outx = tx < 0 || tx >= T, outz = tz < 0 || tz >= T;
+				if (outx && outz)
+					continue; // corner tiles never share an edge with this chunk
+				const uint32_t bit = tx < 0 ? 1u : (tx >= T ? 2u : (tz < 0 ? 4u : (tz >= T ? 8u : 0u)));
+				TSt(tx, tz) = (bit == 0 || (in.nmask & bit) != 0) ? gg_DetailTileStep(L, in.cx, in.cz, tx, tz) : F;
+			}
+		}
+
+		// 2. topology: one vertex per lattice point used, triangles wound like the chunk's (TL LL LR: +cross in x,z).
+		//    Each emitter knows its triangles' natural winding (interior / -z / +x bands +, +z / -x bands -: mirrored
+		//    mappings); a triangle that disagrees would be a fold, and is counted (job.unexpected, harness).
+		wi::vector<uint32_t> vid(size_t(N) * size_t(N), ~0u);
+		wi::vector<XMINT2> vlat; // lattice coordinate of each vertex
+		wi::vector<uint32_t> idx;
+		vlat.reserve(65536);
+		idx.reserve(65536 * 6);
+		auto V = [&](int i, int j) -> uint32_t {
+			uint32_t& v = vid[size_t(j) * size_t(N) + size_t(i)];
+			if (v == ~0u)
+			{
+				v = (uint32_t)vlat.size();
+				vlat.push_back(XMINT2(i, j));
+			}
+			return v;
+		};
+		auto tri = [&](uint32_t a, uint32_t b, uint32_t c, int expect) {
+			const XMINT2 A = vlat[a], B = vlat[b], Cc = vlat[c];
+			const int64_t cr = int64_t(B.x - A.x) * int64_t(Cc.y - A.y) - int64_t(B.y - A.y) * int64_t(Cc.x - A.x);
+			if (cr == 0 || (cr > 0) != (expect > 0))
+				job.unexpected++;
+			idx.push_back(a);
+			if (cr >= 0) { idx.push_back(b); idx.push_back(c); }
+			else { idx.push_back(c); idx.push_back(b); }
+		};
+		wi::vector<uint32_t> O, I;
+		wi::vector<int> Oa, Ia;
+		for (int tz = 0; tz < T; ++tz)
+		{
+			for (int tx = 0; tx < T; ++tx)
+			{
+				const int s = TSt(tx, tz);
+				const int n = TS / s;               // cells a side at this tile's spacing (>= 10)
+				const int bx = tx * TS, bz = tz * TS; // tile origin (lattice)
+				// interior quads (the chunk's quad shape and diagonal)
+				for (int b = 1; b < n - 1; ++b)
+				{
+					for (int a = 1; a < n - 1; ++a)
+					{
+						const int x0 = bx + a * s, z0 = bz + b * s;
+						const uint32_t LL = V(x0, z0), LR = V(x0 + s, z0), TL = V(x0, z0 + s), TR = V(x0 + s, z0 + s);
+						tri(TL, LL, LR, 1);
+						tri(TL, LR, TR, 1);
+					}
+				}
+				// a border band: outer = the tile edge at spacing e (the coarser of the two tiles sharing it), inner = the
+				// first interior row at s. at(u, d) maps (along the edge 0..TS, depth 0 or s) to the lattice. The first
+				// and last rungs are the tile's corner diagonals, shared with the neighbouring bands; the zipper walks
+				// both rows in order, so its rungs never cross and every triangle has positive area.
+				auto band = [&](int e, int expect, auto&& at) {
+					O.clear(); Oa.clear(); I.clear(); Ia.clear();
+					for (int u = 0; u <= TS; u += e) { const XMINT2 p = at(u, 0); O.push_back(V(p.x, p.y)); Oa.push_back(u); }
+					for (int u = s; u <= TS - s; u += s) { const XMINT2 p = at(u, s); I.push_back(V(p.x, p.y)); Ia.push_back(u); }
+					size_t io = 0, ii = 0;
+					while (io + 1 < O.size() || ii + 1 < I.size())
+					{
+						const bool outer = ii + 1 >= I.size() || (io + 1 < O.size() && Oa[io + 1] <= Ia[ii + 1]);
+						if (outer) { tri(O[io], O[io + 1], I[ii], expect); ++io; }
+						else { tri(O[io], I[ii + 1], I[ii], expect); ++ii; }
+					}
+				};
+				band(std::max(s, TSt(tx, tz - 1)), 1, [&](int u, int d) { return XMINT2(bx + u, bz + d); });       // -z edge
+				band(std::max(s, TSt(tx, tz + 1)), -1, [&](int u, int d) { return XMINT2(bx + u, bz + TS - d); }); // +z edge
+				band(std::max(s, TSt(tx - 1, tz)), -1, [&](int u, int d) { return XMINT2(bx + d, bz + u); });      // -x edge
+				band(std::max(s, TSt(tx + 1, tz)), 1, [&](int u, int d) { return XMINT2(bx + TS - d, bz + u); });  // +x edge
+			}
+		}
+		const size_t vc = vlat.size();
+		if (job.cancelled.load())
+			return;
+
+		// 3. heights: every vertex and its four normal neighbours, sampled exactly with the chunk generator's own
+		//    expression (lerp(bottomLevel, topLevel, height)), so shared border vertices are bit-identical
+		wi::vector<uint8_t> need(size_t(NP) * size_t(NP), 0);
+		wi::vector<float> h(size_t(NP) * size_t(NP), 0.0f);
+		auto P = [&](int i, int j) { return size_t(j + ns) * size_t(NP) + size_t(i + ns); };
+		for (const XMINT2& p : vlat)
+		{
+			need[P(p.x, p.y)] = 1;
+			need[P(p.x - ns, p.y)] = 1;
+			need[P(p.x + ns, p.y)] = 1;
+			need[P(p.x, p.y - ns)] = 1;
+			need[P(p.x, p.y + ns)] = 1;
+		}
+		for (int pj = 0; pj < NP; ++pj)
+		{
+			if ((pj & 63) == 0 && job.cancelled.load())
+				return;
+			const float lz = lc(pj - ns);
 			for (int pi = 0; pi < NP; ++pi)
 			{
+				const size_t k = size_t(pj) * size_t(NP) + size_t(pi);
+				if (need[k] == 0)
+					continue;
 				float height = 0;
-				const XMFLOAT2 world_pos = XMFLOAT2(in.position.x + lc(pi - 1), in.position.z + lz);
+				const XMFLOAT2 world_pos = XMFLOAT2(in.position.x + lc(pi - ns), in.position.z + lz);
 				for (auto& modifier : in.modifiers)
 				{
 					modifier->Apply(world_pos, height);
 				}
-				h[size_t(pj) * NP + pi] = in.bottomLevel + (in.topLevel - in.bottomLevel) * height; // the chunk's lerp(bottomLevel, topLevel, height)
+				h[k] = lerp(in.bottomLevel, in.topLevel, height); // EXACTLY the chunk generator's expression
 			}
-		});
-		wi::jobsystem::Wait(ctx);
-		gg_detail_sample_ms = (float)gg_t_sample.elapsed_milliseconds();
-		auto H = [&](int i, int j) -> float& { return h[size_t(j + 1) * NP + size_t(i + 1)]; };
-		// stitch every edge that faces a coarse chunk: vertices between two chunk vertices lie on their straight line
-		auto stitch = [&](bool alongZ, int fixed) {
-			for (int k = 1; k < D; ++k)
-			{
-				if (k % S == 0)
-					continue;
-				const int k0 = (k / S) * S;
-				const float f = float(k - k0) * invS;
-				const float a = alongZ ? H(fixed, k0) : H(k0, fixed);
-				const float b = alongZ ? H(fixed, k0 + S) : H(k0 + S, fixed);
-				(alongZ ? H(fixed, k) : H(k, fixed)) = a + (b - a) * f;
-			}
-		};
-		if ((in.nmask & 1) == 0) stitch(true, 0);
-		if ((in.nmask & 2) == 0) stitch(true, D);
-		if ((in.nmask & 4) == 0) stitch(false, 0);
-		if ((in.nmask & 8) == 0) stitch(false, D);
+		}
 
-		const size_t vc = size_t(N) * size_t(N);
+		// 4. vertex attributes
 		mesh.SetQuantizedPositionsDisabled(true); // as the chunk mesh: neighbouring AABBs differ
 		mesh.SetDoubleSidedShadow(in.doubleSidedShadow);
 		mesh.vertex_positions.resize(vc);
 		mesh.vertex_normals.resize(vc);
 		mesh.vertex_tangents.resize(vc);
 		mesh.vertex_uvset_0.resize(vc);
-		const float step = scale * invS;
+		const float nstep = scale * invF * float(ns);
 		const float scale_rcp = 1.0f / scale; // = Terrain::chunk_scale_rcp (private), the same expression
-		wi::jobsystem::Dispatch(ctx, uint32_t(N), 4, [&](wi::jobsystem::JobArgs a) {
-			const int j = int(a.jobIndex);
-			const float z = lc(j);
-			for (int i = 0; i < N; ++i)
-			{
-				const size_t index = size_t(i) + size_t(j) * size_t(N); // the chunk's layout: x fastest
-				const float x = lc(i);
-				const float y = H(i, j);
-				XMFLOAT3 n(H(i - 1, j) - H(i + 1, j), 2.0f * step, H(i, j - 1) - H(i, j + 1));
-				XMStoreFloat3(&n, XMVector3Normalize(XMLoadFloat3(&n)));
-				mesh.vertex_positions[index] = XMFLOAT3(x, y, z);
-				mesh.vertex_normals[index] = n;
-				// the chunk's tangent convention (corner[x+1] - corner[z+1], w = 1), at this spacing
-				mesh.vertex_tangents[index] = XMFLOAT4(step, H(i + 1, j) - H(i, j + 1), -step, 1);
-				mesh.vertex_uvset_0[index] = XMFLOAT2(x * scale_rcp * chunk_width_rcp + 0.5f, z * scale_rcp * chunk_width_rcp + 0.5f);
-			}
-		});
-		// the chunk's LOD0 quad order and winding (x outer, z inner; TL LL LR / TL LR TR) - the same lattice shape the
-		// pick grid walk (wiScene gg_GetTerrainGrid) recognises
-		mesh.indices.resize(size_t(D) * size_t(D) * 6);
-		wi::jobsystem::Dispatch(ctx, uint32_t(D), 4, [&](wi::jobsystem::JobArgs a) {
-			const int x = int(a.jobIndex);
-			uint32_t* o = mesh.indices.data() + size_t(x) * size_t(D) * 6;
-			for (int z = 0; z < D; ++z)
-			{
-				const uint32_t LL = uint32_t(x + z * N), LR = LL + 1, TL = LL + uint32_t(N), TR = TL + 1;
-				*o++ = TL; *o++ = LL; *o++ = LR;
-				*o++ = TL; *o++ = LR; *o++ = TR;
-			}
-		});
-		wi::jobsystem::Wait(ctx);
+		for (size_t v = 0; v < vc; ++v)
+		{
+			const XMINT2 p = vlat[v];
+			const float x = lc(p.x), z = lc(p.y);
+			const float y = h[P(p.x, p.y)];
+			XMFLOAT3 n(h[P(p.x - ns, p.y)] - h[P(p.x + ns, p.y)], 2.0f * nstep, h[P(p.x, p.y - ns)] - h[P(p.x, p.y + ns)]);
+			XMStoreFloat3(&n, XMVector3Normalize(XMLoadFloat3(&n)));
+			mesh.vertex_positions[v] = XMFLOAT3(x, y, z);
+			mesh.vertex_normals[v] = n;
+			// the chunk's tangent convention (corner[x+1] - corner[z+1], w = 1), at the normal step
+			mesh.vertex_tangents[v] = XMFLOAT4(nstep, h[P(p.x + ns, p.y)] - h[P(p.x, p.y + ns)], -nstep, 1);
+			mesh.vertex_uvset_0[v] = XMFLOAT2(x * scale_rcp * chunk_width_rcp + 0.5f, z * scale_rcp * chunk_width_rcp + 0.5f);
+		}
+		mesh.indices = std::move(idx);
 		mesh.subsets.emplace_back();
 		mesh.subsets.back().materialID = in.material; // the chunk's material (its virtual texture, sampled by chunk UV)
 		mesh.subsets.back().indexOffset = 0;
 		mesh.subsets.back().indexCount = (uint32_t)mesh.indices.size();
 		mesh.subsets_per_lod = 1;
+		job.sample_ms = (float)gg_t_build.elapsed_milliseconds();
+		if (job.cancelled.load())
+			return;
 		wi::Timer gg_t_upload;
-		std::shared_ptr<MeshComponent::SharedTopology> topo;
-		{
-			std::scoped_lock lock(gg_detail_topology_lock);
-			topo = gg_detail_topology;
-		}
-		if (!topo || !topo->Matches(mesh))
-		{
-			topo = MeshComponent::CreateSharedTopology(mesh);
-			std::scoped_lock lock(gg_detail_topology_lock);
-			gg_detail_topology = topo;
-		}
-		mesh.gg_shared_topology = topo;
-		mesh.CreateRenderData();
-		gg_detail_upload_ms = (float)gg_t_upload.elapsed_milliseconds();
-		gg_detail_tris = uint64_t(D) * uint64_t(D) * 2;
+		mesh.CreateRenderData(); // own index buffer: every chunk's LOD topology differs
+		job.upload_ms = (float)gg_t_upload.elapsed_milliseconds();
+		job.tris = (uint32_t)(mesh.indices.size() / 3);
+		job.verts = (uint32_t)vc;
+		job.build_ms = (float)gg_t_build.elapsed_milliseconds();
 	}
 
 	// Per frame, main thread, generator idle (Generation_Update after the chunk loop): retire, swap finished builds
@@ -698,33 +968,104 @@ namespace wi::terrain
 		Scene& scene = *t.scene;
 		const bool on = gg_detail_ring >= 0 && gg_detail_factor >= 2;
 		const int R = gg_detail_ring;
-		const int S = std::min(gg_detail_factor, 16);
-		// the chunk UNDER the camera: chunk c spans c*stride +- stride/2. (Not t.center_chunk: the stock formula adds
-		// chunk_half_width in VERTEX units before the world-unit divide, so at chunk_scale 40 it lags up to half a chunk.)
 		const float stride = float(chunk_width - 1) * t.chunk_scale;
-		const Chunk cc = gg_MakeChunk((int)std::floor(camera.Eye.x / stride + 0.5f), (int)std::floor(camera.Eye.z / stride + 0.5f));
-		auto inRing = [&](const Chunk& c) { return on && std::max(std::abs(c.x - cc.x), std::abs(c.z - cc.z)) <= R; };
+		const float hyst = std::max(0.0f, gg_detail_lod_hyst);
+		// a new target only once the previous generation has swapped in (or has been stuck ~1.5 s)
+		const bool retarget = gg_detail_pending == 0 || gg_detail_pending_frames > 90;
 
-		// 1. retire records whose chunk is gone, regenerated under a new entity, or out of the ring
+		// the ring centre: the chunk UNDER the camera (chunk c spans c*stride +- stride/2), with hysteresis. (Not
+		// t.center_chunk: the stock formula adds chunk_half_width in VERTEX units before the world-unit divide, so at
+		// chunk_scale 40 it lags up to half a chunk.)
+		const Chunk camc = gg_MakeChunk((int)std::floor(camera.Eye.x / stride + 0.5f), (int)std::floor(camera.Eye.z / stride + 0.5f));
+		if (!on || !gg_detail_have_cc)
+		{
+			gg_detail_cc = camc;
+			gg_detail_have_cc = on;
+		}
+		else if (retarget && !(camc == gg_detail_cc))
+		{
+			const float reach = 0.5f * stride + hyst;
+			if (std::abs(camera.Eye.x - float(gg_detail_cc.x) * stride) > reach || std::abs(camera.Eye.z - float(gg_detail_cc.z) * stride) > reach)
+				gg_detail_cc = camc;
+		}
+		const Chunk cc = gg_detail_cc;
+		auto inRing = [&](const Chunk& c) { return on && std::max(std::abs(c.x - cc.x), std::abs(c.z - cc.z)) <= R; };
+		// a chunk that exists and draws a chunk-grid mesh (runs after the merge loop: nothing is merge_pending here
+		// unless the generator is mid-regen; a sculpt regen keeps the entity and its mesh)
+		auto present = [&](const Chunk& c) {
+			auto cit = t.chunks.find(c);
+			if (cit == t.chunks.end())
+				return false;
+			const MeshComponent* m = scene.meshes.GetComponent(cit->second.entity);
+			return m != nullptr && m->vertex_positions.size() == vertexCount && scene.objects.Contains(cit->second.entity);
+		};
+		auto isDetail = [&](const Chunk& c) { return inRing(c) && present(c); };
+
+		// the target LOD: the settings, and a centre that follows the camera with hysteresis
+		GGDetailLod L;
+		L.F = std::min(std::max(gg_detail_factor, 1), 16);
+		L.stride = stride;
+		L.step0 = gg_DetailValidStep(gg_detail_lod_step0, L.F);
+		L.step1 = std::max(L.step0, gg_DetailValidStep(gg_detail_lod_step1, L.F));
+		L.dist0 = std::max(0.0f, gg_detail_lod_dist0);
+		L.dist1 = std::max(L.dist0, gg_detail_lod_dist1);
+		if (!on || !gg_detail_have_centre || (retarget && (std::abs(camera.Eye.x - gg_detail_L.cx) > hyst || std::abs(camera.Eye.z - gg_detail_L.cz) > hyst)))
+		{
+			gg_detail_L.cx = std::round(camera.Eye.x);
+			gg_detail_L.cz = std::round(camera.Eye.z);
+			gg_detail_have_centre = on;
+		}
+		L.cx = gg_detail_L.cx;
+		L.cz = gg_detail_L.cz;
+		gg_detail_L = L;
+		gg_detail_centre_x = L.cx;
+		gg_detail_centre_z = L.cz;
+		gg_detail_eff_step0 = L.step0;
+		gg_detail_eff_step1 = L.step1;
+		gg_detail_eff_dist0 = L.dist0;
+		gg_detail_eff_dist1 = L.dist1;
+		gg_detail_threads = gg_DetailPool().Threads();
+
+		// 1. retire at once: records whose chunk is gone or regenerated under a new entity (or detail switched off).
+		//    Records that only LEFT the ring keep drawing (the old set is self-consistent) until the next generation swap.
 		for (auto it = gg_detail_recs.begin(); it != gg_detail_recs.end();)
 		{
 			auto cit = t.chunks.find(it->first);
 			const bool chunk_ok = cit != t.chunks.end() && cit->second.entity == it->second.chunk_entity;
 			const bool fresh = it->second.mesh_entity == INVALID_ENTITY && it->second.job != nullptr; // first build in flight
-			if ((!chunk_ok && !fresh) || !inRing(it->first))
+			const bool leaving = !inRing(it->first);
+			if (!on || (!chunk_ok && !fresh) || (leaving && it->second.mesh_entity == INVALID_ENTITY))
 			{
+				if (it->second.job)
+					it->second.job->cancelled.store(true);
 				wi::scene::gg_detail_render_mesh.erase(it->second.chunk_entity);
+				if (cit != t.chunks.end())
+				{
+					wi::scene::gg_detail_render_mesh.erase(cit->second.entity); // (a regenerated entity at the same coords)
+					if (it->second.mesh_entity != INVALID_ENTITY)
+						gg_DetailResetWetmap(scene, cit->second.entity);
+				}
 				if (it->second.mesh_entity != INVALID_ENTITY)
 					scene.Entity_Remove(it->second.mesh_entity);
 				it = gg_detail_recs.erase(it); // an in-flight job keeps its own reference; its result is dropped
 				continue;
 			}
+			if (leaving && it->second.job)
+			{
+				it->second.job->cancelled.store(true); // nothing more to build for it
+				it->second.job.reset();
+			}
 			++it;
 		}
 		gg_detail_count = 0;
+		gg_detail_drawn_tris = 0;
+		gg_detail_drawn_verts = 0;
 		if (!on)
 		{
 			wi::scene::gg_detail_render_mesh.clear();
+			gg_detail_pending = 0;
+			gg_detail_not_current = 0;
+			gg_detail_pending_frames = 0;
 			return;
 		}
 
@@ -737,149 +1078,318 @@ namespace wi::terrain
 						ring.push_back(gg_MakeChunk(cc.x + dx, cc.z + dz));
 
 		wi::Timer timer;
-		uint32_t launched = 0, swapped = 0, inflight = 0;
-		for (auto& it : gg_detail_recs)
-			if (it.second.job && !it.second.job->done.load())
-				inflight++;
+		uint32_t launched = 0, swapped = 0, pending = 0, not_current = 0;
+		uint32_t load = gg_DetailPool().Load();
+		bool blocked = false;           // a ring chunk needs a new mesh that is not ready yet
+		bool same_in_flight = false;    // a same-signature (height) rebuild is still running
+		wi::vector<Chunk> ready_same;   // finished rebuilds at an UNCHANGED signature (a sculpt): swap as one batch
+		wi::vector<Chunk> ready_new;    // finished rebuilds for the new generation: swap together
 		for (const Chunk& c : ring)
 		{
-			auto cit = t.chunks.find(c);
-			if (cit == t.chunks.end())
-				continue;
-			const ChunkData& cd = cit->second;
+			if (!present(c))
+				continue; // not generated (yet): nothing drawn there to replace; its neighbours treat it as the grid
+			const ChunkData& cd = t.chunks.find(c)->second;
 			const MeshComponent* cm = scene.meshes.GetComponent(cd.entity);
-			if (cd.merge_pending || cm == nullptr || cm->vertex_positions.size() != vertexCount || !scene.objects.Contains(cd.entity))
-				continue; // not merged yet
-			const bool dss = cm->IsDoubleSidedShadow();
+			const bool mergeable = !cd.merge_pending;
 			uint32_t nmask = 0;
-			if (inRing(gg_MakeChunk(c.x - 1, c.z))) nmask |= 1;
-			if (inRing(gg_MakeChunk(c.x + 1, c.z))) nmask |= 2;
-			if (inRing(gg_MakeChunk(c.x, c.z - 1))) nmask |= 4;
-			if (inRing(gg_MakeChunk(c.x, c.z + 1))) nmask |= 8;
-			GGDetailRec& r = gg_detail_recs[c];
-
-			// swap a finished build in
-			if (r.job && r.job->done.load())
+			if (isDetail(gg_MakeChunk(c.x - 1, c.z))) nmask |= 1;
+			if (isDetail(gg_MakeChunk(c.x + 1, c.z))) nmask |= 2;
+			if (isDetail(gg_MakeChunk(c.x, c.z - 1))) nmask |= 4;
+			if (isDetail(gg_MakeChunk(c.x, c.z + 1))) nmask |= 8;
+			const uint64_t sig = gg_DetailSig(L, c, nmask, cd.entity);
+			GGDetailRec& r = gg_detail_recs[c]; // (may insert: no reference to another record is held across this)
+			if (r.job && (r.job->sig != sig || r.job->chunk_entity != cd.entity))
 			{
-				if (r.job->chunk_entity == cd.entity)
-				{
-					if (r.mesh_entity == INVALID_ENTITY || !scene.meshes.Contains(r.mesh_entity))
-					{
-						r.mesh_entity = CreateEntity();
-						scene.meshes.Create(r.mesh_entity);
-					}
-					*scene.meshes.GetComponent(r.mesh_entity) = std::move(r.job->mesh); // the old GPU buffers release deferred
-					r.chunk_entity = r.job->chunk_entity;
-					r.nmask = r.job->in.nmask;
-					r.factor = r.job->in.S;
-					swapped++;
-					gg_detail_builds++;
-				}
+				r.job->cancelled.store(true); // superseded (setting / ring / neighbour moved on): its result is dropped
 				r.job.reset();
 			}
-
-			const bool have = r.mesh_entity != INVALID_ENTITY && scene.meshes.Contains(r.mesh_entity);
-			const bool stale = !have || r.dirty || r.chunk_entity != cd.entity || r.nmask != nmask || r.factor != S;
-			if (stale && !r.job && launched < (uint32_t)std::max(1, gg_detail_budget) && inflight < 6)
+			const bool have = r.mesh_entity != INVALID_ENTITY && scene.meshes.Contains(r.mesh_entity) && r.chunk_entity == cd.entity;
+			const bool current = have && r.sig == sig;
+			const bool ready = r.job != nullptr && r.job->done.load();
+			if (have && !current)
+				not_current++;
+			if (!current)
+			{
+				pending++;
+				if (!ready)
+					blocked = true;
+			}
+			else if (r.job && !ready)
+			{
+				same_in_flight = true;
+			}
+			if (ready)
+				(current ? ready_same : ready_new).push_back(c);
+			if ((!current || r.dirty) && r.job == nullptr && mergeable && launched < (uint32_t)std::max(1, gg_detail_budget) && load < 9)
 			{
 				auto job = std::make_shared<GGDetailJob>();
 				job->chunk_entity = cd.entity;
+				job->sig = sig;
 				job->in.position = cd.position;
 				job->in.scale = t.chunk_scale;
 				job->in.bottomLevel = t.bottomLevel;
 				job->in.topLevel = t.topLevel;
 				job->in.modifiers = t.modifiers;
-				job->in.S = S;
+				job->in.L = L;
+				job->in.cx = c.x;
+				job->in.cz = c.z;
 				job->in.nmask = nmask;
-				job->in.doubleSidedShadow = dss;
+				job->in.doubleSidedShadow = cm->IsDoubleSidedShadow();
 				job->in.material = cd.entity;
 				r.job = job;
 				r.dirty = false; // a regen after this point marks it again (merge loop) and relaunches after the swap
 				if (!have)
 					r.chunk_entity = cd.entity; // the retire loop must not take a first build in flight for a dead chunk
-				gg_detail_ctx.priority = wi::jobsystem::Priority::Low;
-				wi::jobsystem::Execute(gg_detail_ctx, [job](wi::jobsystem::JobArgs) {
-					gg_BuildDetailMesh(job->in, job->mesh);
+				gg_DetailPool().Push([job] {
+					if (!job->cancelled.load())
+						gg_BuildDetailMesh(*job);
 					job->done.store(true);
 				});
 				launched++;
-				inflight++;
+				load++;
+				if (current)
+					same_in_flight = true;
 			}
-			if (have && r.factor == S && r.chunk_entity == cd.entity)
+		}
+		gg_detail_pending = pending;
+		gg_detail_not_current = not_current;
+		gg_detail_pending_frames = pending > 0 ? gg_detail_pending_frames + 1 : 0;
+
+		// 3. swaps. A generation in ONE frame once complete; same-signature rebuilds (sculpt) as one batch once none of
+		//    them is still running (neighbours dirtied by one stroke swap together)
+		float build_max = 0;
+		auto swapIn = [&](const Chunk& c) {
+			auto rit = gg_detail_recs.find(c);
+			if (rit == gg_detail_recs.end() || rit->second.job == nullptr || rit->second.job->cancelled.load())
+				return;
+			GGDetailRec& r = rit->second;
+			GGDetailJob& job = *r.job;
+			const bool topology_changed = r.mesh_entity == INVALID_ENTITY || r.sig != job.sig || r.chunk_entity != job.chunk_entity;
+			if (r.mesh_entity == INVALID_ENTITY || !scene.meshes.Contains(r.mesh_entity))
 			{
-				wi::scene::gg_detail_render_mesh[cd.entity] = r.mesh_entity;
+				r.mesh_entity = CreateEntity();
+				scene.meshes.Create(r.mesh_entity); // (a component pool insert: no ComponentManager reference is held)
+			}
+			*scene.meshes.GetComponent(r.mesh_entity) = std::move(job.mesh); // the old GPU buffers release deferred
+			if (topology_changed)
+				gg_DetailResetWetmap(scene, job.chunk_entity);
+			r.chunk_entity = job.chunk_entity;
+			r.sig = job.sig;
+			r.tris = job.tris;
+			r.verts = job.verts;
+			r.unexpected = job.unexpected;
+			gg_detail_tris = job.tris;
+			gg_detail_sample_ms = job.sample_ms;
+			gg_detail_upload_ms = job.upload_ms;
+			gg_detail_build_ms = job.build_ms;
+			build_max = std::max(build_max, job.build_ms);
+			r.job.reset();
+			swapped++;
+			gg_detail_builds++;
+		};
+		if (!same_in_flight)
+			for (const Chunk& c : ready_same)
+				swapIn(c);
+		if (!blocked)
+		{
+			for (const Chunk& c : ready_new)
+				swapIn(c);
+			// the new set is complete: records that left the ring stop drawing now
+			bool retired = false;
+			for (auto it = gg_detail_recs.begin(); it != gg_detail_recs.end();)
+			{
+				if (!inRing(it->first))
+				{
+					auto cit = t.chunks.find(it->first);
+					if (cit != t.chunks.end())
+					{
+						wi::scene::gg_detail_render_mesh.erase(cit->second.entity);
+						gg_DetailResetWetmap(scene, cit->second.entity);
+					}
+					wi::scene::gg_detail_render_mesh.erase(it->second.chunk_entity);
+					if (it->second.mesh_entity != INVALID_ENTITY)
+						scene.Entity_Remove(it->second.mesh_entity);
+					it = gg_detail_recs.erase(it);
+					retired = true;
+					continue;
+				}
+				++it;
+			}
+			if (!ready_new.empty() || retired)
+				gg_detail_swaps++;
+		}
+
+		// 4. what draws: every record with a mesh built for its chunk's current entity
+		for (auto& [c, r] : gg_detail_recs)
+		{
+			auto cit = t.chunks.find(c);
+			if (cit == t.chunks.end())
+				continue;
+			const ChunkData& cd = cit->second;
+			const bool have = r.mesh_entity != INVALID_ENTITY && scene.meshes.Contains(r.mesh_entity) && r.chunk_entity == cd.entity;
+			auto mit = wi::scene::gg_detail_render_mesh.find(cd.entity);
+			if (have)
+			{
+				if (mit == wi::scene::gg_detail_render_mesh.end() || mit->second != r.mesh_entity)
+				{
+					gg_DetailResetWetmap(scene, cd.entity); // chunk mesh -> detail mesh
+					wi::scene::gg_detail_render_mesh[cd.entity] = r.mesh_entity;
+				}
 				gg_detail_count++;
+				gg_detail_drawn_tris += r.tris;
+				gg_detail_drawn_verts += r.verts;
 			}
-			else
+			else if (mit != wi::scene::gg_detail_render_mesh.end())
 			{
-				wi::scene::gg_detail_render_mesh.erase(cd.entity); // not built yet: the chunk mesh draws meanwhile
+				gg_DetailResetWetmap(scene, cd.entity); // detail mesh -> chunk mesh
+				wi::scene::gg_detail_render_mesh.erase(mit); // not built yet: the chunk mesh draws meanwhile
 			}
 		}
 		if (swapped > 0)
 		{
 			gg_detail_last_built = swapped;
 			gg_detail_last_ms = (float)timer.elapsed_milliseconds(); // main-thread cost of the frame that swapped
+			gg_detail_build_ms_max = build_max;
 		}
 	}
 
-	// GGMAX PROTOTYPE (BR-0009 round 7): the seam instrument (harness TERRAIN_DETAIL_SEAMS). For every chunk drawing a
-	// detail mesh and each of its 4 edges, compares the DRAWN border against the neighbour's DRAWN border at the same
-	// world XZ: a detail neighbour vertex for vertex, a chunk-mesh neighbour by linear interpolation along its border
-	// strip (full resolution in every LOD list). Reports the largest height gap per kind; 0 (float noise) = watertight.
-	void gg_DetailSeamTest(Terrain* t, float* maxGapDetail, float* maxGapCoarse, float* maxXZ, int* edgesDetail, int* edgesCoarse)
+	// border polyline of a DRAWN mesh along its chunk edge e (0:-x 1:+x 2:-z 3:+z): (world along-edge coord, world y),
+	// sorted, duplicates removed. Works for the chunk lattice and the detail LOD meshes alike (picked by position).
+	static void gg_DetailBorder(const MeshComponent& m, const XMFLOAT3& p, float half, int e, wi::vector<XMFLOAT2>& out)
 	{
-		*maxGapDetail = 0; *maxGapCoarse = 0; *maxXZ = 0; *edgesDetail = 0; *edgesCoarse = 0;
+		out.clear();
+		const float target = (e & 1) ? half : -half;
+		for (const XMFLOAT3& v : m.vertex_positions)
+		{
+			const float a = e < 2 ? v.x : v.z;
+			if (std::abs(a - target) <= 0.01f)
+				out.push_back(XMFLOAT2(e < 2 ? v.z + p.z : v.x + p.x, v.y + p.y));
+		}
+		std::sort(out.begin(), out.end(), [](const XMFLOAT2& a, const XMFLOAT2& b) { return a.x < b.x; });
+		out.erase(std::unique(out.begin(), out.end(), [](const XMFLOAT2& a, const XMFLOAT2& b) { return std::abs(a.x - b.x) < 0.001f; }), out.end());
+	}
+	// height of a sorted polyline at along-coordinate u (linear between its vertices); false outside it. `exact` is set
+	// when a vertex of the polyline sits at u (|du| < 0.01) - a vertex with no such partner is a T-junction.
+	static bool gg_DetailPolyAt(const wi::vector<XMFLOAT2>& pl, float u, float& y, bool& exact)
+	{
+		exact = false;
+		if (pl.size() < 2 || u < pl.front().x - 0.01f || u > pl.back().x + 0.01f)
+			return false;
+		auto it = std::lower_bound(pl.begin(), pl.end(), u, [](const XMFLOAT2& a, float v) { return a.x < v; });
+		if (it != pl.end() && std::abs(it->x - u) < 0.01f) { y = it->y; exact = true; return true; }
+		if (it != pl.begin() && std::abs((it - 1)->x - u) < 0.01f) { y = (it - 1)->y; exact = true; return true; }
+		if (it == pl.begin()) { y = it->y; return true; }
+		if (it == pl.end()) { y = pl.back().y; return true; }
+		const XMFLOAT2& b = *it;
+		const XMFLOAT2& a = *(it - 1);
+		const float f = (b.x - a.x) > 0 ? (u - a.x) / (b.x - a.x) : 0.0f;
+		y = a.y + (b.y - a.y) * f;
+		return true;
+	}
+
+	// GGMAX PROTOTYPE (BR-0009 round 7, generalised round 8): the seam instrument (harness TERRAIN_DETAIL_SEAMS). For
+	// every chunk drawing a detail mesh and each of its 4 edges, compares its DRAWN border polyline with the
+	// neighbour's DRAWN border polyline (detail or chunk mesh), BOTH ways: every vertex of each side must lie on the
+	// other side's polyline (max height gap per kind; 0 = watertight) AND have a vertex partner there (a vertex
+	// without one is a T-junction - invisible on planar ground, a crack where the surface curves). maxXZ = the
+	// largest along-edge extent mismatch (the two polylines must span the same edge). The caller must have stopped
+	// the generator (it inserts into t->chunks).
+	void gg_DetailSeamTest(Terrain* t, float* maxGapDetail, float* maxGapCoarse, float* maxXZ, int* edgesDetail, int* edgesCoarse, int* tjunctions)
+	{
+		*maxGapDetail = 0; *maxGapCoarse = 0; *maxXZ = 0; *edgesDetail = 0; *edgesCoarse = 0; *tjunctions = 0;
 		if (t == nullptr || t->scene == nullptr)
 			return;
 		Scene& scene = *t->scene;
-		auto drawn = [&](const ChunkData& cd, int& width) -> const MeshComponent* {
+		const float half = chunk_half_width * t->chunk_scale;
+		auto drawn = [&](const ChunkData& cd) -> const MeshComponent* {
 			auto it = wi::scene::gg_detail_render_mesh.find(cd.entity);
-			const MeshComponent* m = scene.meshes.GetComponent(it != wi::scene::gg_detail_render_mesh.end() ? it->second : cd.entity);
-			if (m == nullptr) return nullptr;
-			width = (int)std::lround(std::sqrt(double(m->vertex_positions.size())));
-			return (size_t(width) * size_t(width) == m->vertex_positions.size() && width > 1) ? m : nullptr;
+			return scene.meshes.GetComponent(it != wi::scene::gg_detail_render_mesh.end() ? it->second : cd.entity);
 		};
-		// world position of border vertex k of edge e (0:-x 1:+x 2:-z 3:+z) of a W-wide lattice
-		auto border = [](const MeshComponent& m, const XMFLOAT3& p, int W, int e, int k) {
-			int i = 0, j = 0;
-			switch (e) { case 0: i = 0; j = k; break; case 1: i = W - 1; j = k; break; case 2: i = k; j = 0; break; default: i = k; j = W - 1; break; }
-			const XMFLOAT3& v = m.vertex_positions[size_t(i) + size_t(j) * size_t(W)];
-			return XMFLOAT3(v.x + p.x, v.y + p.y, v.z + p.z);
-		};
+		wi::vector<XMFLOAT2> A, B;
 		for (auto& [c, cd] : t->chunks)
 		{
 			if (wi::scene::gg_detail_render_mesh.find(cd.entity) == wi::scene::gg_detail_render_mesh.end())
 				continue;
-			int W = 0;
-			const MeshComponent* m = drawn(cd, W);
+			const MeshComponent* m = drawn(cd);
 			if (m == nullptr) continue;
 			for (int e = 0; e < 4; ++e)
 			{
 				const int dx = e == 0 ? -1 : (e == 1 ? 1 : 0), dz = e == 2 ? -1 : (e == 3 ? 1 : 0);
 				auto nit = t->chunks.find(gg_MakeChunk(c.x + dx, c.z + dz));
 				if (nit == t->chunks.end()) continue;
-				int NW = 0;
-				const MeshComponent* nm = drawn(nit->second, NW);
+				const MeshComponent* nm = drawn(nit->second);
 				if (nm == nullptr) continue;
-				const int ne = e ^ 1; // the neighbour's matching edge
 				const bool nDetail = wi::scene::gg_detail_render_mesh.find(nit->second.entity) != wi::scene::gg_detail_render_mesh.end();
+				gg_DetailBorder(*m, cd.position, half, e, A);
+				gg_DetailBorder(*nm, nit->second.position, half, e ^ 1, B);
+				if (A.size() < 2 || B.size() < 2) continue;
 				(nDetail ? *edgesDetail : *edgesCoarse) += 1;
-				for (int k = 0; k < W; ++k)
-				{
-					const XMFLOAT3 a = border(*m, cd.position, W, e, k);
-					// along-edge coordinate in the neighbour's lattice: k * (NW-1)/(W-1)
-					const float u = float(k) * float(NW - 1) / float(W - 1);
-					const int k0 = std::min(NW - 2, (int)std::floor(u));
-					const float f = u - float(k0);
-					const XMFLOAT3 b0 = border(*nm, nit->second.position, NW, ne, k0);
-					const XMFLOAT3 b1 = border(*nm, nit->second.position, NW, ne, k0 + 1);
-					const float by = b0.y + (b1.y - b0.y) * f;
-					const float bx = b0.x + (b1.x - b0.x) * f, bz = b0.z + (b1.z - b0.z) * f;
-					float& g = nDetail ? *maxGapDetail : *maxGapCoarse;
-					g = std::max(g, std::abs(a.y - by));
-					*maxXZ = std::max(*maxXZ, std::max(std::abs(a.x - bx), std::abs(a.z - bz)));
-				}
+				*maxXZ = std::max(*maxXZ, std::max(std::abs(A.front().x - B.front().x), std::abs(A.back().x - B.back().x)));
+				float& g = nDetail ? *maxGapDetail : *maxGapCoarse;
+				float y = 0;
+				bool exact = false;
+				for (const XMFLOAT2& a : A)
+					if (gg_DetailPolyAt(B, a.x, y, exact)) { g = std::max(g, std::abs(a.y - y)); if (!exact) (*tjunctions)++; }
+				for (const XMFLOAT2& b : B)
+					if (gg_DetailPolyAt(A, b.x, y, exact)) { g = std::max(g, std::abs(b.y - y)); if (!exact) (*tjunctions)++; }
 			}
+		}
+	}
+
+	// GGMAX PROTOTYPE (BR-0009 round 8): watertightness of every DRAWN detail mesh, topologically. Each directed edge
+	// must appear once; an edge with no reverse twin is open and must lie on the chunk border (both ends on the same
+	// side) - an open edge INSIDE the chunk is a crack (a T-junction or hole between LOD tiles). Every triangle must
+	// have positive area in x,z (the chunk's winding), the areas must sum to the chunk's square, and no triangle may
+	// have been re-wound against its emitter's natural winding at build time (foldTris: a crossed zipper rung).
+	// notCurrent = drawn ring meshes still from the previous generation (a check taken mid-swap says so).
+	void gg_DetailMeshCheck(Terrain* t, int* meshes, int* openInside, int* dupEdges, int* badTris, float* areaErr, uint64_t* tris, int* foldTris, int* notCurrent)
+	{
+		*meshes = 0; *openInside = 0; *dupEdges = 0; *badTris = 0; *areaErr = 0; *tris = 0; *foldTris = 0;
+		*notCurrent = (int)gg_detail_not_current;
+		if (t == nullptr || t->scene == nullptr)
+			return;
+		Scene& scene = *t->scene;
+		const float half = chunk_half_width * t->chunk_scale;
+		const double full = double(2.0f * half) * double(2.0f * half);
+		for (auto& [c, cd] : t->chunks)
+		{
+			auto it = wi::scene::gg_detail_render_mesh.find(cd.entity);
+			if (it == wi::scene::gg_detail_render_mesh.end()) continue;
+			const MeshComponent* m = scene.meshes.GetComponent(it->second);
+			if (m == nullptr) continue;
+			(*meshes)++;
+			auto rit = gg_detail_recs.find(c);
+			if (rit != gg_detail_recs.end())
+				*foldTris += (int)rit->second.unexpected;
+			const auto& P = m->vertex_positions;
+			const size_t nt = m->indices.size() / 3;
+			*tris += nt;
+			wi::unordered_map<uint64_t, int> edges;
+			edges.reserve(nt * 3);
+			double area = 0;
+			for (size_t k = 0; k < nt; ++k)
+			{
+				const uint32_t i0 = m->indices[k * 3], i1 = m->indices[k * 3 + 1], i2 = m->indices[k * 3 + 2];
+				const XMFLOAT3 &a = P[i0], &b = P[i1], &cc = P[i2];
+				const double cr = double(b.x - a.x) * double(cc.z - a.z) - double(b.z - a.z) * double(cc.x - a.x);
+				if (!(cr > 0)) (*badTris)++;
+				area += 0.5 * cr;
+				edges[(uint64_t(i0) << 32) | i1]++;
+				edges[(uint64_t(i1) << 32) | i2]++;
+				edges[(uint64_t(i2) << 32) | i0]++;
+			}
+			auto onBorder = [&](const XMFLOAT3& p, const XMFLOAT3& q) {
+				return (std::abs(p.x - q.x) < 0.01f && std::abs(std::abs(p.x) - half) < 0.01f) ||
+					(std::abs(p.z - q.z) < 0.01f && std::abs(std::abs(p.z) - half) < 0.01f);
+			};
+			for (auto& [key, count] : edges)
+			{
+				if (count > 1) (*dupEdges)++;
+				const uint32_t i0 = uint32_t(key >> 32), i1 = uint32_t(key & 0xffffffffu);
+				if (edges.find((uint64_t(i1) << 32) | i0) == edges.end() && !onBorder(P[i0], P[i1]))
+					(*openInside)++;
+			}
+			*areaErr = std::max(*areaErr, float(std::abs(area - full) / full));
 		}
 	}
 
@@ -1053,8 +1563,7 @@ namespace wi::terrain
 		// GGMAX PROTOTYPE (BR-0009 round 7): detail builds read the height modifiers (GG's CPU heightmap) on workers. Joined
 		// HERE (a restart: level load / terrain reset), NOT in Generation_Cancel - GG cancels the generator many times per
 		// sculpt stroke (blend passes) and a join there held every stroke frame for a whole ~100 ms build (11 FPS).
-		wi::jobsystem::Wait(gg_detail_ctx);
-		gg_DetailClearAll(scene); // GGMAX PROTOTYPE (BR-0009 round 7)
+		gg_DetailShutdown(scene); // GGMAX PROTOTYPE (BR-0009 round 7/8): drain the detail build pool, remove every detail mesh
 
 		if (chunkGroupEntity != INVALID_ENTITY)
 		{
@@ -1245,8 +1754,7 @@ namespace wi::terrain
 			}
 			chunks.clear();
 			virtual_textures_in_use.clear();
-			wi::jobsystem::Wait(gg_detail_ctx); // GGMAX PROTOTYPE (BR-0009 round 7): see Generation_Restart
-			gg_DetailClearAll(scene); // GGMAX PROTOTYPE (BR-0009 round 7)
+			gg_DetailShutdown(scene); // GGMAX PROTOTYPE (BR-0009 round 7/8): see Generation_Restart
 			return;
 		}
 

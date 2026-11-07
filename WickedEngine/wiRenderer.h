@@ -1380,6 +1380,7 @@ namespace wi::renderer
 	//atlas contents + frozen matrices. Default off = stock behaviour.
 	void SetDelayedShadowCascadesEnabled(bool value);
 	bool GetDelayedShadowCascadesEnabled();
+	std::string GG_DelayedShadowStats(bool reset);   // GGMAX 3.165 instrument (harness DELAYED_SHADOW_STATS)
 	void InvalidateDelayedShadowCascades(); // force a full refresh (sun moved, cascade splits changed, level load)
 	void SetDelayedShadowCascadeInterval(int frames); // GG: far-cascade (1..N) refresh period in frames — 2=default delayed shadows, 4="Laptop" (twice as aggressive); clamped >=2
 	int GetDelayedShadowCascadeInterval();

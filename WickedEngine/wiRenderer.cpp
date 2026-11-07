@@ -1205,6 +1205,13 @@ struct DelayedShadowCascadeState
 	uint32_t dedicatedCount = ~0u;
 };
 static DelayedShadowCascadeState delayedShadowState;
+// GGMAX 3.165 instrument (Lee 2026-11-07: Delayed Shadows did nothing in Terrain Bake mode): per decision, which reason
+// forced a full refresh / why no decision ran; per DrawShadowmaps, whether the delayed path was live. GG_DelayedShadowStats.
+static std::atomic<uint64_t> gg_ds_decided{ 0 }, gg_ds_forceall{ 0 }, gg_ds_staggered{ 0 }, gg_ds_draw_calls{ 0 }, gg_ds_draw_delayed{ 0 }, gg_ds_draw_fullclear{ 0 };
+static std::atomic<uint64_t> gg_ds_force_reason[8] = {};   // 0 !valid 1 light 2 dedicated 3 rect 4 atlas 5 local full clear
+static std::atomic<uint64_t> gg_ds_nodecide_reason[4] = {}; // 0 disabled 1 cascades > MAX 2 cascades <= dedicated 3 already decided this frame
+static std::atomic<int> gg_ds_last_rect[4] = {};
+static std::atomic<uint64_t> gg_ds_rect_changes{ 0 };
 
 RaytracingPipelineState RTPSO_reflection;
 
@@ -6443,6 +6450,13 @@ void UpdatePerFrameData(
 					&& cascade_count <= DelayedShadowCascadeState::MAX_CASCADES
 					&& cascade_count > gg_dedicated_count
 					&& delayedShadowState.decisionFrame != device->GetFrameCount();
+				if (!ggDelayed) // GGMAX 3.165 instrument
+				{
+					if (!delayedShadowCascadesEnabled) gg_ds_nodecide_reason[0].fetch_add(1);
+					else if (cascade_count > DelayedShadowCascadeState::MAX_CASCADES) gg_ds_nodecide_reason[1].fetch_add(1);
+					else if (cascade_count <= gg_dedicated_count) gg_ds_nodecide_reason[2].fetch_add(1);
+					else gg_ds_nodecide_reason[3].fetch_add(1);
+				}
 				if (ggDelayed)
 				{
 					DelayedShadowCascadeState& st = delayedShadowState;
@@ -6450,6 +6464,18 @@ void UpdatePerFrameData(
 					st.decisionFrame = fc;
 					const wi::ecs::Entity lightEnt = vis.scene->lights.GetEntity(lightIndex);
 
+					const bool gg_fr[6] = { !st.valid, st.lightEntity != lightEnt, st.dedicatedCount != gg_dedicated_count,
+						st.rectX != shadow_rect.x || st.rectY != shadow_rect.y || st.rectW != shadow_rect.w || st.rectH != shadow_rect.h,
+						st.atlasWidth != shadowMapAtlas.desc.width || st.atlasHeight != shadowMapAtlas.desc.height,
+						localShadowCachingEnabled && localAtlasFullClear };   // GGMAX 3.165 instrument: the forceAll terms one by one
+					gg_ds_decided.fetch_add(1);
+					for (int r = 0; r < 6; ++r) if (gg_fr[r]) gg_ds_force_reason[r].fetch_add(1);
+					if (gg_fr[3])
+					{
+						gg_ds_rect_changes.fetch_add(1);
+						gg_ds_last_rect[0].store(shadow_rect.x); gg_ds_last_rect[1].store(shadow_rect.y);
+						gg_ds_last_rect[2].store(shadow_rect.w); gg_ds_last_rect[3].store(shadow_rect.h);
+					}
 					const bool forceAll = !st.valid
 						|| st.lightEntity != lightEnt
 						|| st.dedicatedCount != gg_dedicated_count // 1.59: slot indices shifted — frozen matrices unusable
@@ -6458,6 +6484,7 @@ void UpdatePerFrameData(
 						|| st.atlasWidth != shadowMapAtlas.desc.width
 						|| st.atlasHeight != shadowMapAtlas.desc.height
 						|| (localShadowCachingEnabled && localAtlasFullClear); // Phase 2: a local full-clear also re-renders the sun consistently
+					if (forceAll) gg_ds_forceall.fetch_add(1);
 					st.fullClearThisFrame = forceAll;
 
 					for (uint32_t c = 0; c < cascade_count; ++c) st.update[c] = true;
@@ -8783,6 +8810,9 @@ void DrawShadowmaps(
 	const bool ggDelayedShadows = delayedShadowCascadesEnabled
 		&& delayedShadowState.active
 		&& delayedShadowState.decisionFrame == device->GetFrameCount();
+	gg_ds_draw_calls.fetch_add(1);   // GGMAX 3.165 instrument
+	if (ggDelayedShadows) gg_ds_draw_delayed.fetch_add(1);
+	if (ggDelayedShadows && delayedShadowState.fullClearThisFrame) gg_ds_draw_fullclear.fetch_add(1);
 	// GG Phase 2 static-cache: persist the atlas when the local layout is unchanged so cached local
 	// shadows survive. A full clear from EITHER the sun's delayed cascades OR a local structural change
 	// forces everything to re-render this frame (consistent). When caching is off this is byte-identical
@@ -21741,6 +21771,33 @@ bool IsShadowsEnabled()
 	return SHADOWS_ENABLED;
 }
 //GGMAX delayed shadow cascades
+// GGMAX 3.165 instrument: harness DELAYED_SHADOW_STATS [reset]
+std::string GG_DelayedShadowStats(bool reset)
+{
+	char buf[1024];
+	_snprintf(buf, sizeof(buf),
+		"enabled=%d interval=%d | decisions %llu, forceAll %llu (!valid %llu, light %llu, dedicated %llu, RECT %llu, atlas %llu, LOCAL FULL CLEAR %llu) | "
+		"no decision: disabled %llu, cascades>MAX %llu, cascades<=dedicated %llu, already decided %llu | DrawShadowmaps %llu, delayed path %llu (of them full clear %llu) | "
+		"last changed sun rect %d,%d %dx%d (%llu changes) | localShadowCaching=%d",
+		delayedShadowCascadesEnabled ? 1 : 0, delayedShadowCascadeInterval,
+		(unsigned long long)gg_ds_decided.load(), (unsigned long long)gg_ds_forceall.load(),
+		(unsigned long long)gg_ds_force_reason[0].load(), (unsigned long long)gg_ds_force_reason[1].load(), (unsigned long long)gg_ds_force_reason[2].load(),
+		(unsigned long long)gg_ds_force_reason[3].load(), (unsigned long long)gg_ds_force_reason[4].load(), (unsigned long long)gg_ds_force_reason[5].load(),
+		(unsigned long long)gg_ds_nodecide_reason[0].load(), (unsigned long long)gg_ds_nodecide_reason[1].load(),
+		(unsigned long long)gg_ds_nodecide_reason[2].load(), (unsigned long long)gg_ds_nodecide_reason[3].load(),
+		(unsigned long long)gg_ds_draw_calls.load(), (unsigned long long)gg_ds_draw_delayed.load(), (unsigned long long)gg_ds_draw_fullclear.load(),
+		gg_ds_last_rect[0].load(), gg_ds_last_rect[1].load(), gg_ds_last_rect[2].load(), gg_ds_last_rect[3].load(),
+		(unsigned long long)gg_ds_rect_changes.load(), localShadowCachingEnabled ? 1 : 0);
+	buf[sizeof(buf) - 1] = 0;
+	if (reset)
+	{
+		gg_ds_decided = 0; gg_ds_forceall = 0; gg_ds_staggered = 0; gg_ds_draw_calls = 0; gg_ds_draw_delayed = 0; gg_ds_draw_fullclear = 0;
+		gg_ds_rect_changes = 0;
+		for (auto& a : gg_ds_force_reason) a = 0;
+		for (auto& a : gg_ds_nodecide_reason) a = 0;
+	}
+	return buf;
+}
 void SetDelayedShadowCascadesEnabled(bool value)
 {
 	delayedShadowCascadesEnabled = value;

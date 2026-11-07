@@ -43,6 +43,7 @@ using namespace wi::enums;
 using namespace wi::scene;
 using namespace wi::ecs;
 
+namespace wi::terrain { extern int gg_triplanar_enable; extern std::atomic<uint64_t> gg_triplanar_draws, gg_triplanar_fallbacks; } // GGMAX 3.164
 namespace wi::renderer
 {
 
@@ -790,6 +791,7 @@ union ObjectRenderingVariant
 		uint32_t mesh_shader : 1;	// bool
 		uint32_t ggdepthmode : 2;	// GGMAX 2.09: GGDEPTHMODE — DX11 depth-behaviour parity, see below
 		uint32_t ggsuperquick : 2;	// GGMAX 3.34: 0 = stock, 1 = FLAT, 2 = AMBIENT, 3 = LIT
+		uint32_t ggterrain : 1;		// GGMAX 3.164: terrain triplanar PS (PSTYPE_OBJECT_GG_TERRAIN_TRIPLANAR)
 	} bits;
 	uint32_t value;
 };
@@ -1736,6 +1738,12 @@ void LoadShaders()
 		// GGMAX 3.35: the matching reduced-layout vertex shader. Dispatched on objectps_ctx with
 		// the rung pixel shaders, because the object PSO loop waits on exactly that context.
 		LoadShader(ShaderStage::VS, shaders[VSTYPE_OBJECT_GG_SUPERQUICK], "objectVS_gg_superquick.cso");
+		});
+	// GGMAX 3.164: the terrain triplanar permutation (main camera, opaque terrain chunks only)
+	wi::jobsystem::Execute(objectps_ctx, [](wi::jobsystem::JobArgs args) {
+		wi::vector<std::string> defines;
+		defines.push_back("GG_TERRAIN_TRIPLANAR");
+		LoadShader(ShaderStage::PS, shaders[PSTYPE_OBJECT_GG_TERRAIN_TRIPLANAR], "objectPS.cso", ShaderModel::SM_6_0, defines);
 		});
 	{
 		static const char* gg_sq_defines[3] = { "GG_SQ_FLAT", "GG_SQ_AMBIENT", "GG_SQ_LIT" };
@@ -2874,6 +2882,33 @@ void LoadShaders()
 													SetObjectPSO(sqvariant, pso);
 													});
 											}
+										}
+
+										// ★★★ GGMAX 3.164: TERRAIN TRIPLANAR - the same gate, ONLY the pixel shader swapped. Unlike
+										// the Super Quick clone above this keeps the STOCK vertex shader (desc.vs): the triplanar PS
+										// reads the stock layout, and RENDERPASS_MAIN tests depth EQUAL against the prepass, which only a
+										// bit-identical VS satisfies. Selected per draw for terrain chunk batches on the main camera
+										// (RenderMeshes, gg_triplanar_enable), with a fall back to stock while it compiles.
+										PipelineStateDesc tpdesc = desc;
+										tpdesc.ps = &shaders[PSTYPE_OBJECT_GG_TERRAIN_TRIPLANAR];
+										RenderPassInfo tp_rpi;
+										tp_rpi.rt_count = 1;
+										tp_rpi.rt_formats[0] = format_rendertarget_main;
+										tp_rpi.ds_format = format_depthbuffer_main;
+										const uint32_t tp_msaa_support[] = { 1,2,4,8 };
+										for (uint32_t msaa : tp_msaa_support)
+										{
+											ObjectRenderingVariant tpvariant = variant;
+											tpvariant.bits.ggterrain = 1;
+											tpvariant.bits.sample_count = msaa;
+											tp_rpi.sample_count = msaa;
+											PipelineState pso;
+											// review 3.164: register it only if it was created - an unregistered variant falls back to stock
+											if (!device->CreatePipelineState(&tpdesc, &pso, gg_pso_lazy_object ? nullptr : &tp_rpi))
+												continue;
+											wi::eventhandler::Subscribe_Once(wi::eventhandler::EVENT_THREAD_SAFE_POINT, [=](uint64_t userdata) {
+												SetObjectPSO(tpvariant, pso);
+												});
 										}
 									}
 
@@ -4069,6 +4104,11 @@ void RenderMeshes(
 	// constants (GG_SetFrameCBOverride - the Object Library live preview) is a product shot of ONE item and
 	// renders every material in full, whatever the level behind it has ticked.
 	const int gg_sq_objects = GG_HasFrameCBOverride(cmd) ? 0 : gg_super_quick_objects;
+	// GGMAX 3.164: terrain triplanar on the main camera (not under an override list, not with Super Quick on)
+	// (review 3.164: and only when its pixel shader LOADED - CreatePipelineState's refusal path leaves a PSO that still reads
+	// IsValid(), so the selection's fallback could not see a failed compile)
+	const bool gg_tp_on = wi::terrain::gg_triplanar_enable != 0 && !GG_HasFrameCBOverride(cmd) && gg_sq_objects == 0
+		&& shaders[PSTYPE_OBJECT_GG_TERRAIN_TRIPLANAR].IsValid();
 	// GGMAX 3.121: and no distance fade - Object Detail Distance is a per-LEVEL cap written into every
 	// object's draw_distance, and from the preview camera the backdrop sits 21200 units out (a 20000 cap
 	// dithered holes in it, below ~14000 culled it) and a large item ~8800. DrawScene skips its fade cull
@@ -4339,6 +4379,30 @@ void RenderMeshes(
 						{
 							variant.bits.ggsuperquick = 0;
 							pso = GetObjectPSO(variant);
+						}
+					}
+					else if (gg_tp_on
+						&& instancedBatch.gg_terrain
+						&& renderPass == RENDERPASS_MAIN
+						&& (flags & DRAWSCENE_MAINCAMERA)
+						&& variant.bits.blendmode == BLENDMODE_OPAQUE
+						&& ggShaderType == (uint32_t)MaterialComponent::SHADERTYPE_PBR
+						&& !meshShaderRequested
+						&& ggTessellation == 0)
+					{
+						// GGMAX 3.164: terrain triplanar - mirrors the PSO build gate; stock while it compiles (a null PSO
+						// would drop the chunk silently, the 2.31 failure mode)
+						variant.bits.ggterrain = 1;
+						pso = GetObjectPSO(variant);
+						if (pso == nullptr || !pso->IsValid())
+						{
+							variant.bits.ggterrain = 0;
+							pso = GetObjectPSO(variant);
+							wi::terrain::gg_triplanar_fallbacks.fetch_add(1, std::memory_order_relaxed);
+						}
+						else
+						{
+							wi::terrain::gg_triplanar_draws.fetch_add(1, std::memory_order_relaxed);
 						}
 					}
 					else

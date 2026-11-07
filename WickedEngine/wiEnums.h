@@ -169,6 +169,9 @@ namespace wi::enums
 		// what each rung removes and why the gap between two rungs is the measurement.
 		PSTYPE_OBJECT_GG_SUPERQUICK_BEGIN,
 		PSTYPE_OBJECT_GG_SUPERQUICK_END = PSTYPE_OBJECT_GG_SUPERQUICK_BEGIN + 3,
+		// GGMAX 3.164: the terrain chunks' main-camera opaque PS with side projections on steep slopes (objectPS.hlsl +
+		// GG_TERRAIN_TRIPLANAR; objectHF.hlsli, wiTerrain.cpp gg_triplanar_*)
+		PSTYPE_OBJECT_GG_TERRAIN_TRIPLANAR,
 		PSTYPE_OBJECT_PREPASS,
 		PSTYPE_OBJECT_PREPASS_ALPHATEST,
 		PSTYPE_OBJECT_PREPASS_DEPTHONLY_ALPHATEST,

@@ -504,6 +504,24 @@ namespace wi::terrain
 	// push.gg_tile_share bit 0): blendmap weights are splat weights summing to 1 and are AVERAGED, instead of
 	// the stock front-to-back opacity stack. GameGuru sets it (its auto-blend writes DX11 splat weights).
 	bool gg_splat_blend = false;
+	// ★★★ GGMAX 3.164 (Lee 2026-11-07: "go ahead with triplanar texturing on steep slopes"): the terrain's virtual
+	// texture is a TOP-DOWN projection (chunk UV = world x, z), so a steep sculpt's wall gets the material stretched
+	// into vertical streaks. With gg_triplanar_enable the terrain chunks' main-camera opaque draws use the
+	// GG_TERRAIN_TRIPLANAR pixel shader (objectHF.hlsli): on pixels whose normal is steeper than the band
+	// (1 - |n.y| from gg_triplanar_start to _end, smoothstep) it samples the chunk's own blendmap layers directly from
+	// the SIDE (world z/y and x/y planes, blended by the normal), at the VT's world tiling (cap repeats per chunk), and
+	// fades the VT result into it - albedo, surface map and normals (UDN). Gentle ground never enters the branch.
+	// Data: per chunk material userdata.y = blendmap SRV + 1, .z = the layer -> material index table SRV + 1, .w =
+	// packed layer count / flags / cap / hold / band (filled every frame in UpdateVirtualTexturesCPU, SetDirty only on
+	// change); userdata.x stays the engine's wind. gg_triplanar_flags: bit 0 = no side normals.
+	int gg_triplanar_enable = 0;
+	float gg_triplanar_start = 0.30f;
+	float gg_triplanar_end = 0.55f;
+	int gg_triplanar_flags = 0;
+	std::atomic<uint64_t> gg_triplanar_draws{ 0 };      // terrain draws that used the triplanar PSO (since start)
+	std::atomic<uint64_t> gg_triplanar_fallbacks{ 0 };  // ... that wanted it but fell back to stock (PSO compiling)
+	uint32_t gg_triplanar_chunks = 0;                   // chunk materials carrying triplanar data, last frame
+	uint32_t gg_triplanar_layers = 0;                   // entries in the layer table, last frame
 	bool gg_blendmap_half_res = false; // GGMAX PROTOTYPE (BR-0009 round 6), see wiTerrain.h
 	// texels a side of the GPU blendmap (every reader samples it at normalised chunk UV, never by texel index)
 	static inline uint32_t gg_BlendmapWidth()
@@ -3471,6 +3489,55 @@ namespace wi::terrain
 			assert(success);
 		}
 
+		// GGMAX 3.164: the triplanar layer table - blendmap layer i -> its ShaderMaterial index (the tile CS's per-dispatch
+		// table, made persistent: scene material indices move whenever GG swaps its texture set, so it is re-resolved every
+		// frame and the buffer is recreated only when the list changes; an entity without a live material clamps to 0 as
+		// in the CS, the 2.04 DEVICE_HUNG guard)
+		static wi::graphics::GPUBuffer gg_tp_table;
+		static wi::vector<uint32_t> gg_tp_table_cpu;
+		int gg_tp_table_srv = -1;
+		uint32_t gg_tp_table_count = 0;
+		uint32_t gg_tp_packed = 0;
+		gg_triplanar_chunks = 0;
+		if (gg_triplanar_enable != 0 && gg_splat_blend && !materialEntities.empty())
+		{
+			const size_t matCount = scene->materials.GetCount();
+			wi::vector<uint32_t> idx(materialEntities.size());
+			for (size_t i = 0; i < materialEntities.size(); ++i)
+			{
+				const size_t m = scene->materials.GetIndex(materialEntities[i]);
+				idx[i] = m < matCount ? (uint32_t)m : 0u;
+			}
+			if (!gg_tp_table.IsValid() || idx != gg_tp_table_cpu)
+			{
+				wi::vector<uint32_t> init = idx;
+				while (init.size() < 4) init.push_back(0u);
+				GPUBufferDesc bd;
+				bd.size = init.size() * sizeof(uint32_t);
+				bd.bind_flags = BindFlag::SHADER_RESOURCE;
+				bd.misc_flags = ResourceMiscFlag::BUFFER_RAW;
+				wi::graphics::GPUBuffer nb;
+				if (device->CreateBuffer(&bd, init.data(), &nb))
+				{
+					device->SetName(&nb, "GGMAX terrain triplanar layer table");
+					gg_tp_table = nb;   // the old one is released through the device's deferred destruction
+					gg_tp_table_cpu = idx;
+				}
+			}
+			if (gg_tp_table.IsValid())
+			{
+				gg_tp_table_srv = device->GetDescriptorIndex(&gg_tp_table, SubresourceType::SRV);
+				gg_tp_table_count = (uint32_t)std::min<size_t>(gg_tp_table_cpu.size(), 63);
+			}
+			auto band = [](float v) { return (uint32_t)std::lround(std::min(std::max(v, 0.0f), 1.0f) * 63.0f); };
+			gg_tp_packed = ((gg_triplanar_flags & 1) ? 64u : 0u)
+				| (std::min(gg_terrain_tile_share_mips, 255u) << 8)
+				| (std::min(gg_terrain_tile_hold_mips, 15u) << 16)
+				| (band(gg_triplanar_start) << 20)
+				| (band(std::max(gg_triplanar_end, gg_triplanar_start)) << 26);
+		}
+		gg_triplanar_layers = gg_tp_table_count;
+
 		for (auto& it : chunks)
 		{
 			const Chunk& chunk = it.first;
@@ -3766,6 +3833,32 @@ namespace wi::terrain
 				vt.pending_repaint_blendmap = false;
 				vt.gg_repaint_blendmap_latched = true;
 				vt.blendmap = chunk_data.blendmap;
+			}
+
+			// GGMAX 3.164: this chunk's triplanar data (gg_triplanar_enable) - its blendmap, the shared layer table, the packed
+			// band. Every frame: the blendmap is recreated on every paint / auto-blend and a regeneration merge replaces the
+			// MaterialComponent (userdata back to 0). SetDirty only on a change (the 1.41 recompose cache).
+			{
+				uint32_t ty = 0, tz = 0, tw = 0;
+				if (gg_tp_table_srv >= 0 && chunk_data.blendmap.IsValid())
+				{
+					const int bm = device->GetDescriptorIndex(&chunk_data.blendmap, SubresourceType::SRV);
+					const uint32_t layers = std::min<uint32_t>(chunk_data.blendmap.desc.array_size, gg_tp_table_count);
+					if (bm >= 0 && layers > 0)
+					{
+						ty = (uint32_t)bm + 1u;
+						tz = (uint32_t)gg_tp_table_srv + 1u;
+						tw = gg_tp_packed | layers;
+						gg_triplanar_chunks++;
+					}
+				}
+				if (material->userdata.y != ty || material->userdata.z != tz || material->userdata.w != tw)
+				{
+					material->userdata.y = ty;
+					material->userdata.z = tz;
+					material->userdata.w = tw;
+					material->SetDirty();
+				}
 			}
 
 			virtual_textures_in_use.push_back(&vt);

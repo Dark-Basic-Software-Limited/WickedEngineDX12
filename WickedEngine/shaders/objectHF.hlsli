@@ -682,6 +682,17 @@ float4 main(PixelInput input, in bool is_frontface : SV_IsFrontFace APPEND_COVER
 	float4 uvsets = input.GetUVSets();
 #endif // OBJECTSHADER_USE_UVSETS
 
+#ifdef GG_TERRAIN_TRIPLANAR
+	// GGMAX 3.164: every derivative the side projections need, taken HERE in uniform control flow - the triplanar block
+	// branches per pixel (steepness) and per layer, where implicit derivatives are undefined
+	const float3 gg_tp_dPdx = ddx(surface.P);
+	const float3 gg_tp_dPdy = ddy(surface.P);
+	const float2 gg_tp_duvdx = ddx(uvsets.xy);
+	const float2 gg_tp_duvdy = ddy(uvsets.xy);
+	float gg_tp_s = 0;          // the steep weight this pixel ended with (debug view 28)
+	float2 gg_tp_pw = 0;        // the X / Z plane weights
+#endif // GG_TERRAIN_TRIPLANAR
+
 #ifdef TILEDFORWARD
 	// ★★★ GGMAX 3.35c: RESTORED. 3.34 removed this from the Super Quick rungs as a per-pixel
 	// saving, and it cost more than it bought: this write is how the texture streamer learns which
@@ -1007,6 +1018,170 @@ float4 main(PixelInput input, in bool is_frontface : SV_IsFrontFace APPEND_COVER
 	}
 #endif // TERRAINBLENDED
 #endif // OBJECTSHADER_USE_UVSETS
+
+#if defined(GG_TERRAIN_TRIPLANAR) && defined(OBJECTSHADER_USE_UVSETS) && defined(OBJECTSHADER_USE_TANGENT) && defined(OBJECTSHADER_USE_NORMAL)
+	// ★★★ GGMAX 3.164: TERRAIN TRIPLANAR ON STEEP SLOPES (Lee 2026-11-07). The virtual texture above is a top-down projection
+	// (chunk UV = world x, z), so on a steep wall each VT texel is smeared down the whole wall: vertical streaks. Here, on
+	// pixels steeper than the band, the chunk's own blendmap layers are sampled directly from the SIDE - the world (z, -y)
+	// plane for walls facing +-x, (-x, -y) for walls facing +-z, weighted by |n.x|^4 / |n.z|^4 - and faded in over the VT
+	// result: albedo, the surface map and the normal. Everything mirrors terrainVirtualTextureUpdateCS so the band does not
+	// step: the same layer -> material table, the same splat average, GetBaseColor() * texture, float4(1, roughness,
+	// metalness, reflectance) * surface map, a missing normal map = flat 0.5, the same world tiling (cap repeats per chunk,
+	// gg_tile_uv_scale_lod at the VT's near rungs) and the VT's sRGB round trip. Data in the chunk material's userdata
+	// (wiTerrain.cpp UpdateVirtualTexturesCPU): y = blendmap SRV + 1, z = layer table SRV + 1, w = packed parameters.
+	// Resident (near-ring) chunks only: there uvsets.xy IS the chunk UV the blendmap is addressed by.
+	[branch]
+	if (material.userdata.y != 0 && material.userdata.z != 0 && material.textures[BASECOLORMAP].sparse_residencymap_descriptor >= 0)
+	{
+		const uint tp_w = material.userdata.w;
+		const uint tp_layers = tp_w & 63u;
+		const bool tp_normals = (tp_w & 64u) == 0;
+		const float tp_cap = (float)((tp_w >> 8u) & 255u);
+		const float tp_hold = (float)((tp_w >> 16u) & 15u);
+		const float tp_start = (float)((tp_w >> 20u) & 63u) / 63.0;
+		const float tp_end = max((float)((tp_w >> 26u) & 63u) / 63.0, tp_start + 0.01);
+		const float3 tp_n = surface.N;   // the interpolated vertex normal (front-face flipped) - smooth across triangles
+		float tp_s = smoothstep(tp_start, tp_end, 1 - abs(tp_n.y));
+		// Fade out where the VT itself leaves the cap: its repeats per chunk are res * 2^hold / dim, capped - full at VT
+		// lods where that stays >= cap for a 2048 texture, gone one lod later (beyond it the top-down tiling halves per
+		// rung and the side planes would show a different scale in the band).
+		{
+			Texture2D<uint4> tp_rmap = bindless_textures_uint4[descriptor_index(material.textures[BASECOLORMAP].sparse_residencymap_descriptor)];
+			float2 tp_vtc;
+			tp_rmap.GetDimensions(tp_vtc.x, tp_vtc.y);
+			const float2 tp_vdim = tp_vtc * SVT_TILE_SIZE;
+			const float tp_vlod = get_lod(uint2(tp_vdim), gg_tp_duvdx, gg_tp_duvdy, material.textures[BASECOLORMAP].GetAnisotropy()) + SVT_MIP_BIAS;
+			const float tp_lodfull = log2(max(tp_vdim.x, tp_vdim.y) * exp2(tp_hold) / (max(tp_cap, 1.0) * 2048.0));
+			tp_s *= saturate(tp_lodfull + 1 - tp_vlod);
+		}
+		[branch]
+		if (tp_s > 0.002 && tp_cap > 0 && GetScene().terrain.chunk_size > 0)   // review: chunk_size is 0 until the centre chunk exists
+		{
+			float2 tp_pw = pow(abs(tp_n.xz), 4.0);
+			tp_pw /= max(tp_pw.x + tp_pw.y, 1e-6);
+			if (tp_pw.x < 0.05) tp_pw = float2(0, 1);
+			else if (tp_pw.y < 0.05) tp_pw = float2(1, 0);
+			const float tp_sx = tp_n.x < 0 ? -1.0 : 1.0;
+			const float tp_sz = tp_n.z < 0 ? -1.0 : 1.0;
+			const float tp_k = tp_cap / GetScene().terrain.chunk_size;   // the VT's world tiling: cap repeats per chunk
+			// u along the wall as a viewer facing it sees it (no mirror), v = -y (texture down = world down)
+			const float2 tp_uvX = float2(surface.P.z * tp_sx, -surface.P.y) * tp_k;
+			const float2 tp_uvZ = float2(-surface.P.x * tp_sz, -surface.P.y) * tp_k;
+			const float2 tp_dXdx = float2(gg_tp_dPdx.z * tp_sx, -gg_tp_dPdx.y) * tp_k;
+			const float2 tp_dXdy = float2(gg_tp_dPdy.z * tp_sx, -gg_tp_dPdy.y) * tp_k;
+			const float2 tp_dZdx = float2(-gg_tp_dPdx.x * tp_sz, -gg_tp_dPdx.y) * tp_k;
+			const float2 tp_dZdy = float2(-gg_tp_dPdy.x * tp_sz, -gg_tp_dPdy.y) * tp_k;
+
+			Texture2DArray tp_blend = bindless_textures2DArray[descriptor_index(int(material.userdata.y) - 1)];
+			ByteAddressBuffer tp_table = bindless_buffers[descriptor_index(int(material.userdata.z) - 1)];
+			float4 tp_albedo = 0;
+			float4 tp_surf = 0;
+			float2 tp_nX = 0, tp_nZ = 0;
+			float tp_wsum = 0;
+			for (uint li = 0; li < tp_layers; ++li)
+			{
+				const float w = tp_blend.SampleLevel(sampler_linear_clamp, float3(uvsets.xy, (float)li), 0).r;
+				[branch]
+				if (w <= 0)
+					continue;
+				ShaderMaterial lm = load_material(tp_table.Load(li * 4u));
+
+				float4 lbase = lm.GetBaseColor();
+				[branch]
+				if (lm.textures[BASECOLORMAP].IsValid())
+				{
+					Texture2D tex = bindless_textures[descriptor_index(lm.textures[BASECOLORMAP].texture_descriptor)];
+					float4 c = 0;
+					[branch] if (tp_pw.x > 0) c += tp_pw.x * tex.SampleGrad(sampler_objectshader, tp_uvX, tp_dXdx, tp_dXdy);
+					[branch] if (tp_pw.y > 0) c += tp_pw.y * tex.SampleGrad(sampler_objectshader, tp_uvZ, tp_dZdx, tp_dZdy);
+					lbase *= c;
+				}
+				tp_albedo += w * lbase;
+
+				float4 lsurf = float4(1, lm.GetRoughness(), lm.GetMetalness(), lm.GetReflectance());
+				[branch]
+				if (lm.textures[SURFACEMAP].IsValid())
+				{
+					Texture2D tex = bindless_textures[descriptor_index(lm.textures[SURFACEMAP].texture_descriptor)];
+					float4 c = 0;
+					[branch] if (tp_pw.x > 0) c += tp_pw.x * tex.SampleGrad(sampler_objectshader, tp_uvX, tp_dXdx, tp_dXdy);
+					[branch] if (tp_pw.y > 0) c += tp_pw.y * tex.SampleGrad(sampler_objectshader, tp_uvZ, tp_dZdx, tp_dZdy);
+					lsurf *= c;
+				}
+				tp_surf += w * lsurf;
+
+				[branch]
+				if (tp_normals)
+				{
+					float2 nx = 0.5, nz = 0.5;   // a layer with no normal map is FLAT (the CS's splat rule)
+					[branch]
+					if (lm.textures[NORMALMAP].IsValid())
+					{
+						Texture2D tex = bindless_textures[descriptor_index(lm.textures[NORMALMAP].texture_descriptor)];
+						[branch] if (tp_pw.x > 0) nx = tex.SampleGrad(sampler_objectshader, tp_uvX, tp_dXdx, tp_dXdy).rg;
+						[branch] if (tp_pw.y > 0) nz = tex.SampleGrad(sampler_objectshader, tp_uvZ, tp_dZdx, tp_dZdy).rg;
+					}
+					tp_nX += w * nx;
+					tp_nZ += w * nz;
+				}
+				tp_wsum += w;
+			}
+			[branch]
+			if (tp_wsum > 0)
+			{
+				const float tp_rcp = 1.0 / tp_wsum;
+				tp_albedo *= tp_rcp;
+				tp_surf *= tp_rcp;
+				// the VT keeps ApplySRGBCurve_Fast(c) in a BC1_SRGB view, read back through the exact curve: same round trip,
+				// or the band shows a brightness step
+				tp_albedo.rgb = RemoveSRGBCurve(ApplySRGBCurve_Fast(tp_albedo.rgb));
+				// as stock: the VT sample times input.color (which already carries the chunk material's base colour)
+				half4 tp_final = half4(tp_albedo);
+#ifdef OBJECTSHADER_USE_COLOR
+				tp_final *= input.color;
+#endif // OBJECTSHADER_USE_COLOR
+				surface.baseColor.rgb = lerp(surface.baseColor.rgb, tp_final.rgb, (half)tp_s);
+				surfaceMap = lerp(surfaceMap, (half4)tp_surf, (half)tp_s);
+				[branch]
+				if (tp_normals)
+				{
+					// UDN per plane in that plane's own frame (T = d(world)/du, B = d(world)/dv: v = -y, DirectX green-down
+					// maps as DX11 GameGuru's terrain read them), added to the surface normal, then mixed with the VT's
+					// bumped normal by the steep weight and handed back to the stock apply below in the chunk's tangent
+					// space through the EXACT inverse of the (unnormalised) TBN: the interpolated tangent and normal are only
+					// orthogonal at the vertices, so a per-row projection would not round-trip (review 3.164).
+					const float2 tnX = tp_nX * tp_rcp * 2 - 1;
+					const float2 tnZ = tp_nZ * tp_rcp * 2 - 1;
+					const float3 tp_B = float3(0, -1, 0);
+					const float3 tp_NwX = tnX.x * float3(0, 0, tp_sx) + tnX.y * tp_B;
+					const float3 tp_NwZ = tnZ.x * float3(-tp_sz, 0, 0) + tnZ.y * tp_B;
+					const float3 tp_Nside = normalize(tp_n + tp_pw.x * tp_NwX + tp_pw.y * tp_NwZ);
+					const float3 tp_T = TBN[0], tp_Bt = TBN[1], tp_Nt = TBN[2];
+					const float3 tp_Nvt = any(surface.bumpColor) ? normalize(mul((float3)surface.bumpColor, TBN)) : tp_n;
+					const float3 tp_Nf = normalize(lerp(tp_Nvt, tp_Nside, tp_s));
+					// bump such that mul(bump, TBN) = bump.x*T + bump.y*B + bump.z*N = Nf: Cramer's rule with the cofactors
+					const float3 tp_c0 = cross(tp_Bt, tp_Nt), tp_c1 = cross(tp_Nt, tp_T), tp_c2 = cross(tp_T, tp_Bt);
+					const float tp_det = dot(tp_T, tp_c0);
+					[flatten]
+					if (abs(tp_det) > 1e-10)
+						surface.bumpColor = half3(float3(dot(tp_Nf, tp_c0), dot(tp_Nf, tp_c1), dot(tp_Nf, tp_c2)) / tp_det);
+					else
+						surface.bumpColor = half3(
+							dot(tp_Nf, tp_T) / max(dot(tp_T, tp_T), 1e-8),
+							dot(tp_Nf, tp_Bt) / max(dot(tp_Bt, tp_Bt), 1e-8),
+							dot(tp_Nf, tp_Nt) / max(dot(tp_Nt, tp_Nt), 1e-8));
+				}
+				gg_tp_s = tp_s;
+				gg_tp_pw = tp_pw;
+			}
+		}
+	}
+#ifndef PREPASS
+	[branch]
+	if (GetFrame().gg_debugvis == 28)
+		return float4(gg_tp_s, gg_tp_s * gg_tp_pw.x, gg_tp_s * gg_tp_pw.y, 1);   // GGMAX 3.164: r = steep weight, g/b = X/Z plane
+#endif // PREPASS
+#endif // GG_TERRAIN_TRIPLANAR
 
 	[branch]
 	if (!material.IsUsingSpecularGlossinessWorkflow())

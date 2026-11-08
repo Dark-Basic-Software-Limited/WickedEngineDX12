@@ -126,12 +126,25 @@ float4 main(VertextoPixel input) : SV_TARGET
 		TiledLighting(surface, lighting, GetFlatTileIndex(pixel));
 
 		color.rgb *= lighting.direct.diffuse + lighting.indirect.diffuse;
-		color.rgb += lighting.indirect.specular;
+
+		// GGMAX BR-0017: legacy .PE emitters (xEmitterFadeinTime >= 0, as in 2.46/2.47) light
+		// like the fork's soft_lighting shader - diffuse only, no fog. Both upstream terms are
+		// ADDED to the colour regardless of the sprite's own colour, so on an ADDITIVE material
+		// (black background, alpha 1 everywhere - the norm for .PE smoke/fog sprites) every
+		// quad's black area gained specular / fog colour and the whole square showed.
+		const bool legacy_pe = xEmitterFadeinTime >= 0;
+		if (!legacy_pe)
+		{
+			color.rgb += lighting.indirect.specular;
+		}
 
 		//color.rgb = float3(unrotated_uv, 0);
 		//color.rgb = float3(input.tex, 0);
 
-		ApplyFog(dist, V, color);
+		if (!legacy_pe)
+		{
+			ApplyFog(dist, V, color);
+		}
 
 		color = max(0, color);
 	}

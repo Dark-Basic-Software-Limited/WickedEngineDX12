@@ -45,14 +45,15 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-# Default deploy folder: the build area's Max\shaders. GG_MAX_BUILD_PATH (the system variable the game's OutDir uses) wins
+# Default deploy folder: the build area's Max\shaders. GG_MAXIIENGINE_BUILD_PATH (the system variable the game's OutDir uses;
+# GG_MAX_BUILD_PATH belongs to the DX11 build area since 11-09, kept only as the last fallback for an old PC) wins
 # when it names a real build area - a shell started before the variable changed still holds the OLD value, so a missing
 # folder falls back to the default instead (2026-11-09: build area renamed to "MAXIIENGINE Build Area").
 if (-not $DeployDir) {
     $DeployDir = "D:\DEV\BUILD\MAXIIENGINE Build Area\Max\shaders"
     # the LIVE machine value first (a stale shell's copy can name a leftover old folder that still exists), then the
     # shell's own value (e.g. a per-user variable), each only when its Max\shaders folder exists
-    foreach ($bp in @([Environment]::GetEnvironmentVariable('GG_MAX_BUILD_PATH', 'Machine'), $env:GG_MAX_BUILD_PATH)) {
+    foreach ($bp in @([Environment]::GetEnvironmentVariable('GG_MAXIIENGINE_BUILD_PATH', 'Machine'), $env:GG_MAXIIENGINE_BUILD_PATH, $env:GG_MAX_BUILD_PATH)) {
         if ($bp) {
             $fromVar = Join-Path $bp "Max\shaders"
             if (Test-Path -LiteralPath $fromVar) { $DeployDir = $fromVar; break }

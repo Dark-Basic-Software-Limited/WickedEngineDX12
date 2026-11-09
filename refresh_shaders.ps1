@@ -50,9 +50,13 @@ $ErrorActionPreference = "Stop"
 # folder falls back to the default instead (2026-11-09: build area renamed to "MAXIIENGINE Build Area").
 if (-not $DeployDir) {
     $DeployDir = "D:\DEV\BUILD\MAXIIENGINE Build Area\Max\shaders"
-    if ($env:GG_MAX_BUILD_PATH) {
-        $fromVar = Join-Path $env:GG_MAX_BUILD_PATH "Max\shaders"
-        if (Test-Path -LiteralPath $fromVar) { $DeployDir = $fromVar }
+    # the LIVE machine value first (a stale shell's copy can name a leftover old folder that still exists), then the
+    # shell's own value (e.g. a per-user variable), each only when its Max\shaders folder exists
+    foreach ($bp in @([Environment]::GetEnvironmentVariable('GG_MAX_BUILD_PATH', 'Machine'), $env:GG_MAX_BUILD_PATH)) {
+        if ($bp) {
+            $fromVar = Join-Path $bp "Max\shaders"
+            if (Test-Path -LiteralPath $fromVar) { $DeployDir = $fromVar; break }
+        }
     }
 }
 

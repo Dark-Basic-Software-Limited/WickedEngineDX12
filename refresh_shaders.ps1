@@ -37,13 +37,24 @@
 # Called automatically from build_wicked.bat (engine) and the game build.bat.
 # =============================================================================
 param(
-    [string]$DeployDir = "D:\DEV\BUILD\GameGuru Wicked MAX Build Area\Max\shaders",
+    [string]$DeployDir = "",
     [string]$SourceDir = "D:\max\WickedEngineDX12\WickedEngine\shaders",
     [switch]$All,
     [switch]$DryRun
 )
 
 $ErrorActionPreference = "Stop"
+
+# Default deploy folder: the build area's Max\shaders. GG_MAX_BUILD_PATH (the system variable the game's OutDir uses) wins
+# when it names a real build area - a shell started before the variable changed still holds the OLD value, so a missing
+# folder falls back to the default instead (2026-11-09: build area renamed to "MAXIIENGINE Build Area").
+if (-not $DeployDir) {
+    $DeployDir = "D:\DEV\BUILD\MAXIIENGINE Build Area\Max\shaders"
+    if ($env:GG_MAX_BUILD_PATH) {
+        $fromVar = Join-Path $env:GG_MAX_BUILD_PATH "Max\shaders"
+        if (Test-Path -LiteralPath $fromVar) { $DeployDir = $fromVar }
+    }
+}
 
 if (-not (Test-Path -LiteralPath $DeployDir)) {
     Write-Host "refresh_shaders: deploy shaders folder not found, nothing to do:`n  $DeployDir"

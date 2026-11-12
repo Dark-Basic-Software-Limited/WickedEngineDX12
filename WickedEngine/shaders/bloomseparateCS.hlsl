@@ -12,10 +12,12 @@ void main(uint3 DTid : SV_DispatchThreadID)
 	half3 color = 0;
 
 	Texture2D<half4> texture_input = bindless_textures_half4[descriptor_index(bloom.texture_input)];
-	color += texture_input.SampleLevel(sampler_linear_clamp, (uv + float2(-0.5, -0.5)) * bloom.resolution_rcp, 0).rgb;
-	color += texture_input.SampleLevel(sampler_linear_clamp, (uv + float2(0.5, -0.5)) * bloom.resolution_rcp, 0).rgb;
-	color += texture_input.SampleLevel(sampler_linear_clamp, (uv + float2(-0.5, 0.5)) * bloom.resolution_rcp, 0).rgb;
-	color += texture_input.SampleLevel(sampler_linear_clamp, (uv + float2(0.5, 0.5)) * bloom.resolution_rcp, 0).rgb;
+	// GG (BR-0024, Lee: "cap at 30 for better DX11 parity"): each sample capped at 30 BEFORE averaging, as the DX11 fork
+	// did - a lone very bright specular texel then adds at most 30/4 instead of saturating the whole cap
+	color += min(texture_input.SampleLevel(sampler_linear_clamp, (uv + float2(-0.5, -0.5)) * bloom.resolution_rcp, 0).rgb, 30);
+	color += min(texture_input.SampleLevel(sampler_linear_clamp, (uv + float2(0.5, -0.5)) * bloom.resolution_rcp, 0).rgb, 30);
+	color += min(texture_input.SampleLevel(sampler_linear_clamp, (uv + float2(-0.5, 0.5)) * bloom.resolution_rcp, 0).rgb, 30);
+	color += min(texture_input.SampleLevel(sampler_linear_clamp, (uv + float2(0.5, 0.5)) * bloom.resolution_rcp, 0).rgb, 30);
 
 	color /= 4.0;
 
@@ -29,7 +31,7 @@ void main(uint3 DTid : SV_DispatchThreadID)
 	
 	color *= exposure;
 
-	color = min(color, 10); // clamp upper limit: avoid incredibly large values to overly dominate bloom (high speculars were causing problems)
+	color = min(color, 30); // clamp upper limit: avoid incredibly large values to overly dominate bloom (high speculars were causing problems) - GG: was 10; 30 (BR-0024) so the per-sample DX11 cap above is not undone; still applied after exposure (DX11 applied exposure later, in the tonemap)
 	color = max(color - bloom.threshold, 0);
 
 	bindless_rwtextures[descriptor_index(bloom.texture_output)][DTid.xy] = float4(color, 1);

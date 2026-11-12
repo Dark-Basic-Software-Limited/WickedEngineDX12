@@ -1568,6 +1568,12 @@ namespace wi::renderer
 		// Doublesided"), and pso[] is ignored. The shader keeps its slot, its name and its filterMask, so a saved
 		// customShaderID still means the same shader. For GG shaders that the DX12 API cannot build a full pipeline for.
 		bool ggStockPipeline = false;
+		// GGMAX BR-0027: non-null = materials using this shader draw in RENDERPASS_MAIN only, with the engine's own
+		// object pipeline for PBR / BLENDMODE_ALPHA / cull BACK (VS, input, depth-read transparent states - DX11's
+		// AddPipelineDesc(MAIN, PBR, ALPHA, DOUBLESIDED_DISABLED)) and THIS pixel shader in place of the stock one; pso[]
+		// is ignored and every other pass skips the material. For GG pixel-shader-only custom shaders ("grid Object").
+		// The Shader must outlive the renderer (GG keeps it in a global).
+		const wi::graphics::Shader* ggStockPS = nullptr;
 	};
 	// Registers a custom shader that can be set to materials. 
 	//	Returns the ID of the custom shader that can be used with MaterialComponent::SetCustomShaderID()

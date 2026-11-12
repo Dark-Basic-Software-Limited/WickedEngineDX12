@@ -36,6 +36,7 @@
 #include <algorithm>
 #include <atomic>
 #include <mutex>
+#include <unordered_map> // GGMAX BR-0027: GG_GetCustomPSPipeline's node-based cache
 
 using namespace wi::primitive;
 using namespace wi::graphics;
@@ -833,6 +834,35 @@ inline PipelineState* GetObjectPSO(ObjectRenderingVariant variant)
 inline void SetObjectPSO(ObjectRenderingVariant variant, const PipelineState& pso)
 {
 	GetObjectPSOMap(variant)[variant.value] = pso;
+}
+// GGMAX BR-0027: the stock object pipeline `stock` with a custom shader's ggStockPS as its pixel shader. Built once per
+// (custom shader, variant) from the stock desc (its pointers are the engine's own shader / state arrays, which live for
+// the program), compiled lazily at bind like every object PSO. Called from the parallel render jobs, so the cache is a
+// std::unordered_map under a mutex: node-based, an element's address never moves when it rehashes (unlike the ska map
+// GetObjectPSOMap uses - see the 2.09 note above). nullptr while the stock variant has not been built yet (a skipped
+// draw for those frames, as for any lazy object PSO).
+// Cleared by LoadShaders (with customShaders): a reload rebuilds the stock pipelines and re-registers custom shaders,
+// so an entry keyed by the old id must not outlive it.
+static std::mutex gg_customps_locker;
+static std::unordered_map<uint64_t, PipelineState> gg_customps_psos;
+static const PipelineState* GG_GetCustomPSPipeline(int customShaderID, const CustomShader& customShader, const PipelineState* stock, uint32_t variantValue)
+{
+	if (stock == nullptr || !stock->IsValid() || customShader.ggStockPS == nullptr || !customShader.ggStockPS->IsValid())
+		return nullptr;
+	const uint64_t key = (uint64_t(uint32_t(customShaderID)) << 32) | uint64_t(variantValue);
+	std::scoped_lock lock(gg_customps_locker);
+	auto it = gg_customps_psos.find(key);
+	if (it != gg_customps_psos.end())
+		return it->second.IsValid() ? &it->second : nullptr;
+	PipelineStateDesc desc = stock->desc;
+	desc.ps = customShader.ggStockPS;
+	PipelineState& pso = gg_customps_psos[key];
+	if (!GetDevice()->CreatePipelineState(&desc, &pso))
+	{
+		wi::backlog::post("GG custom shader pipeline failed: " + customShader.name, wi::backlog::LogLevel::Error);
+		return nullptr; // stays in the cache invalid: one message, never retried every frame
+	}
+	return &pso;
 }
 wi::jobsystem::context mesh_shader_ctx;
 wi::jobsystem::context object_pso_job_ctx;
@@ -2399,6 +2429,10 @@ void LoadShaders()
 
 	// Clear custom shaders (Custom shaders coming from user will need to be handled by the user in case of shader reload):
 	customShaders.clear();
+	{
+		std::scoped_lock gg_lock(gg_customps_locker); // GGMAX BR-0027: pipelines derived from the custom shaders just cleared
+		gg_customps_psos.clear();
+	}
 
 	// Hologram sample shader will be registered as custom shader:
 	//	It's best to register all custom shaders from the same thread, so under here
@@ -4303,7 +4337,24 @@ void RenderMeshes(
 					const CustomShader& customShader = customShaders[material.customShaderID];
 					if (filterMask & customShader.filterMask)
 					{
-						pso = &customShader.pso[renderPass];
+						if (customShader.ggStockPS != nullptr)
+						{
+							// GGMAX BR-0027: stock object pipeline + the custom pixel shader, MAIN only (see CustomShader)
+							if (renderPass == RENDERPASS_MAIN)
+							{
+								ObjectRenderingVariant variant = {};
+								variant.bits.renderpass = RENDERPASS_MAIN;
+								variant.bits.shadertype = MaterialComponent::SHADERTYPE_PBR;
+								variant.bits.blendmode = BLENDMODE_ALPHA;
+								variant.bits.cullmode = (uint32_t)CullMode::BACK;
+								variant.bits.sample_count = renderpass_info.sample_count;
+								pso = GG_GetCustomPSPipeline(material.customShaderID, customShader, GetObjectPSO(variant), variant.value);
+							}
+						}
+						else
+						{
+							pso = &customShader.pso[renderPass];
+						}
 					}
 				}
 				else

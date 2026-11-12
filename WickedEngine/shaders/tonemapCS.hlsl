@@ -29,14 +29,17 @@ half3 RRTAndODTFit(half3 v)
 
 half3 ACESFitted(half3 color)
 {
-	color = mul(ACESInputMat, color);
+	// GGMAX BR-0024 (Lee 2026-11-12, "DX11 parity everywhere"): the DX11 engine fork ran this curve PER CHANNEL - both
+	// colour matrices commented out (WICKEDREPO shaders/tonemapCS.hlsl). With them, the output matrix mixes channels and
+	// bright saturated colours (blue emissives) wash toward white. Restore the matrices for stock Wicked ACES.
+	//color = mul(ACESInputMat, color);
 
 	color = clamp(color, 0, 100); // fix for half precision issue with very bright values near point light center
 
 	// Apply RRT and ODT
 	color = RRTAndODTFit(color);
 
-	color = mul(ACESOutputMat, color);
+	//color = mul(ACESOutputMat, color);	// GGMAX BR-0024: see above
 
 	// Clamp to [0, 1]
 	color = saturate(color);

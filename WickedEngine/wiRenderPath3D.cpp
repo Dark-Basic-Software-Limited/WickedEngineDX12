@@ -2604,6 +2604,9 @@ namespace wi
 			vp.min_depth = 0;
 			vp.max_depth = 1;
 			device->BindViewports(1, &vp, cmd);
+			// GGMAX BR-0028: WPE emitters sort between these transparents (DX11 order) - DrawSoftParticles below
+			// then draws only the emitters nearer than every transparent batch.
+			wi::renderer::GG_EmitterInterleaveBegin(visibility_main, cmd);
 			wi::renderer::DrawScene(
 				visibility_main,
 				RENDERPASS_MAIN,
@@ -2613,6 +2616,7 @@ namespace wi
 				wi::renderer::DRAWSCENE_OCCLUSIONCULLING |
 				wi::renderer::DRAWSCENE_MAINCAMERA
 			);
+			wi::renderer::GG_EmitterInterleaveEnd(cmd);
 
 			// Foreground:
 			vp.min_depth = 1 - foreground_depth_range;

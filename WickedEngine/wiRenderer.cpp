@@ -4124,6 +4124,107 @@ uint64_t GG_GetNoDepthWriteDrawCount() { return gg_dbg_nodepthwrite_draws.load(s
 std::atomic<uint64_t> gg_dbg_forcedepth_draws{ 0 };
 uint64_t GG_GetForceDepthDrawCount() { return gg_dbg_forcedepth_draws.load(std::memory_order_relaxed); }
 
+// ★ GGMAX BR-0028: WPE particles behind glass. DX11 sorted emitters BETWEEN transparent meshes: its
+// RenderMeshes called DrawSoftParticles_Distance(batch distance) before each transparent batch, drawing
+// every emitter farther away than that batch first (WickedRepo wiRenderer.cpp ~3546 + 6152, "window,
+// particle, window"). DX12/upstream draws ALL emitters after ALL transparents, and transparents write
+// depth (DSSTYPE_TRANSPARENT), so an effect under a glass floor failed the depth test over the glass's
+// whole footprint and vanished. Same back-to-front rule here: the emitters are sorted far->near once
+// (GG_EmitterInterleaveBegin), RenderMeshes' batch_flush draws the ones farther than the batch it is about
+// to draw, and DrawSoftParticles draws only those still left (the nearest). WPE only - the legacy gpup
+// (.arx) draw stays one batch in customDraw_Transparent (GPUParticles_part0.cpp gpup_draw_bydistance).
+int gg_wpe_interleave = 1;
+std::atomic<uint64_t> gg_dbg_wpe_interleave_draws{ 0 };	// cumulative emitter draws made BETWEEN transparent batches
+uint64_t GG_GetWPEInterleaveDrawCount() { return gg_dbg_wpe_interleave_draws.load(std::memory_order_relaxed); }
+namespace
+{
+	struct GGEmitterInterleave
+	{
+		const Visibility* vis = nullptr;	// the visibility the order was built for (main camera only)
+		void* cmd = nullptr;				// CommandList::internal it was built on
+		uint64_t frame = ~0ull;
+		bool open = false;					// between Begin and End: RenderMeshes may draw from it
+		wi::vector<std::pair<float, uint32_t>> order;	// far -> near: (camera distance + sort bias, visibleEmitters slot)
+		wi::vector<uint8_t> drawn;			// per visibleEmitters slot: already drawn between batches
+		size_t next = 0;					// first entry of `order` not yet drawn
+	};
+	GGEmitterInterleave gg_ei;
+
+	// The emitters DrawSoftParticles(distortion = false) would draw - the same test, so nothing is drawn twice
+	// and nothing it would skip is drawn here.
+	inline bool GG_EmitterDrawsInMainPass(const wi::EmittedParticleSystem& emitter)
+	{
+		return emitter.shaderType == wi::EmittedParticleSystem::SOFT || emitter.shaderType == wi::EmittedParticleSystem::SOFT_LIGHTING
+			|| emitter.shaderType == wi::EmittedParticleSystem::SIMPLE;
+	}
+
+	// Draw every not-yet-drawn emitter farther from the camera than `distance` (a transparent batch's distance).
+	// Returns true when it drew anything (the caller's PSO / index buffer / stencil-ref trackers are then stale).
+	bool GG_EmitterInterleaveDraw(float distance, CommandList cmd)
+	{
+		const Visibility& vis = *gg_ei.vis;
+		bool any = false;
+		while (gg_ei.next < gg_ei.order.size())
+		{
+			if (!(gg_ei.order[gg_ei.next].first > distance))
+				break; // sorted far -> near: everything after this is nearer too (DX11: drawn when dist > batch distance)
+			const uint32_t slot = gg_ei.order[gg_ei.next].second;
+			gg_ei.next++;
+			const uint32_t emitterIndex = vis.visibleEmitters[slot];
+			const wi::EmittedParticleSystem& emitter = vis.scene->emitters[emitterIndex];
+			const MaterialComponent* material = vis.scene->materials.GetComponent(vis.scene->emitters.GetEntity(emitterIndex));
+			if (material == nullptr || !GG_EmitterDrawsInMainPass(emitter))
+				continue;
+			if (!any)
+				device->EventBegin("GG WPE interleave (BR-0028)", cmd);
+			emitter.Draw(*material, cmd);
+			gg_ei.drawn[slot] = 1;
+			any = true;
+			gg_dbg_wpe_interleave_draws.fetch_add(1, std::memory_order_relaxed);
+		}
+		if (any)
+			device->EventEnd(cmd);
+		return any;
+	}
+}
+
+void GG_EmitterInterleaveBegin(const Visibility& vis, CommandList cmd)
+{
+	gg_ei.open = false;
+	gg_ei.vis = nullptr;
+	gg_ei.next = 0;
+	gg_ei.order.clear();
+	gg_ei.drawn.clear();
+	const size_t emitterCount = vis.visibleEmitters.size();
+	if (gg_wpe_interleave == 0 || IsWireRender() || emitterCount == 0 || emitterCount >= 0x0000FFFF) // DrawSoftParticles' slot field is 16 bits
+		return;
+	gg_ei.order.resize(emitterCount);
+	gg_ei.drawn.assign(emitterCount, 0);
+	for (size_t i = 0; i < emitterCount; ++i)
+	{
+		// DX11's interleave key (WickedRepo DrawSoftParticles_Init): distance + the .pe's distance_sort_bias, a negative
+		// result clamped to 0 (bias < 0) or 1. Full float - batch distances are float too (review: half-float steps are
+		// 2-4 units past 2048, enough to put an emitter just behind glass on the wrong side of it).
+		const wi::EmittedParticleSystem& emitter = vis.scene->emitters[vis.visibleEmitters[i]];
+		float distance = wi::math::Distance(emitter.center, vis.camera->Eye) + emitter.distance_sort_bias;
+		if (distance < 0)
+			distance = emitter.distance_sort_bias < 0 ? 0.0f : 1.0f;
+		gg_ei.order[i] = std::make_pair(distance, (uint32_t)i);
+	}
+	std::sort(gg_ei.order.begin(), gg_ei.order.end(), [](const std::pair<float, uint32_t>& a, const std::pair<float, uint32_t>& b) {
+		return a.first > b.first || (a.first == b.first && a.second > b.second); });
+	gg_ei.vis = &vis;
+	gg_ei.cmd = cmd.internal_state;
+	gg_ei.frame = device->GetFrameCount();
+	gg_ei.open = true;
+}
+
+void GG_EmitterInterleaveEnd(CommandList cmd)
+{
+	(void)cmd;
+	gg_ei.open = false; // DrawSoftParticles (same frame, same vis + cmd) now draws only what is left
+}
+
 void RenderMeshes(
 	const Visibility& vis,
 	const RenderQueue& renderQueue,
@@ -4190,6 +4291,7 @@ void RenderMeshes(
 		bool forceAlphatestForDithering = false;
 		uint8_t lod = 0;
 		bool gg_terrain = false; // GGMAX 3.159 (BR-0009): a wiTerrain chunk batch (gg_dbg_terrain_tris)
+		float gg_distance = 0; // GGMAX BR-0028: the batch's first (= farthest, transparent sort) instance distance, full float
 		AABB aabb;
 	} instancedBatch = {};
 
@@ -4198,6 +4300,11 @@ void RenderMeshes(
 
 	IndexBufferFormat prev_ibformat = IndexBufferFormat::UINT16;
 	const void* prev_ib_internal = nullptr;
+
+	// GGMAX BR-0028: the main-camera, non-foreground transparent list interleaves WPE emitters (see GG_EmitterInterleaveBegin)
+	const bool gg_wpe_interleave_here = gg_ei.open && renderPass == RENDERPASS_MAIN && (flags & DRAWSCENE_TRANSPARENT)
+		&& !(flags & DRAWSCENE_FOREGROUND_ONLY) && gg_ei.vis == &vis && gg_ei.cmd == cmd.internal_state
+		&& gg_ei.frame == device->GetFrameCount();
 
 	// This will be called every time we start a new draw call:
 	auto batch_flush = [&]()
@@ -4222,6 +4329,36 @@ void RenderMeshes(
 		{
 			if (ggWatch) gg_dbg_watch_nobuffer[renderPass].fetch_add(1, std::memory_order_relaxed);
 			return;
+		}
+
+		// GGMAX BR-0028: emitters farther than this transparent batch draw before it (DX11 order). The emitter draw
+		// binds its own PSO / shading rate / CB slot 4 / t0-t3 - every subset below rebinds PSO, shading rate and push
+		// constants; the index buffer and stencil ref are tracked, so drop the trackers.
+		// ⚠ Not before a batch drawn with a custom-shader PSO that has no vertex or mesh shader (the GG Glass / Water
+		// Object shells, CustomShaders.cpp, PS only): if D3D12 refuses such a PSO the device keeps the PREVIOUS
+		// pipeline bound, which must not be the particle one. Those emitters wait for the next batch / DrawSoftParticles.
+		if (gg_wpe_interleave_here)
+		{
+			bool gg_shell = false;
+			uint32_t gg_first = 0, gg_last = 0;
+			mesh.GetLODSubsetRange(instancedBatch.lod, gg_first, gg_last);
+			for (uint32_t s = gg_first; s < gg_last && !gg_shell; ++s)
+			{
+				const uint32_t mi = mesh.subsets[s].materialIndex;
+				if (mi >= vis.scene->materials.GetCount())
+					continue;
+				const int cs = vis.scene->materials[mi].customShaderID;
+				if (cs >= 0 && cs < (int)customShaders.size() && !customShaders[cs].ggStockPipeline && customShaders[cs].ggStockPS == nullptr)
+				{
+					const PipelineStateDesc& d = customShaders[cs].pso[RENDERPASS_MAIN].desc;
+					gg_shell = d.vs == nullptr && d.ms == nullptr;
+				}
+			}
+			if (!gg_shell && GG_EmitterInterleaveDraw(instancedBatch.gg_distance, cmd))
+			{
+				prev_ib_internal = nullptr;
+				device->BindStencilRef(prev_stencilref, cmd);
+			}
 		}
 
 		const bool forceAlphaTestForDithering = instancedBatch.forceAlphatestForDithering != 0;
@@ -4746,6 +4883,7 @@ void RenderMeshes(
 			instancedBatch.aabb = AABB();
 			instancedBatch.lod = lod;
 			instancedBatch.gg_terrain = (instance.GetFilterMask() & FILTER_TERRAIN) != 0; // GGMAX 3.159
+			instancedBatch.gg_distance = gg_wpe_interleave_here ? wi::math::Distance(vis.camera->Eye, instance.center) : 0.0f; // GGMAX BR-0028 (DrawScene's key, unrounded)
 		}
 
 		const float dither = gg_no_fade ? instance.GetTransparency() : std::max(instance.GetTransparency(), std::max(0.0f, batch.GetDistance() - instance.fadeDistance) / instance.radius);
@@ -8065,6 +8203,9 @@ void DrawSoftParticles(
 	BindCommonResources(cmd);
 
 	size_t emitterCount = vis.visibleEmitters.size();
+	// GGMAX BR-0028: the main-camera pass of a frame whose transparents interleaved emitters - draw only those still left
+	const bool gg_skip_drawn = !distortion && !gg_ei.open && gg_ei.vis == &vis && gg_ei.cmd == cmd.internal_state
+		&& gg_ei.frame == device->GetFrameCount() && gg_ei.drawn.size() == emitterCount;
 	if (emitterCount > 0)
 	{
 		// Sort emitters based on distance:
@@ -8084,6 +8225,8 @@ void DrawSoftParticles(
 
 		for (size_t i = 0; i < emitterCount; ++i)
 		{
+			if (gg_skip_drawn && gg_ei.drawn[emitterSortingHashes[i] & 0x0000FFFF])
+				continue; // GGMAX BR-0028: already drawn between the transparent batches
 			const uint32_t emitterIndex = vis.visibleEmitters[emitterSortingHashes[i] & 0x0000FFFF];
 			const wi::EmittedParticleSystem& emitter = vis.scene->emitters[emitterIndex];
 			const Entity entity = vis.scene->emitters.GetEntity(emitterIndex);
@@ -8115,6 +8258,12 @@ void DrawSoftParticles(
 	}
 
 	device->BindShadingRate(ShadingRate::RATE_1X1, cmd);
+
+	if (gg_skip_drawn)
+	{
+		gg_ei.vis = nullptr; // GGMAX BR-0028: consumed - a later call this frame (none today) draws everything again
+		gg_ei.drawn.clear();
+	}
 
 	wi::profiler::EndRange(range);
 }

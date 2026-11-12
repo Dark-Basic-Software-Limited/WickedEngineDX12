@@ -459,6 +459,14 @@ namespace wi::renderer
 		bool distortion, 
 		wi::graphics::CommandList cmd
 	);
+	// GGMAX BR-0028: DX11 parity - WPE emitters sort BETWEEN transparent meshes (window, particle, window).
+	// Open around the main-camera transparent DrawScene; RenderMeshes then draws every emitter farther than
+	// the transparent batch it is about to draw, and DrawSoftParticles draws only the ones still left (the
+	// nearest). gg_wpe_interleave = 0 restores the stock order (all emitters after all transparents).
+	extern int gg_wpe_interleave;
+	uint64_t GG_GetWPEInterleaveDrawCount();
+	void GG_EmitterInterleaveBegin(const Visibility& vis, wi::graphics::CommandList cmd);
+	void GG_EmitterInterleaveEnd(wi::graphics::CommandList cmd);
 	// Draw the sprites and fonts from the scene
 	void DrawSpritesAndFonts(
 		const wi::scene::Scene& scene,

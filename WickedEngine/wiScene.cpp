@@ -18,6 +18,9 @@
 // anim_garbage.txt (fires on stock content — parrot load-time shear — so standalones
 // with producelogfiles=0 must not drop it in players' folders; set via GGSetDiagTraceFiles)
 bool gg_anim_garbage_file = true;
+// BR-0032: 1 (default) = a mode-2 preframe (lip sync) eases from last frame's pose, as DX11; 0 = the pre-fix
+// DX12 blend from this frame's animation pose. A/B lever only (harness SET_LIPSYNC_SMOOTH).
+int gg_preframe2_fromprev = 1;
 
 #include <mutex> // GGMAX DIAG: corrupt-geometry tripwire
 #include <cmath> // GGMAX DIAG: std::isfinite
@@ -3362,6 +3365,14 @@ namespace wi::scene
 							{
 								target_transform->SetDirty();
 
+								//GGMAX BR-0032: a mode-2 preframe (lip sync mouth shapes) eases from the bone's pose
+								//BEFORE this frame's animation write-back - last frame's result - as DX11 did (DX11
+								//sampled into a local and blended from the untouched target). Blending from the pose
+								//just written below dropped that frame-to-frame memory: the mouth snapped to each shape.
+								const XMFLOAT3 ggPrevScale = target_transform->scale_local;
+								const XMFLOAT4 ggPrevRotation = target_transform->rotation_local;
+								const XMFLOAT3 ggPrevTranslation = target_transform->translation_local;
+
 								switch (channel.path)
 								{
 								case AnimationComponent::AnimationChannel::Path::TRANSLATION:
@@ -3629,9 +3640,10 @@ namespace wi::scene
 										XMStoreFloat4(&transform.rotation_local, preframeT);
 									}
 								}
-								const XMVECTOR aS = XMLoadFloat3(&target_transform->scale_local);
-								const XMVECTOR aR = XMLoadFloat4(&target_transform->rotation_local);
-								const XMVECTOR aT = XMLoadFloat3(&target_transform->translation_local);
+								const bool ggFromPrev = (channel.iUsePreFrame == 2) && gg_preframe2_fromprev != 0;   // BR-0032
+								const XMVECTOR aS = XMLoadFloat3(ggFromPrev ? &ggPrevScale : &target_transform->scale_local);
+								const XMVECTOR aR = XMLoadFloat4(ggFromPrev ? &ggPrevRotation : &target_transform->rotation_local);
+								const XMVECTOR aT = XMLoadFloat3(ggFromPrev ? &ggPrevTranslation : &target_transform->translation_local);
 								const XMVECTOR bS = XMLoadFloat3(&transform.scale_local);
 								const XMVECTOR bR = XMLoadFloat4(&transform.rotation_local);
 								const XMVECTOR bT = XMLoadFloat3(&transform.translation_local);

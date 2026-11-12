@@ -2409,6 +2409,23 @@ namespace wi::scene
 	// full recompose). See RunMaterialUpdateSystem.
 	bool gg_material_cache = true;
 
+	// GGMAX BR-0025: a stopped animation may be skipped only once its pose has SETTLED. GG blends
+	// each evaluation toward the sampled pose by `amount` (fAnimInterp, 0.01 when a play starts,
+	// creeping toward 1 per evaluation - see the amount Lerp below). Upstream skips a stopped
+	// animation whose timer has not moved, so a door stopped by the game (timer parked on its
+	// last frame) was evaluated ONCE more and froze part-way: measured on the Aztec Slave Cage
+	// Door with the player beside it, 0.74 deg short after "open" and 88 deg short after
+	// "close", for ever. The DX11 fork evaluated every stopped animation with a non-zero timer
+	// each frame, so the pose converged. Keep evaluating while amount < 0.999 (each NON-CULLED
+	// evaluation raises it, so it stops by itself unless the game lowers it again - a new play /
+	// transition; one that stays culled, e.g. a hidden object, stays queued as in DX11);
+	// a settled animation is skipped exactly as before. Cost is bounded by DX11's, which never
+	// skipped a stopped animation with a non-zero timer.
+	static inline bool gg_anim_stopped_and_settled(const AnimationComponent& a)
+	{
+		return !a.IsPlaying() && a.last_update_time == a.timer && a.amount >= 0.999f;
+	}
+
 	void Scene::RunAnimationUpdateSystem(wi::jobsystem::context& ctx)
 	{
 		auto range = wi::profiler::BeginRangeCPU("Animations");
@@ -2712,9 +2729,13 @@ namespace wi::scene
 						if ((!animation.IsPlaying() && animation.timer == 0.0f) && animation.updateonce == false) continue;
 					}
 
-					if (!animation.IsPlaying() && animation.last_update_time == animation.timer) // The timer check is for scrolling paused animation timer, it should still update anim even if not playing!
+					if (gg_anim_stopped_and_settled(animation)) // The timer check is for scrolling paused animation timer, it should still update anim even if not playing! (GGMAX BR-0025: and until its pose has settled)
 						continue;
 
+					// GGMAX BR-0025: remember the stamp so a CULLED frame can give it back below - otherwise a
+					// stopped animation whose one remaining evaluation fell on a culled frame (30fps parity,
+					// Reduction Scale, not renderable, visibility pause) never samples its final frame.
+					const float gg_prev_last_update_time = animation.last_update_time;
 					animation.last_update_time = animation.timer;
 
 					//GGMAX
@@ -2767,6 +2788,7 @@ namespace wi::scene
 							//}
 						}
 					}
+					if (bCulled) animation.last_update_time = gg_prev_last_update_time; // GGMAX BR-0025: not evaluated = not updated
 					animation.updateonce = false;
 					if (!bCulled)
 					{
@@ -11082,7 +11104,7 @@ namespace wi::scene
 			for (size_t i = 0; i < animations.GetCount(); ++i)
 			{
 				AnimationComponent& animationA = animations[i];
-				if (!animationA.IsPlaying() && animationA.last_update_time == animationA.timer)
+				if (gg_anim_stopped_and_settled(animationA)) // GGMAX BR-0025: same gate as RunAnimationUpdateSystem
 				{
 					continue;
 				}

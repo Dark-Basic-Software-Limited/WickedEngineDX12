@@ -2428,6 +2428,9 @@ namespace wi::scene
 	{
 		return !a.IsPlaying() && a.last_update_time == a.timer && a.amount >= 0.999f;
 	}
+	// GGMAX BR-0025 review 11-13: the dependency scan also skips a stopped primary animation at timer 0 (the update
+	// loop's own first gate). A lever for the harness A/B only (SET_ANIMSCANT0); true = the fix.
+	bool gg_anim_scan_skip_t0 = true;
 
 	void Scene::RunAnimationUpdateSystem(wi::jobsystem::context& ctx)
 	{
@@ -11117,6 +11120,15 @@ namespace wi::scene
 			{
 				AnimationComponent& animationA = animations[i];
 				if (gg_anim_stopped_and_settled(animationA)) // GGMAX BR-0025: same gate as RunAnimationUpdateSystem
+				{
+					continue;
+				}
+				// GGMAX BR-0025 review 11-13: RunAnimationUpdateSystem also skips a stopped PRIMARY animation whose timer is 0
+				// (Stop() = timer 0) before anything else - so one Stop()ped while its blend was unsettled (amount < 0.999:
+				// an NPC killed within ~2 s of a transition, a Lua StopAnimation) passed the gate above and was queued as its
+				// own job every frame, for ever, only to be skipped there. Skip it here too (secondaries read their primary's
+				// timer in the update loop, so they keep the old rule).
+				if (gg_anim_scan_skip_t0 && animationA.useprimaryanimtimer == 0 && !animationA.IsPlaying() && animationA.timer == 0.0f && animationA.updateonce == false)
 				{
 					continue;
 				}

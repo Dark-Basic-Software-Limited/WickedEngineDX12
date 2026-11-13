@@ -4495,6 +4495,11 @@ void RenderMeshes(
 						else
 						{
 							pso = &customShader.pso[renderPass];
+							// GGMAX BR-0028 follow-up (review 11-13): a PS-only shell (GG Glass / Water Object, no VS or MS)
+							// draws with whatever pipeline is still bound when D3D12 refuses it; in the Water Bake under-water
+							// pre-draw that can be a COMPUTE pipeline or none (it may be the first batch) - so not there.
+							if ((flags & DRAWSCENE_GG_BELOW_WATER) && pso->desc.vs == nullptr && pso->desc.ms == nullptr)
+								continue;
 						}
 					}
 				}
@@ -9840,6 +9845,16 @@ void DrawScene(
 			if (skip_planar_reflection_objects && object.IsNotVisibleInReflections())
 			{
 				if (ggQ) gg_dbg_watch_q[renderPass][GG_Q_NOREFLECT].fetch_add(1, std::memory_order_relaxed);
+				continue;
+			}
+			// GGMAX BR-0028 follow-up (11-13): the Water Bake pre-draw of the transparents BELOW the water (clipped at the
+			// surface by the camera clip plane) needs only objects that reach below it - an object wholly above the water
+			// would be clipped away entirely, so it is not even queued. Per-call flag, so concurrent DrawScenes (planar
+			// reflection, shadows) are untouched.
+			if ((flags & DRAWSCENE_GG_BELOW_WATER) && instanceIndex < vis.scene->aabb_objects.size()
+				&& vis.scene->aabb_objects[instanceIndex]._min.y > vis.scene->weather.oceanParameters.waterHeight)
+			{
+				if (ggQ) gg_dbg_watch_q[renderPass][GG_Q_FILTER].fetch_add(1, std::memory_order_relaxed); // a per-pass filter reject
 				continue;
 			}
 			if ((object.GetFilterMask() & filterMask) == 0)

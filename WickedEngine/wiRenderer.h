@@ -404,6 +404,7 @@ namespace wi::renderer
 		DRAWSCENE_FOREGROUND_ONLY = 1 << 8, // only include objects that are tagged as foreground
 		DRAWSCENE_MAINCAMERA = 1 << 9, // If this is active, then ObjectComponent with SetNotVisibleInMainCamera(true) won't be drawn
 		DRAWSCENE_WIREFRAME_OVERLAY = 1 << 10, // draw wireframe overlay
+		DRAWSCENE_GG_BELOW_WATER = 1 << 11, // GGMAX BR-0028 follow-up: skip objects whose AABB lies wholly above the weather's water height
 	};
 
 	// Draw the world from a camera. You must call BindCameraCB() at least once in this command list prior to this

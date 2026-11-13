@@ -26,6 +26,17 @@ namespace wi
 	// -1 = the null descriptor) and needs nothing from the ocean. The game re-derives this every frame while
 	// Water Bake is drawing (GGWaterBake.cpp). Default false = stock.
 	bool gg_underwater_without_ocean = false;
+	// GGMAX BR-0028 follow-up (11-13): the game draws its stand-in water surface (Water Bake) in the ocean's slot this
+	// frame - from above AND below. Set EVERY frame by GGWaterBake_Update (false unless Water Bake draws water), so a
+	// level without Water Bake never opens the hook's pass. Default false = stock.
+	bool gg_water_surface_draw = false;
+	// GGMAX BR-0028 follow-up (Lee 11-13, "Full DX11"): with the surface in the ocean's slot writing depth, see-through
+	// objects BELOW the water would vanish from above. DX11's GameGuru pass (WickedRepo RenderPath3D.cpp ~1576-1586)
+	// drew the transparents once more before its ocean, clipped at the water by the camera clip plane, so the part
+	// below the surface shows under the water, tinted by it. true = do that before the stand-in surface (camera above
+	// the water only). Set EVERY frame by GGWaterBake_Update (false = no pre-draw; harness SET_WATERBAKEPREDRAW).
+	bool gg_water_surface_predraw = false;
+	uint64_t gg_water_surface_predraws = 0; // diagnostic: frames that ran the pre-draw (DUMP_BAKE)
 	// GGMAX 3.120: with the ocean off, the GG plane seen from below is an OPAQUE ceiling that is not in
 	// texture_depth, so a ceiling pixel's depth is whatever is ABOVE the water. Stock fogs it by
 	// min(0.1 x that distance, distance to the plane), which lets shore terrain ghost through the ceiling.
@@ -2547,12 +2558,45 @@ namespace wi
 		// GGMAX 3.120: a GG stand-in water surface seen from BELOW (Water Bake's opaque ceiling) draws HERE, in the
 		// ocean's slot: before the transparent scene (transparents composite over it - drawn after them it painted over
 		// no-depth-write hair/foliage and left depth-writing glass showing the world above), and before the mip chain
-		// (refractive transparents see it). Only while the camera is below the water, so no empty pass otherwise.
-		if (customDraw_WaterSurface && camera->Eye.y < scene->weather.oceanParameters.waterHeight)
+		// (refractive transparents see it).
+		// GGMAX BR-0028 follow-up (11-13): from ABOVE too. The above-water plane used to draw after the transparent
+		// scene (customDraw_Transparent), so once WPE emitters sorted between transparents (BR-0028) a far effect over a
+		// lake was blended UNDER the water, and the plane also painted over hair/foliage and hid behind glass. Here it
+		// writes depth like the live ocean (wiOcean.cpp): transparents, emitters, gpup and tracers composite over it and
+		// are hidden below it; volumetric lights, light shafts and the mip chain come after it, as with the ocean.
+		// Runs only when the game asks (gg_water_surface_draw), so other levels get no pass.
+		if (customDraw_WaterSurface && gg_water_surface_draw)
 		{
+			auto range_ws = wi::profiler::BeginRangeGPU("GG Water Surface (Water Bake)", cmd);
 			device->RenderPassBegin(rp, rp_count, cmd);
+			// GGMAX BR-0028 follow-up (Lee 11-13, "Full DX11"): the transparents below the water first, clipped at the
+			// surface (clip plane (0,-1,0,h) keeps y <= h; objects wholly above it are not queued), so the surface drawn
+			// next tints them; the transparent scene later draws them whole, and their under-water part then fails the
+			// surface's depth, leaving the tinted copy. Camera above the water only (below, the surface is an opaque
+			// ceiling). WPE emitters are not drawn here (the interleave is closed until GG_EmitterInterleaveBegin) -
+			// DX11 hid under-water particles too.
+			const float gg_wh = scene->weather.oceanParameters.waterHeight;
+			if (gg_water_surface_predraw && camera->Eye.y > gg_wh && visibility_main.IsTransparentsVisible())
+			{
+				wi::scene::CameraComponent gg_clipped = *camera;
+				gg_clipped.clipPlane = XMFLOAT4(0, -1, 0, gg_wh);
+				wi::renderer::BindCameraCB(gg_clipped, camera_previous, camera_reflection, cmd);
+				wi::renderer::DrawScene(
+					visibility_main,
+					RENDERPASS_MAIN,
+					cmd,
+					wi::renderer::DRAWSCENE_TRANSPARENT |
+					wi::renderer::DRAWSCENE_TESSELLATION |
+					wi::renderer::DRAWSCENE_OCCLUSIONCULLING |
+					wi::renderer::DRAWSCENE_MAINCAMERA |
+					wi::renderer::DRAWSCENE_GG_BELOW_WATER
+				);
+				wi::renderer::BindCameraCB(*camera, camera_previous, camera_reflection, cmd);
+				gg_water_surface_predraws++;
+			}
 			customDraw_WaterSurface(&camera->frustum, cmd);
 			device->RenderPassEnd(cmd);
+			wi::profiler::EndRange(range_ws);
 			device->GG_InvalidateCommandListState(cmd);
 			wi::renderer::BindCameraCB(*camera, camera_previous, camera_reflection, cmd);
 			wi::renderer::BindCommonResources(cmd);

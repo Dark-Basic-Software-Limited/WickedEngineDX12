@@ -860,6 +860,10 @@ static const PipelineState* GG_GetCustomPSPipeline(int customShaderID, const Cus
 	if (!GetDevice()->CreatePipelineState(&desc, &pso))
 	{
 		wi::backlog::post("GG custom shader pipeline failed: " + customShader.name, wi::backlog::LogLevel::Error);
+		// GGMAX BR-0027 review 11-13: CreatePipelineState sets pso->internal_state BEFORE its failure returns (a stage
+		// shader not loaded, no root signature), so without this reset the entry read IsValid() == true on the next
+		// lookup and a broken pipeline was bound every frame. Cleared, it stays in the cache invalid as intended.
+		pso = PipelineState();
 		return nullptr; // stays in the cache invalid: one message, never retried every frame
 	}
 	return &pso;

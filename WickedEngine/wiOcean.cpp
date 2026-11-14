@@ -325,7 +325,9 @@ namespace wi
 		cb.xOceanWaterColor = params.waterColor;
 		cb.xOceanExtinctionColor = XMFLOAT4(1 - params.extinctionColor.x, 1 - params.extinctionColor.y, 1 - params.extinctionColor.z, 1);
 		cb.xOceanWaterColorDepth = params.water_color_depth; // GG delta 1.24
-		cb.xOceanWCPad0 = cb.xOceanWCPad1 = cb.xOceanWCPad2 = 0.0f;
+		cb.xOceanFogMin = std::max(0.0f, params.water_fog_min); // GG BR-0039
+		cb.xOceanFogMax = std::max(0.0f, params.water_fog_max);
+		cb.xOceanFogMinAmount = std::min(1.0f, std::max(0.0f, params.water_fog_min_amount));
 		cb.xOceanTexelLength = params.patch_length / params.dmap_dim;
 		cb.xOceanScreenSpaceParams.x = (float)dim.x;
 		cb.xOceanScreenSpaceParams.y = (float)dim.y;

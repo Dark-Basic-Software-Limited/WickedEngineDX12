@@ -63,6 +63,15 @@ namespace wi
 			// 0 = off (stock: base colour only shows through opacity/alpha). Larger = colour reached
 			// over less depth.
 			float water_color_depth = 0.0f;
+
+			// GG BR-0039: DX11's water fog on the see-through. The refraction fades toward the LIT
+			// water colour (the surface's own albedo * diffuse) with the view-ray thickness of water
+			// t: fade = exp(-4 (t - min) / (max - min)), capped at 1 - min_amount - DX11's
+			// oceanSurfacePS water fog. Camera above water only (below, underwaterCS fogs the view).
+			// water_fog_max 0 = off (stock). World units (GG: inches).
+			float water_fog_min = 0.0f;
+			float water_fog_max = 0.0f;
+			float water_fog_min_amount = 0.0f;
 		};
 		void Create(const OceanParameters& params);
 

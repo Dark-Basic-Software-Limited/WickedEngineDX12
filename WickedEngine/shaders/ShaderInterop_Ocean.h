@@ -31,9 +31,9 @@ CBUFFER(OceanCB, CBSLOT_OTHER_OCEAN)
 	float xOceanFoamAmount;		// artistic multiplier on final foam intensity (1 = stock)
 
 	float xOceanWaterColorDepth;	// GG delta 1.24: tints the refraction (see-through) toward xOceanWaterColor with depth so the base colour shows on transparent water. 0 = off (stock)
-	float xOceanWCPad0;
-	float xOceanWCPad1;
-	float xOceanWCPad2;
+	float xOceanFogMin;			// GG BR-0039: DX11 water fog start (world units of view-ray water); used only when xOceanFogMax > 0
+	float xOceanFogMax;			// GG BR-0039: DX11 water fog maximum; 0 = off (stock)
+	float xOceanFogMinAmount;	// GG BR-0039: DX11 minimum water fog (0..1)
 };
 
 #endif // WI_SHADERINTEROP_OCEAN_H

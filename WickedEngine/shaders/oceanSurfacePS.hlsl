@@ -88,6 +88,7 @@ float4 main(PSIn input) : SV_TARGET
 	}
 
 	float water_depth = FLT_MAX;
+	bool gg_dx11_water = false; // GG BR-0039: the DX11 water fog ran - composite as DX11 below
 
 	[branch]
 	if (GetCamera().texture_refraction_index >= 0)
@@ -130,6 +131,27 @@ float4 main(PSIn input) : SV_TARGET
 		// so a chosen colour is visible even on fully-transparent water (color.a == 0) — clear
 		// shallows, coloured depths. xOceanWaterColorDepth 0 = off (stock).
 		surface.refraction.rgb = lerp(surface.refraction.rgb, color.rgb, saturate(abs(water_depth) * xOceanWaterColorDepth));
+		// GG BR-0039: DX11's water fog (DX11 oceanSurfacePS "apply water fog"). The see-through fades
+		// toward the LIT water colour - ApplyLighting's lerp(albedo * diffuse, refraction, refraction.a)
+		// - by the thickness of water along the view ray: the linear-depth gap from the surface to the
+		// bed (sky = z_far: open water goes opaque), boosted by the camera height as DX11 did. Same
+		// maths as GG's Water Bake (GGWaterBakePS). Camera below the water: unchanged (underwaterCS
+		// fogs that view). xOceanFogMax 0 = off (stock).
+		// ⚠ Not the stock "camera_above_water" above: reflection_plane is (0,1,0,-height), so that one is
+		// TRUE with the camera BELOW the water (its sign is only used to flip water_depth). DX11 tested
+		// the camera Y against the water height directly, and so does this.
+		const float camera_height = GetCamera().position.y - xOceanWaterHeight;
+		[branch]
+		if (xOceanFogMax > 0 && camera_height >= 0)
+		{
+			const float bedZ = texture_lineardepth.SampleLevel(sampler_point_clamp, refraction_uv, 0) * GetCamera().z_far;
+			float t = max(0, bedZ - lineardepth);
+			t += t * camera_height / max(dist, 0.0001);
+			float fade = exp(-4.0 * max(0, t - xOceanFogMin) / max(xOceanFogMax - xOceanFogMin, 0.1));
+			fade = min(saturate(1 - xOceanFogMinAmount), fade);
+			surface.refraction.a *= fade;
+			gg_dx11_water = true;
+		}
 		color.a = 1;
 	}
 	
@@ -163,6 +185,25 @@ float4 main(PSIn input) : SV_TARGET
 	surface.refraction.a *= 1 - foam;
 	surface.refraction.a = saturate(surface.refraction.a + saturate(exp(-water_depth_diff * 4)));
 #endif
+
+	// GG BR-0039: DX11's composite with its water fog - color = lerp(fogged see-through, 0.5 x reflection, F * 0.5)
+	// + sun specular (DX11 oceanSurfacePS "reflection *= 0.5" then "fresnel = surface.F * 0.5"; Water Bake's
+	// "keep" term). indirect.specular is already reflection x F, so x 0.25 = DX11's 0.5 F x 0.5 R. Stock adds
+	// F x reflection ON TOP of the full see-through, so at grazing angles the sky reflection drowns the water
+	// colour - why the far water barely changed with the Water Base Color. The minimum fog is re-applied after
+	// the stock shoreline term above (which lifts refraction.a to ~1 at the waterline), so Water Fog Minimum
+	// tints right up to the shore as in DX11 and Water Bake. Not DX11: the lit colour keeps Wicked's own
+	// lighting (full ambient x GI boost; DX11/Water Bake: sun/PI + 0.5 ambient), and with planar reflections
+	// off the global probe reflection is kept at 0.25 (DX11 blended toward black there).
+	[branch]
+	if (gg_dx11_water)
+	{
+		surface.refraction.a = min(surface.refraction.a, saturate(1 - xOceanFogMinAmount));
+		const half3 keep = 1 - 0.5 * surface.F;
+		surface.albedo *= keep;
+		surface.refraction.rgb *= keep;
+		lighting.indirect.specular *= 0.25;
+	}
 
 	ApplyLighting(surface, lighting, color);
 	

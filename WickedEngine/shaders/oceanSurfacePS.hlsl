@@ -16,6 +16,13 @@ float4 main(PSIn input) : SV_TARGET
 {
 	float lineardepth = GetCamera().IsOrtho() ? ((1 - input.pos.z) * GetCamera().z_far) : input.pos.w;
 	half4 color = xOceanWaterColor;
+	// GG BR-0039 round 2 (Lee 11-14, "Same as Water Bake"): with the DX11 water fog on (xOceanFogMax > 0, camera above
+	// the water) the Water Base Color alpha is a MINIMUM OPACITY, as GG's Water Bake treats it (GGWaterBakePS: fade capped
+	// at 1 - max(Water Fog Minimum, A)) - not stock Wicked's exp(-depth x A) extinction, which made any A > 0 water (the
+	// Plains biome sets 255) opaque within inches and the Water Fog sliders inert. DX11 ignored A. A 0 = DX11 exactly.
+	const float gg_wc_alpha = color.a;
+	const bool gg_fog_on = xOceanFogMax > 0 && (GetCamera().position.y - xOceanWaterHeight) >= 0;
+	const float gg_extinction_a = gg_fog_on ? 0 : gg_wc_alpha;
 	float2 ScreenCoord = input.pos.xy * GetCamera().internal_resolution_rcp;
 	
 	float3 V = input.GetViewVector();
@@ -78,7 +85,7 @@ float4 main(PSIn input) : SV_TARGET
 			float3 reflectivePosition = reconstruct_position(reflectionUV, reflectiveDepth, GetCamera().reflection_inverse_view_projection);
 			float water_depth = -dot(float4(reflectivePosition, 1), water_plane);
 			water_depth += texture_ocean_displacementmap.SampleLevel(sampler_linear_wrap, reflectivePosition.xz * xOceanPatchSizeRecip, 0).z; // texture contains xzy!
-			reflectiveColor.rgb = lerp(color.rgb, reflectiveColor.rgb, saturate(exp(-water_depth * color.a)));
+			reflectiveColor.rgb = lerp(color.rgb, reflectiveColor.rgb, saturate(exp(-water_depth * gg_extinction_a)));
 		}
 		lighting.indirect.specular = reflectiveColor.rgb * surface.F * saturate(dist * 0.1); // fade out very close to camera, doesn't look good
 	}
@@ -123,8 +130,8 @@ float4 main(PSIn input) : SV_TARGET
 		if (camera_above_water && V.y < 0)
 			water_depth = -water_depth;
 		// Water fog computation:
-		float waterfog = saturate(exp(-water_depth * color.a));
-		float3 transmittance = saturate(exp(-water_depth * surface.extinction * color.a));
+		float waterfog = saturate(exp(-water_depth * gg_extinction_a));
+		float3 transmittance = saturate(exp(-water_depth * surface.extinction * gg_extinction_a));
 		surface.refraction.a = waterfog;
 		surface.refraction.rgb *= transmittance;
 		// GG delta 1.24: tint the see-through (refraction) toward the Water Base Color with depth,
@@ -142,13 +149,13 @@ float4 main(PSIn input) : SV_TARGET
 		// the camera Y against the water height directly, and so does this.
 		const float camera_height = GetCamera().position.y - xOceanWaterHeight;
 		[branch]
-		if (xOceanFogMax > 0 && camera_height >= 0)
+		if (gg_fog_on)
 		{
 			const float bedZ = texture_lineardepth.SampleLevel(sampler_point_clamp, refraction_uv, 0) * GetCamera().z_far;
 			float t = max(0, bedZ - lineardepth);
 			t += t * camera_height / max(dist, 0.0001);
 			float fade = exp(-4.0 * max(0, t - xOceanFogMin) / max(xOceanFogMax - xOceanFogMin, 0.1));
-			fade = min(saturate(1 - xOceanFogMinAmount), fade);
+			fade = min(saturate(1 - max(xOceanFogMinAmount, gg_wc_alpha)), fade);   // + the authored A as a floor (Water Bake)
 			surface.refraction.a *= fade;
 			gg_dx11_water = true;
 		}
@@ -198,7 +205,7 @@ float4 main(PSIn input) : SV_TARGET
 	[branch]
 	if (gg_dx11_water)
 	{
-		surface.refraction.a = min(surface.refraction.a, saturate(1 - xOceanFogMinAmount));
+		surface.refraction.a = min(surface.refraction.a, saturate(1 - max(xOceanFogMinAmount, gg_wc_alpha)));
 		const half3 keep = 1 - 0.5 * surface.F;
 		surface.albedo *= keep;
 		surface.refraction.rgb *= keep;

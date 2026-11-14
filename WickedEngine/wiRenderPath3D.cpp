@@ -3562,7 +3562,15 @@ namespace wi
 
 		if (value)
 		{
-			wi::renderer::CreateLuminanceResources(luminanceResources, GetInternalResolution());
+			// GGMAX BR-0037: create only when missing (first enable, or after ResizeBuffers ->
+			// DeleteGPUResources cleared it). GG re-applies the visuals on every Test Game panel
+			// tick (setEyeAdaptionEnabled(true) each time); re-creating here zeroed the exposure
+			// history every tick = flash / whiteout. DX11 only set the flag. The buffer size does
+			// not depend on the resolution.
+			if (!luminanceResources.luminance.IsValid())
+			{
+				wi::renderer::CreateLuminanceResources(luminanceResources, GetInternalResolution());
+			}
 		}
 		else
 		{

@@ -1051,7 +1051,18 @@ namespace wi::scene
 		shaderscene.texturestreamingbuffer = device->GetDescriptorIndex(&textureStreamingFeedbackBuffer, SubresourceType::UAV);
 		if (weather.skyMap.IsValid())
 		{
-			shaderscene.globalenvmap = device->GetDescriptorIndex(&weather.skyMap.GetTexture(), SubresourceType::SRV, weather.skyMap.GetTextureSRGBSubresource());
+			// GGMAX BR-0026: DX11 parity for the skybox gamma. DX11 gamma-decoded a static sky only
+			// when it was UNCOMPRESSED 8-bit (StaticSkyGamma 2.2 via IsFormatUnorm, a list with no BC
+			// formats); a BC1/BC2/BC3/BC7_UNORM skybox was sampled raw. Stock wicked always took the
+			// sRGB view, decoding those ~2.2 (6x darker at 0.2) - MoonOrbit/night/sunrise near black
+			// at low Exposure. A block-compressed sky therefore uses its own view: BC*_UNORM raw (as
+			// DX11), BC*_UNORM_SRGB decoded by the format, BC6H HDR unchanged (no sRGB view anyway).
+			int skySubresource = weather.skyMap.GetTextureSRGBSubresource();
+			if (IsFormatBlockCompressed(weather.skyMap.GetTexture().desc.format))
+			{
+				skySubresource = -1;
+			}
+			shaderscene.globalenvmap = device->GetDescriptorIndex(&weather.skyMap.GetTexture(), SubresourceType::SRV, skySubresource);
 		}
 		else
 		{

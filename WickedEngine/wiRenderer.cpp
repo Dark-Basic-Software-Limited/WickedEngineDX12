@@ -373,6 +373,11 @@ bool SHADOW_LOD_OVERRIDE = true;
 // the base PBR shader instead, and tessellation is skipped. See the long note at the variant
 // selection in RenderMeshes.
 int gg_super_quick_objects = 0;
+// GGMAX BR-0034: Fast Point Light Shadows (Graphics & Performance tick, per level). 1 = the one-tap
+// shadow filter Super Quick already selects (OPTION_BIT_GG_FAST_SHADOWS), on its own, with the
+// object shader left stock. In practice it only reaches sample_shadow's callers - point lights
+// (shadow_cube); the sun and spots use shadow_2D_feathered and keep their soft edges. 0 = stock.
+int gg_fast_point_shadows = 0;
 
 Texture shadowMapAtlas;
 Texture shadowMapAtlas_Transparent;
@@ -6197,7 +6202,8 @@ void UpdatePerFrameData(
 		frameCB.options |= OPTION_BIT_TRANSPARENTSHADOWS_ENABLED;
 	}
 	// GGMAX 3.31a: Super Quick -> single-tap shadow filtering (see shadowHF.hlsli).
-	if (gg_super_quick_objects != 0)
+	// GGMAX BR-0034: ... or Fast Point Light Shadows on its own.
+	if (gg_super_quick_objects != 0 || gg_fast_point_shadows != 0)
 	{
 		frameCB.options |= OPTION_BIT_GG_FAST_SHADOWS;
 	}

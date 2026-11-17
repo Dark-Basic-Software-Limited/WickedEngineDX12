@@ -1303,6 +1303,10 @@ enum FRAME_OPTIONS
 	// GGMAX 3.114: fog optical depth over the distance PAST fog.start only - DX11 GG's curve (fogHF.hlsli
 	// GetFogAmount). Off = the stock curve. Frame-wide, so the game's custom draws mirror it exactly.
 	OPTION_BIT_GG_DX11_FOG_CURVE = 1 << 27,
+	// GGMAX BR-0034 (review 11-17): the Graphics & Performance "Fast Point Light Shadows" tick - the one-tap filter for
+	// POINT lights only (shadow_cube). It used to set OPTION_BIT_GG_FAST_SHADOWS, which GG's own sun/spot paths (its
+	// lightingHF.hlsli shadow_2D) also honour, so ticking it hardened sun and spot shadows on baked terrain, trees and grass.
+	OPTION_BIT_GG_FAST_POINT_SHADOWS = 1 << 26,
 };
 
 // ---------- Common Constant buffers: -----------------

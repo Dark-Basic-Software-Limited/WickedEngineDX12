@@ -799,6 +799,7 @@ union ObjectRenderingVariant
 		uint32_t ggdepthmode : 2;	// GGMAX 2.09: GGDEPTHMODE — DX11 depth-behaviour parity, see below
 		uint32_t ggsuperquick : 2;	// GGMAX 3.34: 0 = stock, 1 = FLAT, 2 = AMBIENT, 3 = LIT
 		uint32_t ggterrain : 1;		// GGMAX 3.164: terrain triplanar PS (PSTYPE_OBJECT_GG_TERRAIN_TRIPLANAR)
+		uint32_t ggshadowbias : 2;	// GGMAX BR-0040: RENDERPASS_SHADOW only - 0 = stock, 1..3 = RSTYPE_SHADOW*_GG_LOWRES_n (sun at 512/256/128)
 	} bits;
 	uint32_t value;
 };
@@ -2851,6 +2852,29 @@ void LoadShaders()
 										wi::eventhandler::Subscribe_Once(wi::eventhandler::EVENT_THREAD_SAFE_POINT, [=](uint64_t userdata) {
 											SetObjectPSO(variant, pso);
 											});
+
+										// GGMAX BR-0040: the same pipeline with ONLY the rasterizer swapped for the low sun
+										// shadow resolutions (see SetUpStates). Always deferred: compiled synchronously at their
+										// first bind (a one-time hitch when the sun is first drawn at 512/256/128). RenderMeshes
+										// falls back to the stock variant when one was never registered (a refused create), so
+										// they can never drop a shadow caster. GG terrain/trees/grass draw with their own states.
+										if (desc.rs == &rasterizers[RSTYPE_SHADOW] || desc.rs == &rasterizers[RSTYPE_SHADOW_DOUBLESIDED])
+										{
+											const bool gg_ds = desc.rs == &rasterizers[RSTYPE_SHADOW_DOUBLESIDED];
+											for (uint32_t gg_lvl = 1; gg_lvl <= 3; ++gg_lvl)
+											{
+												PipelineStateDesc lowdesc = desc;
+												lowdesc.rs = &rasterizers[(gg_ds ? RSTYPE_SHADOW_DOUBLESIDED_GG_LOWRES_1 : RSTYPE_SHADOW_GG_LOWRES_1) + gg_lvl - 1];
+												ObjectRenderingVariant lowvariant = variant;
+												lowvariant.bits.ggshadowbias = gg_lvl;
+												PipelineState lowpso;
+												if (!device->CreatePipelineState(&lowdesc, &lowpso))
+													continue;
+												wi::eventhandler::Subscribe_Once(wi::eventhandler::EVENT_THREAD_SAFE_POINT, [=](uint64_t userdata) {
+													SetObjectPSO(lowvariant, lowpso);
+													});
+											}
+										}
 									}
 									break;
 
@@ -3100,6 +3124,20 @@ void SetUpStates()
 	rasterizers[RSTYPE_SHADOW] = rs;
 	rs.cull_mode = CullMode::NONE;
 	rasterizers[RSTYPE_SHADOW_DOUBLESIDED] = rs;
+	// GGMAX BR-0040: the slope-scaled bias is counted in SHADOW TEXELS (bias = scale x depth change per texel), so at a
+	// low sun shadow resolution the same -4 pushes casters 8x further in world units at 128 than at 1024 (~25 units vs
+	// ~3 on a 45-degree roof in cascade 0) - more than a station roof is thick, and sunlight reached the room below
+	// (Lee, Riley's station level; DX11 does the same arithmetic). Below 1024 the slope bias is scaled by res/1024 so it
+	// stays the 1024 size in world units; 1024/2048 keep the DX11 numbers exactly. Selected per draw for the SUN's
+	// shadow pass only (ObjectRenderingVariant::ggshadowbias, gg_sun_shadow_bias_level). Constant bias and clamp kept.
+	for (int gg_lvl = 1; gg_lvl <= 3; ++gg_lvl)
+	{
+		RasterizerState lowrs = rasterizers[RSTYPE_SHADOW];
+		lowrs.slope_scaled_depth_bias = rasterizers[RSTYPE_SHADOW].slope_scaled_depth_bias / float(1 << gg_lvl);
+		rasterizers[RSTYPE_SHADOW_GG_LOWRES_1 + gg_lvl - 1] = lowrs;
+		lowrs.cull_mode = CullMode::NONE;
+		rasterizers[RSTYPE_SHADOW_DOUBLESIDED_GG_LOWRES_1 + gg_lvl - 1] = lowrs;
+	}
 
 	rs.fill_mode = FillMode::WIREFRAME;
 	rs.cull_mode = CullMode::BACK;
@@ -4235,6 +4273,19 @@ void GG_EmitterInterleaveEnd(CommandList cmd)
 	gg_ei.open = false; // DrawSoftParticles (same frame, same vis + cmd) now draws only what is left
 }
 
+// GGMAX BR-0040: set by DrawShadowmaps around the SUN's RenderMeshes calls only (same thread, so thread_local), read
+// by RenderMeshes: 0 = stock shadow rasterizer, 1..3 = the low-resolution slope bias (ObjectRenderingVariant::ggshadowbias).
+static thread_local uint32_t gg_sun_shadow_bias_level = 0;
+bool gg_sun_lowres_bias_enable = true;	// BR-0040 A/B switch (harness SET_SHADOW_RES sunbias 0|1): false = stock -4 slope at every resolution
+std::atomic<unsigned int> gg_dbg_sun_lowres_bias_draws{ 0 };	// per frame: sun shadow draws that used a low-res bias variant (instrument)
+static uint32_t gg_SunShadowBiasLevel(int resolution)
+{
+	if (resolution <= 0 || resolution >= 1024) return 0;	// 1024 / 2048 (and off): stock DX11 numbers
+	if (resolution >= 512) return 1;
+	if (resolution >= 256) return 2;
+	return 3;
+}
+
 void RenderMeshes(
 	const Visibility& vis,
 	const RenderQueue& renderQueue,
@@ -4615,6 +4666,23 @@ void RenderMeshes(
 							wi::terrain::gg_triplanar_draws.fetch_add(1, std::memory_order_relaxed);
 						}
 					}
+					else if (shadowRendering && gg_sun_shadow_bias_level > 0 && !instancedBatch.gg_terrain)
+					{
+						// GGMAX BR-0040: the sun at a low shadow resolution - the low-res slope bias twin, stock while missing.
+						// NOT terrain chunks: the open ground self-shadows, and at 128 the 1024-sized bias left it blotchy
+						// and ~8 levels darker in Aztec (measured); terrain never makes a roof, so it keeps the stock bias.
+						variant.bits.ggshadowbias = gg_sun_shadow_bias_level;
+						pso = GetObjectPSO(variant);
+						if (pso == nullptr || !pso->IsValid())
+						{
+							variant.bits.ggshadowbias = 0;
+							pso = GetObjectPSO(variant);
+						}
+						else
+						{
+							gg_dbg_sun_lowres_bias_draws.fetch_add(1, std::memory_order_relaxed);
+						}
+					}
 					else
 					{
 						pso = GetObjectPSO(variant);
@@ -4742,6 +4810,11 @@ void RenderMeshes(
 						{
 							variant.bits.cullmode = (uint32_t)CullMode::FRONT;
 							pso_backside = GetObjectPSO(variant);
+							if (variant.bits.ggshadowbias != 0 && (pso_backside == nullptr || !pso_backside->IsValid()))
+							{
+								variant.bits.ggshadowbias = 0; // GGMAX BR-0040: stock twin while the low-res one is missing
+								pso_backside = GetObjectPSO(variant);
+							}
 						}
 					}
 				}
@@ -9176,6 +9249,7 @@ void DrawShadowmaps(
 			// GGMAX 2.28: per-frame caster count — the executed-check for gg_shadow_caster_extrude.
 			gg_dbg_shadow_casters.store(0, std::memory_order_relaxed);
 			gg_dbg_shadow_fading.store(0, std::memory_order_relaxed);   // GGMAX 3.108
+			gg_dbg_sun_lowres_bias_draws.store(0, std::memory_order_relaxed);   // GGMAX BR-0040
 
 			for (size_t i = 0; i < vis.scene->aabb_objects.size(); ++i)
 			{
@@ -9301,8 +9375,12 @@ void DrawShadowmaps(
 
 				renderQueue.sort_opaque();
 				renderQueue_transparent.sort_transparent();
+				// GGMAX BR-0040: the sun's own resolution setting (not the packer-scaled rect, so a crowded atlas never
+				// moves the 1024/2048 numbers) picks the slope bias - see SetUpStates
+				gg_sun_shadow_bias_level = !gg_sun_lowres_bias_enable ? 0u : gg_SunShadowBiasLevel(light.forced_shadow_resolution >= 0 ? light.forced_shadow_resolution : max_shadow_resolution_2D);
 				RenderMeshes(vis, renderQueue, RENDERPASS_SHADOW, FILTER_OPAQUE, cmd, 0, cascade_count);
 				RenderMeshes(vis, renderQueue_transparent, RENDERPASS_SHADOW, FILTER_TRANSPARENT | FILTER_WATER, cmd, 0, cascade_count);
+				gg_sun_shadow_bias_level = 0;
 			}
 
 			if (!vis.visibleHairs.empty())

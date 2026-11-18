@@ -464,6 +464,14 @@ namespace wi::enums
 		RSTYPE_VOXELIZE,
 		RSTYPE_SKY,
 		RSTYPE_LIGHTMAP,
+		// GGMAX BR-0040: sun shadow rasterizers for sun shadow resolutions below 1024 (slope bias scaled by res/1024
+		// so it stays the 1024 size in world units) - [level-1]: 512, 256, 128 and below
+		RSTYPE_SHADOW_GG_LOWRES_1,
+		RSTYPE_SHADOW_GG_LOWRES_2,
+		RSTYPE_SHADOW_GG_LOWRES_3,
+		RSTYPE_SHADOW_DOUBLESIDED_GG_LOWRES_1,
+		RSTYPE_SHADOW_DOUBLESIDED_GG_LOWRES_2,
+		RSTYPE_SHADOW_DOUBLESIDED_GG_LOWRES_3,
 		RSTYPE_COUNT
 	};
 	// depth-stencil states

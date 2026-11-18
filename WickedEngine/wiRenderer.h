@@ -131,6 +131,10 @@ namespace wi::renderer
 	// The executed-check for gg_shadow_caster_extrude — VISIBLE_OBJECTS cannot see the effect,
 	// so without this an A/B cannot distinguish "no cost" from "the knob did nothing".
 	extern std::atomic<unsigned int> gg_dbg_shadow_casters;
+	// GGMAX BR-0040: per-frame count of sun shadow draws that used the low-resolution slope bias (sun shadow 512/256/128).
+	extern std::atomic<unsigned int> gg_dbg_sun_lowres_bias_draws;
+	// GGMAX BR-0040: true (default) = the low-res sun slope bias above; false = stock bias at every resolution (A/B only).
+	extern bool gg_sun_lowres_bias_enable;
 	// GGMAX 3.108: sun shadows of SHADOW_DISTANCE_FADE objects dissolve with their distance fade
 	// (false = stock hard cut, for A/B); per-frame count of casters inside their fade band.
 	extern bool gg_shadow_distance_fade;

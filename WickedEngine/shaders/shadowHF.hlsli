@@ -151,7 +151,7 @@ static const half2 vogel_points[] = {
 static const min16uint soft_shadow_sample_count = arraysize(vogel_points);
 static const half soft_shadow_sample_count_rcp = rcp(soft_shadow_sample_count);
 
-inline half3 sample_shadow(float2 uv, float cmp, float4 uv_clamping, half2 radius, min16uint2 pixel, bool gg_point_light = false)
+inline half3 sample_shadow(float2 uv, float cmp, float4 uv_clamping, half2 radius, min16uint2 pixel)
 {
 	Texture2D<half4> texture_shadowatlas = bindless_textures_half4[descriptor_index(GetFrame().texture_shadowatlas_index)];
 	Texture2D<half4> texture_shadowatlas_transparent = bindless_textures_half4[descriptor_index(GetFrame().texture_shadowatlas_transparent_index)];
@@ -171,9 +171,7 @@ inline half3 sample_shadow(float2 uv, float cmp, float4 uv_clamping, half2 radiu
 	// objection to branching in a pixel shader does not apply.
 	//
 	// The trade is hard shadow edges instead of soft. Everything is still shadowed.
-	// GGMAX BR-0034: ... or the Fast Point Light Shadows tick, for point lights only (shadow_cube passes gg_point_light).
-	// Both flags are frame-wide and the light type is uniform across a light's loop iteration, so the wave stays coherent.
-	if ((GetFrame().options & OPTION_BIT_GG_FAST_SHADOWS) || (gg_point_light && (GetFrame().options & OPTION_BIT_GG_FAST_POINT_SHADOWS)))
+	if (GetFrame().options & OPTION_BIT_GG_FAST_SHADOWS)
 	{
 		const float2 gg_uv = clamp(uv, uv_clamping.xy, uv_clamping.zw);
 		half3 gg_pcf = texture_shadowatlas.SampleCmpLevelZero(sampler_cmp_depth, gg_uv, cmp).rrr;
@@ -370,7 +368,7 @@ inline half3 shadow_cube(in ShaderEntity light, in float3 Lunnormalized, min16ui
 	float2 shadow_uv = uv_slice.xy;
 	shadow_uv.x += uv_slice.z;
 	shadow_uv = mad(shadow_uv, light.shadowAtlasMulAdd.xy, light.shadowAtlasMulAdd.zw);
-	return sample_shadow(shadow_uv, remapped_distance, shadow_border_clamp(light, uv_slice.z), light.GetRadius(), pixel, true); // GGMAX BR-0034: point light
+	return sample_shadow(shadow_uv, remapped_distance, shadow_border_clamp(light, uv_slice.z), light.GetRadius(), pixel);
 }
 
 #else

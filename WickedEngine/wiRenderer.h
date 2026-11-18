@@ -43,8 +43,6 @@ namespace wi::renderer
 	// and skip tessellation. UNLIT, WATER, CARTOON and TERRAINBLENDED are left alone - see the
 	// note at the variant selection in wiRenderer.cpp.
 	extern int gg_super_quick_objects;
-	// GGMAX BR-0034: 1 = one-tap point light shadows (the Super Quick shadow filter on its own).
-	extern int gg_fast_point_shadows;
 	// GGMAX 3.89: Water Reflection Size. Width in pixels of the planar reflection render
 	// target. 0 = stock, which is GetInternalResolution() / 4 in each axis - 384x200 on a
 	// 1536x801 window, confirmed with the harness DUMP_REFLECTION. >0 sets the WIDTH and the

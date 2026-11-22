@@ -136,6 +136,8 @@ namespace wi::renderer
 	extern std::atomic<unsigned int> gg_dbg_sun_lowres_bias_draws;
 	// GGMAX BR-0040: true (default) = the low-res sun slope bias above; false = stock bias at every resolution (A/B only).
 	extern bool gg_sun_lowres_bias_enable;
+	// GGMAX BR-0044: the same for point-light cube shadows below 256 (true = default; false = stock, A/B only).
+	extern bool gg_point_lowres_bias_enable;
 	// GGMAX 3.108: sun shadows of SHADOW_DISTANCE_FADE objects dissolve with their distance fade
 	// (false = stock hard cut, for A/B); per-frame count of casters inside their fade band.
 	extern bool gg_shadow_distance_fade;

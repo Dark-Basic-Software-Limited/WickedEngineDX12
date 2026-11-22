@@ -4396,6 +4396,16 @@ static uint32_t gg_SunShadowBiasLevel(int resolution)
 	if (resolution >= 256) return 2;
 	return 3;
 }
+// GGMAX BR-0044: the same twins for point-light cube shadows, relative to the cube default 256 (no leak there in either
+// engine): 256 and up stock, 128 -> slope / 2, 64 -> / 4, lower -> / 8. Set around the point light's RenderMeshes calls.
+bool gg_point_lowres_bias_enable = true;	// A/B switch (harness SET_SHADOW_RES pointbias 0|1): false = stock -4 slope at every resolution
+static uint32_t gg_PointShadowBiasLevel(int resolution)
+{
+	if (resolution <= 0 || resolution >= 256) return 0;
+	if (resolution >= 128) return 1;
+	if (resolution >= 64) return 2;
+	return 3;
+}
 
 void RenderMeshes(
 	const Visibility& vis,
@@ -5866,8 +5876,14 @@ void UpdateVisibility(Visibility& vis)
 					}
 					else
 					{
-						rect.w = int(max_shadow_resolution_cube * amount) * 6;
-						rect.h = int(max_shadow_resolution_cube * amount);
+						// GGMAX BR-0044: never shrink a point cube face below min(setting, 128). The importance scaling took a
+						// light across the room down to 32x32 faces at a 128 setting: the 3x3 filter and the 1.1% distance bias
+						// then span more than a wall is thick and the light leaked through (DX11 always drew the full setting).
+						int gg_face = int(max_shadow_resolution_cube * amount);
+						if (gg_point_lowres_bias_enable)
+							gg_face = std::max(gg_face, int(std::min(max_shadow_resolution_cube, 128) * iterative_scaling)); // the packer's retry scale still shrinks it when the atlas is full
+						rect.w = gg_face * 6;
+						rect.h = gg_face;
 					}
 					break;
 				default:
@@ -9958,8 +9974,16 @@ void DrawShadowmaps(
 
 				renderQueue.sort_opaque();
 				renderQueue_transparent.sort_transparent();
+				// GGMAX BR-0044: the BR-0040 low-resolution slope bias for POINT lights too. The -4 slope bias is counted in
+				// cube-face texels, so at 128 it pushes casters twice as far (in world units) as at the default 256 - further
+				// than a house wall is thick, and the light leaked through (Lee, SYNCRO-Light-Leak). Keep the 256 world size.
+				// The level follows the face size ACTUALLY rendered (shadow_rect.h): the atlas shrinks a point light's cube by
+				// its screen importance ('amount'), so a light across the room drew 64 or 32 texel faces at a 256 / 128 setting
+				// (DX11's cube array always drew the full setting) - those were the worst leaks.
+				gg_sun_shadow_bias_level = !gg_point_lowres_bias_enable ? 0u : gg_PointShadowBiasLevel(int(shadow_rect.h));
 				RenderMeshes(vis, renderQueue, RENDERPASS_SHADOW, FILTER_OPAQUE, cmd, 0, camera_count);
 				RenderMeshes(vis, renderQueue_transparent, RENDERPASS_SHADOW, FILTER_TRANSPARENT | FILTER_WATER, cmd, 0, camera_count);
+				gg_sun_shadow_bias_level = 0;
 			}
 
 			if (!vis.visibleHairs.empty())

@@ -740,7 +740,14 @@ struct alignas(16) ShaderTransform
 #ifndef __cplusplus
 	inline float3x3 GetMatrixAdjoint()
 	{
-		return adjoint(GetMatrix());
+		// GGMAX BR-0036: the adjugate is det * inverse-transpose, so for a MIRRORED transform (negative
+		// determinant, e.g. a DBO frame with scale (1,-1,1) from an exporter axis conversion) every normal and
+		// tangent it transforms came out pointing the wrong way - those parts were lit from behind (dark under
+		// point lights; OldFlak's Wall Unit covers). Multiply by the determinant's sign so the result is always
+		// a positive multiple of the inverse-transpose (callers normalize). No change when det > 0.
+		const float3x3 adj = adjoint(GetMatrix());
+		const float det = dot(mat0.xyz, adj[0]); // adjoint() rows are the cofactors: row0 . cross(row1, row2)
+		return adj * (det < 0 ? -1.0 : 1.0);
 	}
 #endif // __cplusplus
 };

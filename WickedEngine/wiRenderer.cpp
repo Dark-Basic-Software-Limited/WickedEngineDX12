@@ -510,6 +510,17 @@ static bool gg_IsLocalShadowDirty(wi::ecs::Entity e)
 		if (localShadowDirty[i] == e) return true;
 	return false;
 }
+// GGMAX BR-0034: lights made dirty THIS frame only by a moving caster near them. They may keep the cheap main-camera face
+// cull and occlusion predication (they are likely to re-render next frame anyway), are remembered as INCOMPLETE, and get
+// one complete render on the first frame nothing moves near them. Every other re-render fills all faces.
+static wi::vector<wi::ecs::Entity> localShadowPartialOk;
+static wi::vector<wi::ecs::Entity> localShadowIncomplete;
+static bool gg_IsLocalShadowPartialOk(wi::ecs::Entity e)
+{
+	for (size_t i = 0; i < localShadowPartialOk.size(); ++i)
+		if (localShadowPartialOk[i] == e) return true;
+	return false;
+}
 // Master switch, so the all-or-nothing behaviour can be restored in one command if a level ever
 // shows stale shadows. 0 = stock 2.07d behaviour (any moved caster re-renders everything).
 int gg_shadow_perlight_invalidate = 1;
@@ -542,9 +553,115 @@ static uint64_t localShadowDecisionFrame = ~0ull;   // frame the Phase 2 decisio
 // light's DIRECTION and CONE ANGLE too. Without them, editing Spotlight Radius (or rotating
 // a spot in place) changed the projection while the cache kept serving the map rendered with
 // the old cone: shadows landed where they shouldn't until any move re-keyed the position.
-struct LocalShadowSlot { wi::ecs::Entity ent = wi::ecs::INVALID_ENTITY; int rx = 0, ry = 0, rw = 0, rh = 0; XMFLOAT3 pos = {}; float range = 0; XMFLOAT3 dir = {}; float cone = 0; };
+struct LocalShadowSlot { wi::ecs::Entity ent = wi::ecs::INVALID_ENTITY; int rx = 0, ry = 0, rw = 0, rh = 0; XMFLOAT3 pos = {}; float range = 0; XMFLOAT3 dir = {}; float cone = 0; XMFLOAT4 rot = {}; float length = 0, height = 0; int type = -1; }; // BR-0034: rot/size/type too
 static wi::vector<LocalShadowSlot> localShadowCache; // last-rendered granted layout (sorted by Entity)
 static uint32_t localShadowCacheAtlasW = 0, localShadowCacheAtlasH = 0;
+// ★★★ GGMAX BR-0034: PER-LIGHT layout invalidation + STICKY atlas places.
+//
+// Until now any difference anywhere in the granted local layout (one light entering or leaving the view frustum, one
+// rect changing size, the packer shifting every rect after it because a new light sorted in front) re-rendered EVERY
+// local shadow and the sun. A walk through a lamp-lit station therefore re-rendered every cube shadow (6 passes each)
+// on most frames - the cost Riley measured (38 -> 60 FPS with point shadows off) and the reason a cheaper FILTER (the
+// removed Fast Point Light Shadows tick) bought him nothing.
+// Two parts: (1) a light whose own slot (rect + pose) equals last frame's keeps its texels and only lights whose slot
+// changed re-render; (2) the packed layout keeps every rect that did not change size at LAST frame's place and drops only
+// new/resized rects into free space, so one light entering the view no longer moves everyone else.
+// ⚠ A cached shadow must hold ALL of its faces: the per-face main-camera cull and the occlusion predication used to leave
+// unseen faces cleared-but-unrendered, which only looked right because every frame re-rendered. While caching is on they
+// are bypassed (see gg_LocalShadowCacheFillsAllFaces).
+// 0 = the old all-or-nothing behaviour for both parts (harness SET_SHADOW_PERLIGHT_LAYOUT).
+int gg_shadow_perlight_layout = 1;
+static uint64_t localShadowDrawnDecision = ~0ull;   // last decision frame DrawShadowmaps actually consumed
+static uint32_t gg_localShadowStickyKept = 0;        // rects that kept their place this frame (instrument)
+static uint32_t gg_localShadowStickyFailTotal = 0;   // sticky placement fell back to the plain pack (instrument)
+static uint32_t gg_localShadowRenderedTotal = 0;     // local shadow re-renders since startup (instrument)
+struct GGStickyRect { uint64_t key; int x, y, w, h; };
+static wi::vector<GGStickyRect> gg_stickyPrev;       // last frame's packed layout (packer rects, slice multiples kept)
+static bool gg_LocalShadowCacheFillsAllFaces()
+{
+	return localShadowCachingEnabled && gg_shadow_perlight_layout != 0;
+}
+static bool gg_RectsOverlap(int ax, int ay, int aw, int ah, int bx, int by, int bw, int bh)
+{
+	return ax < bx + bw && bx < ax + aw && ay < by + bh && by < ay + ah;
+}
+// Re-place this frame's packed rects: same key + same size as last frame -> last frame's place; the rest go into the free
+// space (lowest y, then lowest x, among the corners of placed rects). All inside W x H (the current atlas). Returns false
+// (rects untouched) when nothing could keep its place or something does not fit - the caller keeps the plain pack then.
+static bool gg_StickyPlaceShadowRects(wi::vector<wi::rectpacker::Rect>& rects, const wi::vector<uint64_t>& keys, int W, int H)
+{
+	gg_localShadowStickyKept = 0;
+	const size_t n = rects.size();
+	if (n == 0 || gg_stickyPrev.empty() || W <= 0 || H <= 0)
+		return false;
+	wi::vector<int> px(n, -1), py(n, -1);
+	wi::vector<size_t> placed, todo;
+	placed.reserve(n);
+	for (size_t i = 0; i < n; ++i)
+	{
+		const wi::rectpacker::Rect& r = rects[i];
+		if (!r.was_packed)
+			continue;
+		bool kept = false;
+		for (const GGStickyRect& p : gg_stickyPrev)
+		{
+			if (p.key != keys[i] || p.w != r.w || p.h != r.h)
+				continue;
+			if (p.x < 0 || p.y < 0 || p.x + p.w > W || p.y + p.h > H)
+				break;
+			// last frame's rects were one non-overlapping layout, but check anyway (duplicate keys must never share)
+			bool clash = false;
+			for (size_t q : placed)
+				if (gg_RectsOverlap(p.x, p.y, p.w, p.h, px[q], py[q], rects[q].w, rects[q].h)) { clash = true; break; }
+			if (!clash) { px[i] = p.x; py[i] = p.y; placed.push_back(i); kept = true; }
+			break;
+		}
+		if (!kept)
+			todo.push_back(i);
+	}
+	if (placed.empty())
+		return false;
+	const uint32_t keptCount = uint32_t(placed.size());
+	std::sort(todo.begin(), todo.end(), [&](size_t a, size_t b) {
+		const int aa = rects[a].w * rects[a].h, bb = rects[b].w * rects[b].h;
+		return aa > bb || (aa == bb && keys[a] < keys[b]);
+	});
+	for (size_t t : todo)
+	{
+		const int w = rects[t].w, h = rects[t].h;
+		int bestX = -1, bestY = -1;
+		auto tryAt = [&](int x, int y)
+		{
+			if (x < 0 || y < 0 || x + w > W || y + h > H)
+				return;
+			if (bestY >= 0 && (y > bestY || (y == bestY && x >= bestX)))
+				return;
+			for (size_t q : placed)
+				if (gg_RectsOverlap(x, y, w, h, px[q], py[q], rects[q].w, rects[q].h))
+					return;
+			bestX = x; bestY = y;
+		};
+		tryAt(0, 0);
+		for (size_t q : placed)
+		{
+			tryAt(px[q] + rects[q].w, py[q]);
+			tryAt(px[q], py[q] + rects[q].h);
+			tryAt(px[q] + rects[q].w, 0);
+			tryAt(0, py[q] + rects[q].h);
+		}
+		if (bestY < 0)
+		{
+			gg_localShadowStickyFailTotal++;
+			return false;
+		}
+		px[t] = bestX; py[t] = bestY;
+		placed.push_back(t);
+	}
+	for (size_t i = 0; i < n; ++i)
+		if (px[i] >= 0) { rects[i].x = px[i]; rects[i].y = py[i]; }
+	gg_localShadowStickyKept = keptCount;
+	return true;
+}
 // GGMAX far-cascade caster cull (DX11 parity): objects only shadow into the near directional cascades;
 // the far cascades (>=3) render terrain only, and the 3rd cascade drops sub-~5m objects. The far cascades
 // cover huge distances where object shadows are imperceptible - this is the bulk of the every-other-frame
@@ -5585,6 +5702,7 @@ void UpdateVisibility(Visibility& vis)
 			return (q > 1.0f) ? 1.0f : q;
 		};
 		float iterative_scaling = 1;
+		vis.rain_blocker_shadow_rect = {}; // GGMAX BR-0034: re-set by the pack below only while it rains
 
 		// --- GG Phase 1: cap local shadow casters. Built ONCE (not per iterative_scaling retry).
 		// Denied lights get no atlas rect and have their CAST_SHADOW flag withheld (below), so they
@@ -5775,6 +5893,9 @@ void UpdateVisibility(Visibility& vis)
 				// 2048. With 16384 the "2048" quality setting finally means 2048.
 				if (vis.shadow_packer.pack(16384))
 				{
+					// GGMAX BR-0034: a lambda so a sticky re-placement (below) can hand its places out the same way.
+					auto ggAssignPackedRects = [&]()
+					{
 					for (auto& rect : vis.shadow_packer.rects)
 					{
 						if (rect.id == -1)
@@ -5814,6 +5935,8 @@ void UpdateVisibility(Visibility& vis)
 							}
 						}
 					}
+					};
+					ggAssignPackedRects();
 
 					// GGMAX 2.06: record the pack outcome for the harness (DUMP_SHADOWRECTS)
 					gg_dbg_shadow_pack_scale = iterative_scaling;
@@ -5935,6 +6058,37 @@ void UpdateVisibility(Visibility& vis)
 
 					}
 
+					// GGMAX BR-0034: sticky places (see gg_StickyPlaceShadowRects). Only for the main visibility (the one
+					// whose layout DrawShadowmaps renders and the local cache keys on) and only while the atlas keeps its
+					// size - a new atlas is a full clear anyway and the old places may not fit it.
+					if ((vis.flags & Visibility::ALLOW_SHADOW_ATLAS_PACKING) && localShadowCachingEnabled && gg_shadow_perlight_layout != 0)
+					{
+						wi::vector<uint64_t> ggKeys(vis.shadow_packer.rects.size());
+						for (size_t k = 0; k < ggKeys.size(); ++k)
+						{
+							const int id = vis.shadow_packer.rects[k].id;
+							ggKeys[k] = (id < 0) ? ~0ull : (uint64_t)vis.scene->lights.GetEntity(uint32_t(id));
+						}
+						gg_localShadowStickyKept = 0;
+						if (!gg_atlasGrow && !gg_atlasShrink
+							&& gg_StickyPlaceShadowRects(vis.shadow_packer.rects, ggKeys, (int)shadowMapAtlas.desc.width, (int)shadowMapAtlas.desc.height))
+						{
+							ggAssignPackedRects();
+						}
+						gg_stickyPrev.clear();
+						for (size_t k = 0; k < ggKeys.size(); ++k)
+						{
+							const wi::rectpacker::Rect& r = vis.shadow_packer.rects[k];
+							if (r.was_packed)
+								gg_stickyPrev.push_back({ ggKeys[k], r.x, r.y, r.w, r.h });
+						}
+					}
+					else if (vis.flags & Visibility::ALLOW_SHADOW_ATLAS_PACKING)
+					{
+						gg_stickyPrev.clear();
+						gg_localShadowStickyKept = 0;
+					}
+
 					break;
 				}
 				else
@@ -5950,7 +6104,13 @@ void UpdateVisibility(Visibility& vis)
 		// --- GG Phase 2: static-cache decision. Detect any structural change in the granted local-shadow
 		// layout since the last rendered frame. If unchanged, DrawShadowmaps LOADs the atlas and skips
 		// re-rendering the cached local shadows. Any change -> one full-render frame that repopulates.
-		if (localShadowCachingEnabled && localBudgetActive)
+		// GGMAX BR-0034: only the main visibility decides (a reflection / render-to-texture visibility reaches this block
+		// when it rains - the rain blocker - and must not overwrite the main view's cache state).
+		if (!(vis.flags & Visibility::ALLOW_SHADOW_ATLAS_PACKING))
+		{
+			// not the main view: leave the decision alone
+		}
+		else if (localShadowCachingEnabled && localBudgetActive)
 		{
 			static wi::vector<LocalShadowSlot> cur;
 			cur.clear();
@@ -5972,28 +6132,48 @@ void UpdateVisibility(Visibility& vis)
 				s.rx = r.x; s.ry = r.y; s.rw = r.w; s.rh = r.h;
 				s.pos = L.position; s.range = L.GetRange();
 				s.dir = L.direction; s.cone = L.outerConeAngle; // 2.07c: rotation/cone edits must invalidate
+				s.rot = L.rotation; s.length = L.length; s.height = L.height; s.type = (int)lt; // BR-0034: roll / rect size / type feed the shadow camera
 				cur.push_back(s);
 			}
 			std::sort(cur.begin(), cur.end(),
 				[](const LocalShadowSlot& a, const LocalShadowSlot& b) { return a.ent < b.ent; });
+			const bool perLightLayout = gg_shadow_perlight_layout != 0;
 			bool changed = localShadowInvalidate
 				|| localShadowCacheAtlasW != shadowMapAtlas.desc.width
 				|| localShadowCacheAtlasH != shadowMapAtlas.desc.height
-				|| cur.size() != localShadowCache.size();
+				// GGMAX BR-0034: the cache is adopted every frame now, so a decision DrawShadowmaps never consumed
+				// (texels never rendered) must not be trusted by the next one.
+				|| (perLightLayout && localShadowDecisionFrame != ~0ull && localShadowDrawnDecision != localShadowDecisionFrame)
+				// ... and frames with no decision at all (no visible lights / shadows off) let casters move unobserved
+				|| (perLightLayout && localShadowDecisionFrame != ~0ull && localShadowDecisionFrame + 1 != device->GetFrameCount())
+				|| (!perLightLayout && cur.size() != localShadowCache.size());
+			// GGMAX BR-0034: per light. A slot equal to last frame's (same entity, rect, pose) keeps its texels; any other
+			// slot re-renders ALONE (it joins the dirty set). Both lists are sorted by entity. Lights that left are simply
+			// dropped - their rect is free and nobody samples it.
+			wi::vector<wi::ecs::Entity> ggLayoutDirty;
 			if (!changed)
 			{
+				size_t j = 0;
 				for (size_t i = 0; i < cur.size(); ++i)
 				{
 					const LocalShadowSlot& a = cur[i];
-					const LocalShadowSlot& b = localShadowCache[i];
-					if (a.ent != b.ent || a.rx != b.rx || a.ry != b.ry || a.rw != b.rw || a.rh != b.rh
-						|| a.pos.x != b.pos.x || a.pos.y != b.pos.y || a.pos.z != b.pos.z || a.range != b.range
-						|| a.dir.x != b.dir.x || a.dir.y != b.dir.y || a.dir.z != b.dir.z || a.cone != b.cone)
+					while (j < localShadowCache.size() && localShadowCache[j].ent < a.ent)
+						++j;
+					bool same = false;
+					if (j < localShadowCache.size() && localShadowCache[j].ent == a.ent)
 					{
-						changed = true;
-						break;
+						const LocalShadowSlot& b = localShadowCache[j];
+						same = !(a.rx != b.rx || a.ry != b.ry || a.rw != b.rw || a.rh != b.rh
+							|| a.pos.x != b.pos.x || a.pos.y != b.pos.y || a.pos.z != b.pos.z || a.range != b.range
+							|| a.dir.x != b.dir.x || a.dir.y != b.dir.y || a.dir.z != b.dir.z || a.cone != b.cone
+							|| a.rot.x != b.rot.x || a.rot.y != b.rot.y || a.rot.z != b.rot.z || a.rot.w != b.rot.w
+							|| a.length != b.length || a.height != b.height || a.type != b.type);
 					}
+					if (!same)
+						ggLayoutDirty.push_back(a.ent);
 				}
+				if (!perLightLayout && !ggLayoutDirty.empty())
+					changed = true; // old behaviour: any difference re-renders everything
 			}
 			// GGMAX 2.07d: dynamic CASTERS invalidate the cache too — the slots above key the
 			// LIGHTS' state, but a shadow-casting object moving inside a granted light's range
@@ -6015,19 +6195,30 @@ void UpdateVisibility(Visibility& vis)
 			// every slot is already dirty - the worst case is no worse than the old full re-render it
 			// replaces.
 			localShadowDirty.clear();
-			if (!changed && !cur.empty()
+			localShadowPartialOk.clear();
+			if (!changed)
+				localShadowDirty = ggLayoutDirty; // GGMAX BR-0034: slots whose own rect/pose changed
+			// GGMAX BR-0034: last frame's "renderable shadow caster" flag per object, and its object count. A caster hidden,
+			// shown, or switched to/from casting counts as MOVED; a change in the object count (add / delete) refreshes every
+			// cached local shadow. Camera churn used to repair both; a light can stay cached for a long time now.
+			static wi::vector<uint8_t> ggCastPrev;
+			const size_t ggObjN = vis.scene->objects.GetCount();
+			const bool ggObjCountChanged = perLightLayout && ggCastPrev.size() != ggObjN;
+			if (!changed && !cur.empty() && !ggObjCountChanged
 				&& vis.scene->matrix_objects.size() == vis.scene->objects.GetCount()
 				&& vis.scene->matrix_objects_prev.size() == vis.scene->objects.GetCount())
 			{
 				for (size_t i = 0; i < vis.scene->aabb_objects.size(); ++i)
 				{
 					const ObjectComponent& object = vis.scene->objects[i];
-					if (!object.IsRenderable() || !object.IsCastingShadow())
+					const bool castNow = object.IsRenderable() && object.IsCastingShadow();
+					const bool castPrev = (perLightLayout && i < ggCastPrev.size()) ? (ggCastPrev[i] != 0) : castNow;
+					if (!castNow && !castPrev)
 						continue;
 					const XMFLOAT4X4& mNow = vis.scene->matrix_objects[i];
 					const XMFLOAT4X4& mPrev = vis.scene->matrix_objects_prev[i];
-					if (std::memcmp(&mNow, &mPrev, sizeof(XMFLOAT4X4)) == 0)
-						continue; // did not move
+					if (castNow == castPrev && std::memcmp(&mNow, &mPrev, sizeof(XMFLOAT4X4)) == 0)
+						continue; // did not move (and was not hidden / shown)
 					const float dx = mNow._41 - mPrev._41;
 					const float dy = mNow._42 - mPrev._42;
 					const float dz = mNow._43 - mPrev._43;
@@ -6037,10 +6228,41 @@ void UpdateVisibility(Visibility& vis)
 					{
 						Sphere sph(s.pos, s.range + delta);
 						if (sph.intersects(aabb) && !gg_IsLocalShadowDirty(s.ent))
+						{
 							localShadowDirty.push_back(s.ent);
+							localShadowPartialOk.push_back(s.ent); // BR-0034: caster-dirty -> may render culled
+						}
 					}
 					if (localShadowDirty.size() >= cur.size())
 						break; // every slot already dirty - nothing further to learn this frame
+				}
+			}
+			else if (!changed && !cur.empty() && ggObjCountChanged)
+			{
+				// GGMAX BR-0034: an object was added or removed (indices may have shifted), so the per-object test cannot be
+				// trusted this frame - refresh every cached local shadow (complete renders).
+				// They render culled (partial-ok, then one complete render once the count settles), so a level that spawns
+				// objects every frame pays what the old culled full re-render cost, not more.
+				for (const LocalShadowSlot& s : cur)
+					if (!gg_IsLocalShadowDirty(s.ent))
+					{
+						localShadowDirty.push_back(s.ent);
+						localShadowPartialOk.push_back(s.ent);
+					}
+			}
+			ggCastPrev.resize(ggObjN);
+			for (size_t i = 0; i < ggObjN; ++i)
+				ggCastPrev[i] = (vis.scene->objects[i].IsRenderable() && vis.scene->objects[i].IsCastingShadow()) ? 1 : 0;
+			// GGMAX BR-0034: a light rendered CULLED last frame (caster-dirty) that is not caster-dirty again now gets one
+			// complete render before the cache serves it.
+			if (!changed && perLightLayout)
+			{
+				for (wi::ecs::Entity e : localShadowIncomplete)
+				{
+					if (gg_IsLocalShadowPartialOk(e) || gg_IsLocalShadowDirty(e))
+						continue;
+					for (const LocalShadowSlot& s : cur)
+						if (s.ent == e) { localShadowDirty.push_back(e); break; }
 				}
 			}
 			// Switch off the per-light path and a moved caster means what it used to: everything.
@@ -6067,7 +6289,13 @@ void UpdateVisibility(Visibility& vis)
 			// A structural change re-renders the whole atlas anyway, so a dirty subset is meaningless
 			// and would only cause the clear pass and the render loop to reason about stale entities.
 			if (changed)
+			{
 				localShadowDirty.clear();
+				localShadowPartialOk.clear(); // a full clear renders every light complete
+			}
+			if (!perLightLayout)
+				localShadowPartialOk.clear();
+			localShadowIncomplete = localShadowPartialOk; // BR-0034: rendered culled this frame
 			localAtlasFullClear = changed;
 			if (changed)
 			{
@@ -6076,6 +6304,12 @@ void UpdateVisibility(Visibility& vis)
 				localShadowCacheAtlasW = shadowMapAtlas.desc.width;
 				localShadowCacheAtlasH = shadowMapAtlas.desc.height;
 				localShadowInvalidate = false;
+			}
+			else if (perLightLayout)
+			{
+				// GGMAX BR-0034: every slot is now either unchanged (texels valid) or dirty (re-rendered this frame), so
+				// this frame's layout IS what the atlas will hold - adopt it.
+				localShadowCache = cur;
 			}
 			localShadowDecisionFrame = device->GetFrameCount();
 		}
@@ -8991,6 +9225,12 @@ void GetLocalShadowStats(int& granted, int& capped, int& rendered)
 	capped = localShadowCappedCount;
 	rendered = localShadowRenderedCount;
 }
+void GetLocalShadowLayoutStats(uint32_t& renderedTotal, uint32_t& stickyKept, uint32_t& stickyFailTotal)
+{
+	renderedTotal = gg_localShadowRenderedTotal;
+	stickyKept = gg_localShadowStickyKept;
+	stickyFailTotal = gg_localShadowStickyFailTotal;
+}
 uint32_t GetLocalShadowFullClearTotal()
 {
 	return gg_localShadowFullClearTotal;
@@ -9105,6 +9345,13 @@ void DrawShadowmaps(
 		&& localShadowDecisionFrame == device->GetFrameCount()
 		&& !wholeAtlasClear;
 	const bool ggLoadAtlas = (ggDelayedShadows || localCachingActive) && !wholeAtlasClear;
+	// GGMAX BR-0034: this frame's decision is being rendered (either its dirty set on a LOADed atlas, or everything on a
+	// cleared one) - the next decision may trust the cache it adopted.
+	if (localShadowCachingEnabled && localShadowDecisionFrame == device->GetFrameCount())
+		localShadowDrawnDecision = localShadowDecisionFrame;
+	// GGMAX BR-0034: while local shadows are cached, a rendered light must fill all its faces (no main-camera face cull,
+	// no occlusion predication), or a face that turns into view later is served blank from the cache.
+	const bool ggFillAllFaces = gg_LocalShadowCacheFillsAllFaces();
 
 	const RenderPassImage rp[] = {
 		RenderPassImage::DepthStencil(
@@ -9181,6 +9428,9 @@ void DrawShadowmaps(
 				break;
 			}
 		}
+		// GGMAX BR-0034: only while it rains - the rect is never reset when rain stops, and its stale area can now belong
+		// to a light that stays cached for a long time (it would be wiped every frame and served lit).
+		if (vis.scene->weather.rain_amount > 0)
 		ggClearRect(vis.rain_blocker_shadow_rect.x, vis.rain_blocker_shadow_rect.y,
 			vis.rain_blocker_shadow_rect.w, vis.rain_blocker_shadow_rect.h);
 		device->EventEnd(cmd);
@@ -9199,6 +9449,7 @@ void DrawShadowmaps(
 			&& (!GG_LocalShadowBudgetActive() || light.GetType() == LightComponent::DIRECTIONAL || shadow_rect.w > 0);
 		if (!shadow)
 			continue;
+		bool ggFillThis = ggFillAllFaces; // GGMAX BR-0034: render every face / no predication for this light
 		if (light.GetType() != LightComponent::DIRECTIONAL)
 		{
 			// GGMAX 3.30: only refresh the lights a moving caster actually touched. Same predicate as
@@ -9206,6 +9457,9 @@ void DrawShadowmaps(
 			if (localCachingActive && !gg_IsLocalShadowDirty(vis.scene->lights.GetEntity(lightIndex)))
 				continue; // cached and clean -> reuse atlas texels via LOAD
 			localShadowRenderedCount++;
+			// GGMAX BR-0034: a caster-dirty light renders culled (remembered incomplete in the decision); the rest fill all faces
+			ggFillThis = ggFillAllFaces && !(localCachingActive && gg_IsLocalShadowPartialOk(vis.scene->lights.GetEntity(lightIndex)));
+			gg_localShadowRenderedTotal++; // GGMAX BR-0034 instrument
 		}
 
 		renderQueue.init();
@@ -9459,7 +9713,7 @@ void DrawShadowmaps(
 
 			SHCAM shcam;
 			CreateSpotLightShadowCam(light, shcam);
-			if (!cam_frustum.Intersects(shcam.boundingfrustum))
+			if (!ggFillThis && !cam_frustum.Intersects(shcam.boundingfrustum)) // BR-0034: cached = render even when unseen
 				break;
 
 			for (size_t i = 0; i < vis.scene->aabb_objects.size(); ++i)
@@ -9507,7 +9761,7 @@ void DrawShadowmaps(
 				}
 			}
 
-			if (predicationRequest && light.occlusionquery >= 0)
+			if (predicationRequest && !ggFillThis && light.occlusionquery >= 0) // BR-0034: a cached map must be complete
 			{
 				device->PredicationBegin(
 					&vis.scene->queryPredicationBuffer,
@@ -9576,7 +9830,7 @@ void DrawShadowmaps(
 				}
 			}
 
-			if (predicationRequest && light.occlusionquery >= 0)
+			if (predicationRequest && !ggFillThis && light.occlusionquery >= 0) // BR-0034: a cached map must be complete
 			{
 				device->PredicationEnd(cmd);
 			}
@@ -9608,7 +9862,7 @@ void DrawShadowmaps(
 				scissors[shcam].from_viewport(vp[shcam]);
 
 				// Check if cubemap face frustum is visible from main camera, otherwise, it will be skipped:
-				if (cam_frustum.Intersects(cameras[shcam].boundingfrustum))
+				if (ggFillThis || cam_frustum.Intersects(cameras[shcam].boundingfrustum)) // BR-0034: cached = all 6 faces
 				{
 					XMStoreFloat4x4(&cb.cameras[camera_count].view_projection, cameras[shcam].view_projection);
 					// We no longer have a straight mapping from camera to viewport:
@@ -9681,7 +9935,7 @@ void DrawShadowmaps(
 				}
 			}
 
-			if (predicationRequest && light.occlusionquery >= 0)
+			if (predicationRequest && !ggFillThis && light.occlusionquery >= 0) // BR-0034: a cached map must be complete
 			{
 				device->PredicationBegin(
 					&vis.scene->queryPredicationBuffer,
@@ -9724,7 +9978,7 @@ void DrawShadowmaps(
 					// COMPACTED visible faces with an output_index remap, while this loop indexes the raw
 					// SHCAM array and derives its viewport from shcam directly. It has to be the same
 					// frustum TEST, not the same bound.
-					if (!cam_frustum.Intersects(cameras[shcam].boundingfrustum))
+					if (!ggFillThis && !cam_frustum.Intersects(cameras[shcam].boundingfrustum)) // same test as the face loop
 						continue;
 
 					XMStoreFloat4x4(&cb.cameras[0].view_projection, cameras[shcam].view_projection);
@@ -9756,7 +10010,7 @@ void DrawShadowmaps(
 				}
 			}
 
-			if (predicationRequest && light.occlusionquery >= 0)
+			if (predicationRequest && !ggFillThis && light.occlusionquery >= 0) // BR-0034: a cached map must be complete
 			{
 				device->PredicationEnd(cmd);
 			}

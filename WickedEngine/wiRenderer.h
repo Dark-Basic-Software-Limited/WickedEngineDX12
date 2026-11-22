@@ -38,6 +38,9 @@ namespace wi::renderer
 	// how long ANY stale shadow can persist, including causes the moved-caster detector misses.
 	// 0 disables. Default 4.
 	extern int gg_shadow_refresh_floor;
+	// GGMAX BR-0034: 1 = only local shadows whose own rect/pose changed re-render, and unchanged-size rects keep their
+	// atlas place (sticky); cached lights render all faces. 0 = the old all-or-nothing layout invalidation.
+	extern int gg_shadow_perlight_layout;
 	// GGMAX 3.31: 1 = draw every expensive material permutation (parallax occlusion mapping,
 	// planar reflection, anisotropic, clearcoat, cloth, interior mapping) with the base PBR shader
 	// and skip tessellation. UNLIT, WATER, CARTOON and TERRAINBLENDED are left alone - see the
@@ -1297,6 +1300,8 @@ namespace wi::renderer
 	void GetLocalShadowStats(int& granted, int& capped, int& rendered);
 	// GGMAX BR-0006: full local-shadow atlas clears (every cached local shadow re-rendered) since startup
 	uint32_t GetLocalShadowFullClearTotal();
+	// GGMAX BR-0034: local shadow re-renders since startup, rects that kept their atlas place last pack, sticky fallbacks
+	void GetLocalShadowLayoutStats(uint32_t& renderedTotal, uint32_t& stickyKept, uint32_t& stickyFailTotal);
 	// GG Phase 2: cache static local shadows (render once, reuse atlas texels until something changes).
 	void SetLocalShadowCachingEnabled(bool value);
 	bool GetLocalShadowCachingEnabled();

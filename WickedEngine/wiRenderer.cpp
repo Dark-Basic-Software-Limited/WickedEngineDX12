@@ -560,9 +560,10 @@ static uint32_t localShadowCacheAtlasW = 0, localShadowCacheAtlasH = 0;
 //
 // Until now any difference anywhere in the granted local layout (one light entering or leaving the view frustum, one
 // rect changing size, the packer shifting every rect after it because a new light sorted in front) re-rendered EVERY
-// local shadow and the sun. A walk through a lamp-lit station therefore re-rendered every cube shadow (6 passes each)
-// on most frames - the cost Riley measured (38 -> 60 FPS with point shadows off) and the reason a cheaper FILTER (the
-// removed Fast Point Light Shadows tick) bought him nothing.
+// local shadow and the sun. (Measured on a TESTPRO2 walk: ~30 such full clears in ~29,000 frames, each re-rendering
+// every granted lamp - hitch frames, NOT the average-FPS cost; average FPS did not change. Riley's station slowdown - 38
+// -> 60 FPS with ALL shadows off, 44 -> 71 for Lee with point shadows off - was not measured with this change and is
+// not explained by it; the part-A visibility work is still open.)
 // Two parts: (1) a light whose own slot (rect + pose) equals last frame's keeps its texels and only lights whose slot
 // changed re-render; (2) the packed layout keeps every rect that did not change size at LAST frame's place and drops only
 // new/resized rects into free space, so one light entering the view no longer moves everyone else.

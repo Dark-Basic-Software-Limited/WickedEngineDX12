@@ -41,6 +41,10 @@ namespace wi::renderer
 	// GGMAX BR-0034: 1 = only local shadows whose own rect/pose changed re-render, and unchanged-size rects keep their
 	// atlas place (sticky); cached lights render all faces. 0 = the old all-or-nothing layout invalidation.
 	extern int gg_shadow_perlight_layout;
+	// GGMAX BR-0034 part A: 1 = a cached local shadow whose light reaches no visible opaque pixel (main-view tiled light
+	// culling feedback, unseen for gg_shadow_unseen_frames feedback frames) skips its re-renders until it is seen again.
+	extern int gg_shadow_unseen_skip;
+	extern int gg_shadow_unseen_frames;
 	// GGMAX 3.31: 1 = draw every expensive material permutation (parallax occlusion mapping,
 	// planar reflection, anisotropic, clearcoat, cloth, interior mapping) with the base PBR shader
 	// and skip tessellation. UNLIT, WATER, CARTOON and TERRAINBLENDED are left alone - see the
@@ -1304,6 +1308,9 @@ namespace wi::renderer
 	uint32_t GetLocalShadowFullClearTotal();
 	// GGMAX BR-0034: local shadow re-renders since startup, rects that kept their atlas place last pack, sticky fallbacks
 	void GetLocalShadowLayoutStats(uint32_t& renderedTotal, uint32_t& stickyKept, uint32_t& stickyFailTotal);
+	// GGMAX BR-0034 part A: granted cached lights unseen at the last decision, re-renders skipped while unseen (total),
+	// catch-up renders on being seen again (total), lights waiting for one, frames since the feedback used (-1 = none)
+	void GetLocalShadowUnseenStats(uint32_t& unseenNow, uint32_t& skippedTotal, uint32_t& revealTotal, uint32_t& staleNow, int& feedbackAge);
 	// GG Phase 2: cache static local shadows (render once, reuse atlas texels until something changes).
 	void SetLocalShadowCachingEnabled(bool value);
 	bool GetLocalShadowCachingEnabled();

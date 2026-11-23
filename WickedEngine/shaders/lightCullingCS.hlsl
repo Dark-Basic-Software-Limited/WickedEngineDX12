@@ -3,6 +3,10 @@
 #include "lightingHF.hlsli"
 
 RWStructuredBuffer<uint> entityTiles : register(u0);
+// GGMAX BR-0034 part A: one bit per entity-array slot, set when a spot/point/rect light reaches visible OPAQUE depth in
+// any tile (the same test that puts it in the tile's opaque list). Read back by the CPU to stop re-rendering shadows of
+// lights none of whose light lands on anything visible. Always bound (a scratch buffer for non-main views).
+RWStructuredBuffer<uint> lightSeen : register(u1);
 
 // Group shared variables.
 groupshared uint uMinDepth;
@@ -403,6 +407,33 @@ void main(uint3 Gid : SV_GroupID, uint3 DTid : SV_DispatchThreadID, uint3 GTid :
 	{
 		entityTiles[tileBucketsAddress + i] = tile_opaque[i];
 		entityTiles[GetCamera().entity_culling_tile_bucket_count_flat + tileBucketsAddress + i] = tile_transparent[i];
+
+		// GGMAX BR-0034 part A: OR this tile's opaque LIGHT bits (spot..rect are contiguous in the entity array) into the
+		// seen mask. Read first so a bit already set by another tile costs no atomic.
+		// (end_item() is 0 for an EMPTY range - a level without rect lights - so take offset + count of each.)
+		const uint lightFirst = spotlights().item_offset();
+		const uint lightEnd = max(max(spotlights().item_offset() + spotlights().item_count(),
+			pointlights().item_offset() + pointlights().item_count()),
+			rectlights().item_offset() + rectlights().item_count());
+		const uint bucketFirst = i * 32;
+		uint lightBits = 0;
+		if (lightEnd > bucketFirst && lightFirst < bucketFirst + 32)
+		{
+			const uint lo = max(lightFirst, bucketFirst) - bucketFirst;
+			const uint hi = min(lightEnd, bucketFirst + 32) - bucketFirst; // exclusive, 1..32
+			const uint hiMask = hi >= 32 ? 0xFFFFFFFFu : ((1u << hi) - 1u);
+			const uint loMask = ~((1u << lo) - 1u);
+			lightBits = tile_opaque[i] & hiMask & loMask;
+		}
+		if (lightBits != 0 && (lightSeen[i] & lightBits) != lightBits)
+		{
+			InterlockedOr(lightSeen[i], lightBits);
+		}
+	}
+	// GGMAX BR-0034 part A: sentinel - proves to the CPU that this shader (not a stale binary) ran and wrote the bits.
+	if (groupIndex == 0 && Gid.x == 0 && Gid.y == 0)
+	{
+		lightSeen[SHADER_ENTITY_TILE_BUCKET_COUNT] = 1;
 	}
 
 #ifdef DEBUG_TILEDLIGHTCULLING

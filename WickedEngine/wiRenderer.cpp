@@ -576,6 +576,66 @@ static uint64_t localShadowDrawnDecision = ~0ull;   // last decision frame DrawS
 static uint32_t gg_localShadowStickyKept = 0;        // rects that kept their place this frame (instrument)
 static uint32_t gg_localShadowStickyFailTotal = 0;   // sticky placement fell back to the plain pack (instrument)
 static uint32_t gg_localShadowRenderedTotal = 0;     // local shadow re-renders since startup (instrument)
+// ★★★ GGMAX BR-0034 part A: VISIBLE-RECEIVER FEEDBACK. The main view's tiled light culling sets one bit per entity-array
+// slot for every spot/point/rect light that reaches visible opaque depth in some tile (lightCullingCS u1). The bits come
+// back to the CPU GetBufferCount() frames later. A cached light that has not been seen for gg_shadow_unseen_frames
+// feedback frames is UNSEEN: its caster-dirty / object-count re-renders are skipped and the cached texels are kept (the
+// refresh floor passes over it; a map left incomplete by a culled render still gets its completing render, so nothing
+// blank is ever parked). Skipped lights are remembered STALE and get one complete render as soon as the feedback sees
+// them again (a couple of frames late; at most 4 per frame). Layout changes (new rect / pose) still render.
+// Shading needs no skip: the tiled lists already leave an unseen light out of every pixel's loop.
+// Volumetric lamps are never skipped. A frame without usable feedback (sentinel missing, gap) treats every light as seen
+// and reveals nobody. Known limits: only the main view feeds back (a lamp seen only in a water reflection, a
+// render-to-texture camera, an env probe capture or the voxelizer keeps a stale shadow until the main view sees it);
+// transparent-only receivers do not count as seen.
+// 0 = off (harness SET_SHADOW_UNSEEN_SKIP). Active only while the per-light cache is (gg_shadow_perlight_layout).
+int gg_shadow_unseen_skip = 1;
+int gg_shadow_unseen_frames = 8;
+static GPUBuffer ggLightSeenBuffer;                   // main view: UAV bits
+static GPUBuffer ggLightSeenScratch;                  // other views bind this (writes discarded)
+static GPUBuffer ggLightSeenReadback[GraphicsDevice::GetBufferCount()];
+struct GGLightSeenSnap
+{
+	uint64_t frame = ~0ull;                           // frame whose entity array this is
+	bool dispatched = false;                          // the main culling wrote + copied the bits that frame
+	const wi::scene::Scene* scene = nullptr;
+	wi::ecs::Entity ent[SHADER_ENTITY_COUNT];         // entity-array slot -> light entity (INVALID = not a local light)
+};
+static GGLightSeenSnap ggLightSeenSnap[GraphicsDevice::GetBufferCount()];
+static wi::unordered_map<wi::ecs::Entity, uint64_t> ggLightLastSeen; // light -> last feedback frame it was seen
+static wi::vector<wi::ecs::Entity> ggLightTested;    // lights the latest used feedback tested (sorted)
+static uint64_t ggLightSeenFeedbackFrame = ~0ull;     // frame of the latest feedback used
+static wi::vector<wi::ecs::Entity> ggUnseenStale;    // re-renders skipped while unseen -> render when seen
+static uint32_t gg_unseenSkippedTotal = 0;           // instrument: re-renders skipped (since startup)
+static uint32_t gg_unseenRevealTotal = 0;            // instrument: catch-up renders on being seen again
+static uint32_t gg_unseenNow = 0;                    // instrument: granted cached lights unseen at the last decision
+static bool gg_IsLightUnseen(wi::ecs::Entity e)
+{
+	if (gg_shadow_unseen_skip == 0 || gg_shadow_perlight_invalidate == 0 || ggLightSeenFeedbackFrame == ~0ull)
+		return false;
+	if (!std::binary_search(ggLightTested.begin(), ggLightTested.end(), e))
+		return false; // the feedback did not test it (no slot / past the entity cap) -> treat as seen
+	auto it = ggLightLastSeen.find(e);
+	if (it == ggLightLastSeen.end())
+		return false;
+	return ggLightSeenFeedbackFrame - it->second >= (uint64_t)std::max(1, gg_shadow_unseen_frames);
+}
+static void gg_MarkUnseenStale(wi::ecs::Entity e)
+{
+	// count one skipped re-render per light per frame (several movers near one light are still one render)
+	static uint64_t ggSkipFrame = ~0ull;
+	static wi::vector<wi::ecs::Entity> ggSkipThisFrame;
+	const uint64_t f = wi::graphics::GetDevice() != nullptr ? wi::graphics::GetDevice()->GetFrameCount() : 0;
+	if (f != ggSkipFrame) { ggSkipFrame = f; ggSkipThisFrame.clear(); }
+	if (std::find(ggSkipThisFrame.begin(), ggSkipThisFrame.end(), e) == ggSkipThisFrame.end())
+	{
+		ggSkipThisFrame.push_back(e);
+		gg_unseenSkippedTotal++;
+	}
+	for (wi::ecs::Entity s : ggUnseenStale)
+		if (s == e) return;
+	ggUnseenStale.push_back(e);
+}
 struct GGStickyRect { uint64_t key; int x, y, w, h; };
 static wi::vector<GGStickyRect> gg_stickyPrev;       // last frame's packed layout (packer rects, slice multiples kept)
 static bool gg_LocalShadowCacheFillsAllFaces()
@@ -3144,6 +3204,29 @@ void LoadBuffers()
 	{
 		device->CreateBufferZeroed(&bd, &buf);
 		device->SetName(&buf, "indirectDebugStatsReadback");
+	}
+
+	{
+		// GGMAX BR-0034 part A: light-seen bits (one uint per tile bucket) + per-frame readbacks.
+		GPUBufferDesc sd;
+		sd.stride = sizeof(uint);
+		sd.size = sizeof(uint) * (SHADER_ENTITY_TILE_BUCKET_COUNT + 1); // + the shader's "I ran" sentinel
+		sd.usage = Usage::DEFAULT;
+		sd.bind_flags = BindFlag::UNORDERED_ACCESS;
+		sd.misc_flags = ResourceMiscFlag::BUFFER_STRUCTURED;
+		device->CreateBufferZeroed(&sd, &ggLightSeenBuffer);
+		device->SetName(&ggLightSeenBuffer, "ggLightSeenBuffer");
+		device->CreateBufferZeroed(&sd, &ggLightSeenScratch);
+		device->SetName(&ggLightSeenScratch, "ggLightSeenScratch");
+		sd.usage = Usage::READBACK;
+		sd.bind_flags = {};
+		sd.misc_flags = {};
+		sd.stride = 0;
+		for (auto& buf : ggLightSeenReadback)
+		{
+			device->CreateBufferZeroed(&sd, &buf);
+			device->SetName(&buf, "ggLightSeenReadback");
+		}
 	}
 
 	{
@@ -6155,6 +6238,37 @@ void UpdateVisibility(Visibility& vis)
 			std::sort(cur.begin(), cur.end(),
 				[](const LocalShadowSlot& a, const LocalShadowSlot& b) { return a.ent < b.ent; });
 			const bool perLightLayout = gg_shadow_perlight_layout != 0;
+			// GGMAX BR-0034 part A: take in the light-seen feedback the main culling wrote GetBufferCount() frames ago (this
+			// buffer index; its GPU work is complete). No usable feedback -> every light counts as seen.
+			ggLightSeenFeedbackFrame = ~0ull;
+			if (perLightLayout && gg_shadow_unseen_skip != 0)
+			{
+				const uint32_t ggIdx = device->GetBufferIndex();
+				const GGLightSeenSnap& snap = ggLightSeenSnap[ggIdx];
+				const uint32_t* bits = (const uint32_t*)ggLightSeenReadback[ggIdx].mapped_data;
+				const uint64_t now = device->GetFrameCount();
+				if (snap.dispatched && snap.scene == vis.scene && bits != nullptr && bits[SHADER_ENTITY_TILE_BUCKET_COUNT] == 1u
+					&& snap.frame < now
+					&& now - snap.frame <= (uint64_t)GraphicsDevice::GetBufferCount() + 1)
+				{
+					ggLightSeenFeedbackFrame = snap.frame;
+					ggLightTested.clear();
+					if (ggLightLastSeen.size() > 4096)
+						ggLightLastSeen.clear(); // deleted lights pile up over a long session; a reset only costs grace frames
+					for (uint32_t s = 0; s < SHADER_ENTITY_COUNT; ++s)
+					{
+						const Entity e = snap.ent[s];
+						if (e == INVALID_ENTITY)
+							continue;
+						ggLightTested.push_back(e);
+						const bool seen = ((bits[s / 32] >> (s % 32)) & 1u) != 0;
+						auto it = ggLightLastSeen.find(e);
+						if (seen || it == ggLightLastSeen.end())
+							ggLightLastSeen[e] = snap.frame; // seen now, or first time tested (grace period)
+					}
+					std::sort(ggLightTested.begin(), ggLightTested.end());
+				}
+			}
 			bool changed = localShadowInvalidate
 				|| localShadowCacheAtlasW != shadowMapAtlas.desc.width
 				|| localShadowCacheAtlasH != shadowMapAtlas.desc.height
@@ -6246,6 +6360,11 @@ void UpdateVisibility(Visibility& vis)
 						Sphere sph(s.pos, s.range + delta);
 						if (sph.intersects(aabb) && !gg_IsLocalShadowDirty(s.ent))
 						{
+							if (perLightLayout && gg_IsLightUnseen(s.ent))
+							{
+								gg_MarkUnseenStale(s.ent); // BR-0034 part A: nobody sees its light - keep the cached map
+								continue;
+							}
 							localShadowDirty.push_back(s.ent);
 							localShadowPartialOk.push_back(s.ent); // BR-0034: caster-dirty -> may render culled
 						}
@@ -6263,6 +6382,11 @@ void UpdateVisibility(Visibility& vis)
 				for (const LocalShadowSlot& s : cur)
 					if (!gg_IsLocalShadowDirty(s.ent))
 					{
+						if (perLightLayout && gg_IsLightUnseen(s.ent))
+						{
+							gg_MarkUnseenStale(s.ent); // BR-0034 part A
+							continue;
+						}
 						localShadowDirty.push_back(s.ent);
 						localShadowPartialOk.push_back(s.ent);
 					}
@@ -6279,7 +6403,13 @@ void UpdateVisibility(Visibility& vis)
 					if (gg_IsLocalShadowPartialOk(e) || gg_IsLocalShadowDirty(e))
 						continue;
 					for (const LocalShadowSlot& s : cur)
-						if (s.ent == e) { localShadowDirty.push_back(e); break; }
+						if (s.ent == e)
+						{
+							// BR-0034 part A: NEVER skipped, seen or not - a culled render cleared faces it did not draw, and
+							// an unseen light must not park a map with blank faces (it would light through walls on reveal).
+							localShadowDirty.push_back(e);
+							break;
+						}
 				}
 			}
 			// Switch off the per-light path and a moved caster means what it used to: everything.
@@ -6297,11 +6427,61 @@ void UpdateVisibility(Visibility& vis)
 				GraphicsDevice* ggdev = wi::graphics::GetDevice();
 				if (ggdev != nullptr && (ggdev->GetFrameCount() % (uint64_t)gg_shadow_refresh_floor) == 0)
 				{
-					localShadowRefreshCursor = (localShadowRefreshCursor + 1) % (uint32_t)cur.size();
-					const wi::ecs::Entity ggRefresh = cur[localShadowRefreshCursor].ent;
-					if (!gg_IsLocalShadowDirty(ggRefresh))
-						localShadowDirty.push_back(ggRefresh);
+					// BR-0034 part A: the floor spends its turn on the next SEEN light; all unseen -> no floor render this time.
+					for (size_t ggTry = 0; ggTry < cur.size(); ++ggTry)
+					{
+						localShadowRefreshCursor = (localShadowRefreshCursor + 1) % (uint32_t)cur.size();
+						const wi::ecs::Entity ggRefresh = cur[localShadowRefreshCursor].ent;
+						if (perLightLayout && gg_IsLightUnseen(ggRefresh))
+							continue; // not parked: the floor only guards against undetected change, nothing to catch up
+						if (!gg_IsLocalShadowDirty(ggRefresh))
+							localShadowDirty.push_back(ggRefresh);
+						break;
+					}
 				}
+			}
+			// BR-0034 part A: catch-up. A light whose re-render was skipped while unseen renders complete as soon as the
+			// feedback sees it again; one that left the granted set (its rect is gone) or re-renders anyway is forgotten.
+			gg_unseenNow = 0;
+			if (!changed && perLightLayout)
+			{
+				for (const LocalShadowSlot& s : cur)
+					if (gg_IsLightUnseen(s.ent))
+						gg_unseenNow++;
+				// No usable feedback this frame (a gap, not a sighting): keep everyone parked rather than reveal them all.
+				const bool ggHaveFeedback = ggLightSeenFeedbackFrame != ~0ull;
+				uint32_t ggRevealBudget = 4; // catch-up renders per frame - lamps revealed together (a door opening) spread out
+				size_t w = 0;
+				for (size_t r = 0; r < ggUnseenStale.size(); ++r)
+				{
+					const wi::ecs::Entity e = ggUnseenStale[r];
+					bool inCur = false;
+					for (const LocalShadowSlot& s : cur)
+						if (s.ent == e) { inCur = true; break; }
+					if (!inCur)
+						continue; // drop
+					if (gg_IsLocalShadowDirty(e) && !gg_IsLocalShadowPartialOk(e))
+						continue; // a complete render is already on its way - drop
+					if (!ggHaveFeedback || gg_IsLightUnseen(e) || ggRevealBudget == 0)
+					{
+						ggUnseenStale[w++] = e; // still unseen / no feedback / budget spent - keep waiting
+						continue;
+					}
+					if (gg_IsLocalShadowDirty(e))
+					{
+						// dirty as partial (a caster moves near it now that it is seen): it becomes incomplete and gets its
+						// complete render through that path - drop
+						continue;
+					}
+					localShadowDirty.push_back(e); // complete render (not partial-ok)
+					gg_unseenRevealTotal++;
+					ggRevealBudget--;
+				}
+				ggUnseenStale.resize(w);
+			}
+			else
+			{
+				ggUnseenStale.clear(); // a full clear re-renders every light complete / the per-light path is off
 			}
 			// A structural change re-renders the whole atlas anyway, so a dirty subset is meaningless
 			// and would only cause the clear pass and the render loop to reason about stale entities.
@@ -6908,6 +7088,23 @@ void UpdatePerFrameData(
 			if (slot < GG_FWD_LIGHT_SLOTS)
 				gg_fwd_slot_light[slot] = lightIndex;
 		};
+		// GGMAX BR-0034 part A: entity-array slot -> local light entity, for the main view's light-seen feedback. Read back
+		// GetBufferCount() frames later (the decision reads its slot before this frame overwrites it - it runs earlier).
+		const bool ggSeenRecord = (vis.flags & Visibility::ALLOW_SHADOW_ATLAS_PACKING) != 0;
+		GGLightSeenSnap* ggSeenSnapW = ggSeenRecord ? &ggLightSeenSnap[device->GetBufferIndex()] : nullptr;
+		if (ggSeenSnapW != nullptr)
+		{
+			ggSeenSnapW->frame = device->GetFrameCount();
+			ggSeenSnapW->dispatched = false;
+			ggSeenSnapW->scene = vis.scene;
+			for (uint32_t s = 0; s < SHADER_ENTITY_COUNT; ++s)
+				ggSeenSnapW->ent[s] = INVALID_ENTITY;
+		}
+		auto gg_record_seen_slot = [&](Entity e, const LightComponent& l) {
+			// volumetric lamps are left untested (= always seen): their light shafts sample the shadow in mid-air
+			if (ggSeenSnapW != nullptr && entityCounter < SHADER_ENTITY_COUNT)
+				ggSeenSnapW->ent[entityCounter] = l.IsVolumetricsEnabled() ? INVALID_ENTITY : e;
+		};
 		for (uint32_t lightIndex : vis.visibleLights)
 		{
 			if (entityCounter == SHADER_ENTITY_COUNT)
@@ -7177,6 +7374,7 @@ void UpdatePerFrameData(
 			}
 
 			gg_record_light_slot(lightIndex);
+			gg_record_seen_slot(entity, light);
 			std::memcpy(entityArray + entityCounter, &shaderentity, sizeof(ShaderEntity));
 			entityCounter++;
 			lightarray_count_spot++;
@@ -7255,6 +7453,7 @@ void UpdatePerFrameData(
 			}
 
 			gg_record_light_slot(lightIndex);
+			gg_record_seen_slot(entity, light);
 			std::memcpy(entityArray + entityCounter, &shaderentity, sizeof(ShaderEntity));
 			entityCounter++;
 			lightarray_count_point++;
@@ -7329,6 +7528,7 @@ void UpdatePerFrameData(
 			}
 
 			gg_record_light_slot(lightIndex);
+			gg_record_seen_slot(entity, light);
 			std::memcpy(entityArray + entityCounter, &shaderentity, sizeof(ShaderEntity));
 			entityCounter++;
 			lightarray_count_rect++;
@@ -9247,6 +9447,14 @@ void GetLocalShadowLayoutStats(uint32_t& renderedTotal, uint32_t& stickyKept, ui
 	renderedTotal = gg_localShadowRenderedTotal;
 	stickyKept = gg_localShadowStickyKept;
 	stickyFailTotal = gg_localShadowStickyFailTotal;
+}
+void GetLocalShadowUnseenStats(uint32_t& unseenNow, uint32_t& skippedTotal, uint32_t& revealTotal, uint32_t& staleNow, int& feedbackAge)
+{
+	unseenNow = gg_unseenNow;
+	skippedTotal = gg_unseenSkippedTotal;
+	revealTotal = gg_unseenRevealTotal;
+	staleNow = (uint32_t)ggUnseenStale.size();
+	feedbackAge = ggLightSeenFeedbackFrame == ~0ull ? -1 : (int)(device->GetFrameCount() - ggLightSeenFeedbackFrame);
 }
 uint32_t GetLocalShadowFullClearTotal()
 {
@@ -13261,9 +13469,37 @@ void ComputeTiledLightCulling(
 
 	device->BindUAV(&res.entityTiles, 0, cmd);
 
+	// GGMAX BR-0034 part A: only the main view of the scene whose entity array was snapshotted THIS frame feeds back.
+	const uint32_t ggSeenIdx = device->GetBufferIndex();
+	GGLightSeenSnap& ggSnap = ggLightSeenSnap[ggSeenIdx];
+	const bool ggSeenMain = (vis.flags & Visibility::ALLOW_SHADOW_ATLAS_PACKING) && ggLightSeenBuffer.IsValid()
+		&& ggSnap.scene == vis.scene && ggSnap.frame == device->GetFrameCount() && !ggSnap.dispatched;
+	if (ggSeenMain)
+	{
+		device->ClearUAV(&ggLightSeenBuffer, 0, cmd);
+		device->Barrier(GPUBarrier::Memory(&ggLightSeenBuffer), cmd);
+		device->BindUAV(&ggLightSeenBuffer, 1, cmd);
+	}
+	else
+	{
+		device->BindUAV(&ggLightSeenScratch, 1, cmd);
+	}
+
 	device->Dispatch(res.tileCount.x, res.tileCount.y, 1, cmd);
 
 	device->Barrier(GPUBarrier::Buffer(&res.entityTiles, ResourceState::UNORDERED_ACCESS, ResourceState::SHADER_RESOURCE), cmd);
+
+	if (ggSeenMain)
+	{
+		device->Barrier(GPUBarrier::Buffer(&ggLightSeenBuffer, ResourceState::UNORDERED_ACCESS, ResourceState::COPY_SRC), cmd);
+		device->CopyResource(&ggLightSeenReadback[ggSeenIdx], &ggLightSeenBuffer, cmd);
+		device->Barrier(GPUBarrier::Buffer(&ggLightSeenBuffer, ResourceState::COPY_SRC, ResourceState::UNORDERED_ACCESS), cmd);
+		ggSnap.dispatched = true;
+	}
+	else
+	{
+		device->Barrier(GPUBarrier::Memory(&ggLightSeenScratch), cmd); // scratch is written by every non-main view
+	}
 
 	device->EventEnd(cmd);
 
@@ -13271,6 +13507,7 @@ void ComputeTiledLightCulling(
 	GPUResource empty;
 	const GPUResource* uavs[] = {
 		&empty,
+		&empty, // GGMAX BR-0034 part A: lightSeen
 	};
 	device->BindUAVs(uavs, 0, arraysize(uavs), cmd);
 

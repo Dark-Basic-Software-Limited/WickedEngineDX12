@@ -113,7 +113,18 @@ void main(uint3 DTid : SV_DispatchThreadID)
 		{
 			result.rgb = tonemap(result.rgb);
 		}
-		result.rgb = ApplySRGBCurve_Fast(result.rgb);
+		// GGMAX BR-0041: the DX11 engine fork ended its tonemap with GAMMA = pow(x, 1/2.2). The sRGB curve is far
+		// darker below ~5% linear (dark interiors read about half as bright). The level's "sRGB Output" tick box
+		// (default off) clears the flag to get the stock sRGB curve.
+		[branch]
+		if (flags & TONEMAP_FLAG_GG_GAMMA22)
+		{
+			result.rgb = pow(max(result.rgb, 0), 1.0 / 2.2);
+		}
+		else
+		{
+			result.rgb = ApplySRGBCurve_Fast(result.rgb);
+		}
 	}
 	else
 	{

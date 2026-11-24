@@ -136,6 +136,7 @@ enum TONEMAP_FLAGS
 	TONEMAP_FLAG_DITHER = 1 << 0,
 	TONEMAP_FLAG_ACES = 1 << 1,
 	TONEMAP_FLAG_SRGB = 1 << 2,
+	TONEMAP_FLAG_GG_GAMMA22 = 1 << 3,	// GGMAX BR-0041: with TONEMAP_FLAG_SRGB, encode with pow(1/2.2) (DX11 "Gamma 2.2") instead of the sRGB curve
 };
 struct PushConstantsTonemap
 {

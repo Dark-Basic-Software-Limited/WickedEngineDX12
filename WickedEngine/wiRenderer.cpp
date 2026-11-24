@@ -312,6 +312,8 @@ bool gg_weapon_shadow = true;
 // diffuse and both specular D terms their own. Revert with setup.ini `lightfalloff=0`, or live
 // with the harness `SET_LIGHTFALLOFF 0` for a same-session A/B.
 bool gg_dx11_light_falloff = true;
+// GGMAX BR-0041: see wiRenderer.h. Rides the existing tonemap flags word (no new push-constant data).
+bool gg_tonemap_gamma22 = true;
 // GGMAX 3.114: OPTION_BIT_GG_DX11_FOG_CURVE (fogHF.hlsli GetFogAmount). The default fog start of a
 // GameGuru level is 40000 (visuals_resetvalues), so this changes the distant haze on most levels.
 bool gg_dx11_fog_curve = true;
@@ -20582,6 +20584,10 @@ void Postprocess_Tonemap(
 	if (display_colorspace == ColorSpace::SRGB)
 	{
 		tonemap_push.flags_hdrcalibration |= TONEMAP_FLAG_SRGB;
+		if (gg_tonemap_gamma22)
+		{
+			tonemap_push.flags_hdrcalibration |= TONEMAP_FLAG_GG_GAMMA22;	// GGMAX BR-0041
+		}
 	}
 	tonemap_push.flags_hdrcalibration |= XMConvertFloatToHalf(hdr_calibration) << 16u;
 	tonemap_push.texture_input = device->GetDescriptorIndex(&input, SubresourceType::SRV);

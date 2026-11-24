@@ -5499,6 +5499,10 @@ void UpdateVisibility(Visibility& vis)
 				if (vis.flags & Visibility::ALLOW_OCCLUSION_CULLING)
 				{
 					occluded = occlusion_result.IsOccluded();
+					if (occluded && wi::scene::gg_occlusion_instrument)
+					{
+						wi::scene::gg_occlusion_culls.fetch_add(1, std::memory_order_relaxed); // GGMAX BR-0046 instrument (harness only)
+					}
 				}
 
 				if ((vis.flags & Visibility::ALLOW_REQUEST_REFLECTION) && object.IsRequestPlanarReflection() && !occluded)
@@ -5550,6 +5554,7 @@ void UpdateVisibility(Visibility& vis)
 						else
 						{
 							occlusion_result.occlusionQueries[vis.scene->queryheap_idx] = vis.scene->queryAllocator.fetch_add(1); // allocate new occlusion query from heap
+							occlusion_result.gg_culled_at_query[vis.scene->queryheap_idx] = occluded; // GGMAX BR-0046 instrument
 						}
 					}
 				}
@@ -8593,13 +8598,56 @@ void OcclusionCulling_Render(const CameraComponent& camera, const Visibility& vi
 				const float magnitude = std::max({ eye_magnitude,
 					std::abs(aabb._min.x), std::abs(aabb._min.y), std::abs(aabb._min.z),
 					std::abs(aabb._max.x), std::abs(aabb._max.y), std::abs(aabb._max.z) });
-				const float extrude = std::max(0.001f, magnitude * (32.0f * FLT_EPSILON));
+				float extrude = std::max(0.001f, magnitude * (32.0f * FLT_EPSILON));
+				// GGMAX BR-0046: Occlusion Margin - widen the box by a fixed ANGLE (a fraction of its
+				// distance), so it peeks out SIDEWAYS from behind an occluder before the object does and the
+				// late query result has already said "visible" by the time the object shows.
+				// ★ Widening alone also pulls the box's near side toward the camera, in front of whatever
+				// stands just before it - a prop 1 unit behind a wall would never be culled again. So the
+				// widened box is also pushed AWAY from the eye along the eye->centre direction by
+				// m * (|dx|+|dy|+|dz|) (unit direction), clamped per axis (below): its nearest depth along that
+				// direction stays the original box's (a little nearer on diagonals), and mostly only the
+				// sideways extent grows (the centre stays on the same pixel).
+				// Capped at half the box's per-axis distance from the eye: a box grown around the camera draws
+				// only faces behind it, which can read occluded for an object right in front of you.
+				XMFLOAT3 gg_margin_shift = XMFLOAT3(0, 0, 0);
+				if (wi::scene::gg_occlusion_margin > 0)
+				{
+					const XMFLOAT3 c = aabb.getCenter();
+					const float dx = c.x - camera.Eye.x, dy = c.y - camera.Eye.y, dz = c.z - camera.Eye.z;
+					const float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+					const float cheb = std::max({
+						std::max({ aabb._min.x - camera.Eye.x, camera.Eye.x - aabb._max.x, 0.0f }),
+						std::max({ aabb._min.y - camera.Eye.y, camera.Eye.y - aabb._max.y, 0.0f }),
+						std::max({ aabb._min.z - camera.Eye.z, camera.Eye.z - aabb._max.z, 0.0f }) });
+					const float margin = std::min(wi::scene::gg_occlusion_margin * dist, 0.5f * cheb);
+					if (margin > extrude && dist > 0)
+					{
+						const float inv = 1.0f / dist;
+						const float ux = dx * inv, uy = dy * inv, uz = dz * inv;
+						const float push = margin * (std::abs(ux) + std::abs(uy) + std::abs(uz));
+						// ★ Per axis the push can exceed the widening (up to 1.37x on a diagonal), which would
+						// sink the box's near face BEHIND the object's own surface - a floor tile seen at 45
+						// degrees then reads occluded by itself. Clamp each axis so the box always still holds
+						// the object plus the stock guard; on diagonals the near side then comes slightly
+						// toward the eye, which only makes the test more conservative.
+						const float lim = margin - extrude;   // extrude = the stock guard here
+						gg_margin_shift = XMFLOAT3(
+							std::clamp(ux * push, -lim, lim),
+							std::clamp(uy * push, -lim, lim),
+							std::clamp(uz * push, -lim, lim));
+						extrude = margin;
+					}
+				}
 				aabb._min.x -= extrude;
 				aabb._min.y -= extrude;
 				aabb._min.z -= extrude;
 				aabb._max.x += extrude;
 				aabb._max.y += extrude;
 				aabb._max.z += extrude;
+				aabb._min.x += gg_margin_shift.x; aabb._max.x += gg_margin_shift.x; // GGMAX BR-0046 (0 when off)
+				aabb._min.y += gg_margin_shift.y; aabb._max.y += gg_margin_shift.y;
+				aabb._min.z += gg_margin_shift.z; aabb._max.z += gg_margin_shift.z;
 				const XMMATRIX transform = aabb.getAsBoxMatrix() * VP;
 				device->PushConstants(&transform, sizeof(transform), cmd);
 

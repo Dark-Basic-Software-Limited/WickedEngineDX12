@@ -47,6 +47,18 @@ namespace wi::scene
 	// Default 8 frames: comfortably longer than the query latency (BufferCount frames behind)
 	// while still short enough to engage during camera motion.
 	extern uint32_t gg_occlusion_history_mask;
+	// GGMAX BR-0046: Occlusion Margin. An occlusion query result arrives BufferCount frames after
+	// the box was drawn, so an object revealed by a sideways camera move stays culled for that
+	// long - a one-frame gap where a wall behind a column should be. A margin > 0 widens each
+	// query box by this fraction of its distance from the camera (a fixed angle on screen), so
+	// the box peeks out from behind the occluder before the object itself does. 0 = stock.
+	extern float gg_occlusion_margin;
+	// GGMAX BR-0046 instrument: objects culled by occlusion in a frame whose OWN query from that
+	// frame later read visible ("pops" - hidden while visible; with a margin this is an upper
+	// bound, since a widened box is visible whenever the object is), and occlusion culls made.
+	extern std::atomic<uint32_t> gg_occlusion_pops;
+	extern std::atomic<uint32_t> gg_occlusion_culls;
+	extern bool gg_occlusion_instrument;   // counters above run only once the harness has asked for them
 	extern std::atomic<uint32_t> gg_anim_reduction_scale;   // 0 or 1 = off, else 2..100
 	// Per-armature update decision for the current frame, indexed by armature index. Filled by
 	// RunAnimationUpdateSystem, read by the skinning dispatch. Empty = Reduction Scale is off.
@@ -263,6 +275,8 @@ namespace wi::scene
 			int occlusionQueries[wi::graphics::GraphicsDevice::GetBufferCount()];
 			// occlusion result history bitfield (32 bit->32 frame history)
 			uint32_t occlusionHistory = ~0u;
+			// GGMAX BR-0046 instrument: was the object culled in the frame this query slot was issued?
+			bool gg_culled_at_query[wi::graphics::GraphicsDevice::GetBufferCount()] = {};
 
 			bool IsOccluded() const
 			{

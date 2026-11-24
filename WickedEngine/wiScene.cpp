@@ -150,6 +150,10 @@ namespace wi::scene
 	// Default 8 frames. Stock Wicked used all 32, which cannot be met while the camera turns -
 	// see the long note at OcclusionResult::IsOccluded() in wiScene.h.
 	uint32_t gg_occlusion_history_mask = 0xFFu;
+	float gg_occlusion_margin = 0.0f;                  // GGMAX BR-0046, see wiScene.h
+	std::atomic<uint32_t> gg_occlusion_pops{ 0 };      // GGMAX BR-0046 instrument
+	std::atomic<uint32_t> gg_occlusion_culls{ 0 };     // GGMAX BR-0046 instrument
+	bool gg_occlusion_instrument = false;              // GGMAX BR-0046: set by the harness (OCCLUSION_POPS)
 
 	void Scene::Update(float dt)
 	{
@@ -5755,6 +5759,10 @@ namespace wi::scene
 					if (visible)
 					{
 						occlusion_result.occlusionHistory |= 1; // visible
+						if (gg_occlusion_instrument && occlusion_result.gg_culled_at_query[queryheap_idx])
+						{
+							gg_occlusion_pops.fetch_add(1, std::memory_order_relaxed); // GGMAX BR-0046 instrument
+						}
 					}
 				}
 				else
@@ -5763,6 +5771,7 @@ namespace wi::scene
 				}
 			}
 			occlusion_result.occlusionQueries[queryheap_idx] = -1; // invalidate query
+			occlusion_result.gg_culled_at_query[queryheap_idx] = false; // GGMAX BR-0046 instrument
 
 			const LayerComponent* layer = layers.GetComponent(entity);
 			uint32_t layerMask;

@@ -145,6 +145,9 @@ namespace wi::renderer
 	extern bool gg_sun_lowres_bias_enable;
 	// GGMAX BR-0044: the same for point-light cube shadows below 256 (true = default; false = stock, A/B only).
 	extern bool gg_point_lowres_bias_enable;
+	// GGMAX BR-0048: true (default) = terrain chunks cast SUN shadows at their drawn LOD even with SHADOW_LOD_OVERRIDE on;
+	// false = the per-cascade override LOD like every other object (A/B only, harness SET_TERRAINSHADOWLOD).
+	extern bool gg_terrain_shadow_view_lod;
 	// GGMAX 3.108: sun shadows of SHADOW_DISTANCE_FADE objects dissolve with their distance fade
 	// (false = stock hard cut, for A/B); per-frame count of casters inside their fade band.
 	extern bool gg_shadow_distance_fade;

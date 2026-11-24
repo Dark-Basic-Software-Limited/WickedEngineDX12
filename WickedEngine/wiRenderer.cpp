@@ -4482,6 +4482,19 @@ static uint32_t gg_SunShadowBiasLevel(int resolution)
 	if (resolution >= 256) return 2;
 	return 3;
 }
+// GGMAX BR-0048: terrain chunks cast SUN shadows at the LOD the camera DRAWS them with (object.lod), not the
+// per-cascade projected-size LOD of SHADOW_LOD_OVERRIDE (on with Delayed Shadows). A far chunk drawn coarse but cast
+// finer (or the reverse) shadows ITSELF wherever the two meshes differ by more than the bias: black blotches on
+// distant mountains at a 2048 sun that pop as the camera turns or backs away (the LOD picked is the minimum over
+// the cascades the chunk touches). Other objects keep the override. Sun cascades only: spot/point shadows can be
+// CACHED for many frames, and a camera-dependent LOD baked into them would go stale as the camera moves (review).
+// Harness SET_TERRAINSHADOWLOD 0|1 A/Bs it.
+bool gg_terrain_shadow_view_lod = true;
+static inline bool gg_ShadowLODOverrideFor(bool shadow_lod_override, const ObjectComponent& object)
+{
+	return shadow_lod_override && !(gg_terrain_shadow_view_lod && (object.GetFilterMask() & FILTER_TERRAIN));
+}
+
 // GGMAX BR-0044: the same twins for point-light cube shadows, relative to the cube default 256 (no leak there in either
 // engine): 256 and up stock, 128 -> slope / 2, 64 -> / 4, lower -> / 8. Set around the point light's RenderMeshes calls.
 bool gg_point_lowres_bias_enable = true;	// A/B switch (harness SET_SHADOW_RES pointbias 0|1): false = stock -4 slope at every resolution
@@ -9783,6 +9796,7 @@ void DrawShadowmaps(
 						// Determine which cascades the object is contained in:
 						uint8_t camera_mask = 0;
 						uint8_t shadow_lod = 0xFF;
+						const bool gg_lod_override = gg_ShadowLODOverrideFor(shadow_lod_override, object); // GGMAX BR-0048
 						for (uint32_t cascade = 0; cascade < cascade_count; ++cascade)
 						{
 							//GGMAX delayed cascades: no instances for skipped cascades
@@ -9808,7 +9822,7 @@ void DrawShadowmaps(
 							if ((cascade < (cascade_count - object.cascadeMask)) && shcams[cascade].frustum.CheckBoxFast(aabb))
 							{
 								camera_mask |= 1 << cascade;
-								if (shadow_lod_override)
+								if (gg_lod_override)
 								{
 									const uint8_t candidate_lod = (uint8_t)vis.scene->ComputeObjectLODForView(object, aabb, vis.scene->meshes[object.mesh_index], shcams[cascade].view_projection);
 									shadow_lod = std::min(shadow_lod, candidate_lod);

@@ -5728,8 +5728,26 @@ namespace wi::scene
 			std::memcpy(instanceArrayMapped + impostorInstanceOffset, &inst, sizeof(inst));
 		}
 	}
+	// GGMAX BR-0048 follow-up (Lee 2026-11-25: ONE frame of the old blotch when a distant mountain chunk's LOD pops): with
+	// Delayed Shadows the far sun cascades refresh every 2nd decision and keep last frame's depth in between, so a terrain
+	// chunk whose LOD stepped on a skip frame was drawn against its OLD LOD's shadow for that frame. On a frame whose coming
+	// decision will skip them, a shadow-casting terrain chunk keeps its current LOD; the step lands on the next refresh
+	// frame (1 frame late on desktop, up to 3 on Laptop). Set on the main thread before the dispatch below (its jobs outlive
+	// this function, so no locals); gg_lod_seen[index] = the entity LOD-selected at that index before, so a NEW chunk (lod
+	// still 0) is never held. Only terrain entries are written. wi::renderer::gg_terrain_lod_hold = the switch.
+	static bool gg_hold_terrain_lod_now = false;
+	static wi::vector<wi::ecs::Entity> gg_lod_seen;
+
 	void Scene::RunObjectUpdateSystem(wi::jobsystem::context& ctx)
 	{
+		// (not on a frame a detail mesh changed: wiTerrain ran earlier in this Scene::Update and the far group refreshes with
+		// it anyway - and a held LOD must not outlive a swap to a mesh with fewer LODs - review 2026-11-25)
+		gg_hold_terrain_lod_now = wi::renderer::gg_terrain_lod_hold && wi::renderer::gg_terrain_shadow_view_lod
+			&& wi::renderer::gg_terrain_caster_change.load() == 0
+			&& wi::renderer::GG_DelayedShadowFarGroupWillSkip();
+		if (gg_lod_seen.size() < objects.GetCount())
+			gg_lod_seen.resize(objects.GetCount(), INVALID_ENTITY);
+
 		aabb_objects.resize(objects.GetCount());
 		matrix_objects.resize(objects.GetCount());
 		matrix_objects_prev.resize(objects.GetCount());
@@ -5878,7 +5896,20 @@ namespace wi::scene
 				// LOD select:
 				if (mesh.subsets_per_lod > 0)
 				{
-					object.lod = ComputeObjectLODForView(object, aabb, mesh, camera.GetViewProjection());
+					const uint32_t gg_lod_new = ComputeObjectLODForView(object, aabb, mesh, camera.GetViewProjection());
+					const bool gg_terrain = (object.GetFilterMask() & FILTER_TERRAIN) != 0; // GGMAX BR-0048 follow-up (above)
+					if (gg_hold_terrain_lod_now && gg_terrain && gg_lod_new != object.lod && object.IsCastingShadow()
+						&& object.lod < mesh.GetLODCount() // never hold an LOD the drawn mesh does not have (BLAS index)
+						&& args.jobIndex < gg_lod_seen.size() && gg_lod_seen[args.jobIndex] == entity)
+					{
+						wi::renderer::gg_terrain_lod_held.fetch_add(1); // drawn at its old LOD one more frame
+					}
+					else
+					{
+						object.lod = gg_lod_new;
+					}
+					if (gg_terrain && args.jobIndex < gg_lod_seen.size())
+						gg_lod_seen[args.jobIndex] = entity;
 				}
 
 				union SortBits

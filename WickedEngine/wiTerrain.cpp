@@ -1270,6 +1270,8 @@ namespace wi::terrain
 			{
 				if (it->second.job)
 					it->second.job->cancelled.store(true);
+				if (it->second.mesh_entity != INVALID_ENTITY)
+					wi::renderer::gg_terrain_caster_change.store(1); // GGMAX BR-0048 follow-up: a drawn detail mesh goes
 				wi::scene::gg_detail_render_mesh.erase(it->second.chunk_entity);
 				if (cit != t.chunks.end())
 				{
@@ -1448,7 +1450,12 @@ namespace wi::terrain
 				++it;
 			}
 			if (!ready_new.empty() || retired)
+			{
 				gg_detail_swaps++;
+				// GGMAX BR-0048 follow-up: rebuilt / retired detail meshes change what the chunks cast - the far sun cascades
+				// refresh this frame (a retired mesh is deleted, so the step cannot be held back like a LOD step)
+				wi::renderer::gg_terrain_caster_change.store(1);
+			}
 		}
 
 		// 4. what draws: every record with a mesh built for its chunk's current entity
@@ -1466,6 +1473,7 @@ namespace wi::terrain
 				{
 					gg_DetailResetWetmap(scene, cd.entity); // chunk mesh -> detail mesh
 					wi::scene::gg_detail_render_mesh[cd.entity] = r.mesh_entity;
+					wi::renderer::gg_terrain_caster_change.store(1); // GGMAX BR-0048 follow-up
 				}
 				gg_detail_count++;
 				gg_detail_drawn_tris += r.tris;
@@ -1475,6 +1483,7 @@ namespace wi::terrain
 			{
 				gg_DetailResetWetmap(scene, cd.entity); // detail mesh -> chunk mesh
 				wi::scene::gg_detail_render_mesh.erase(mit); // not built yet: the chunk mesh draws meanwhile
+				wi::renderer::gg_terrain_caster_change.store(1); // GGMAX BR-0048 follow-up
 			}
 		}
 		if (swapped > 0)

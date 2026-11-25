@@ -1418,8 +1418,18 @@ struct DelayedShadowCascadeState
 	// between frames forces a full refresh — the frozen per-slot matrices would otherwise be
 	// applied to different cascades than they were captured from.
 	uint32_t dedicatedCount = ~0u;
+	// GGMAX BR-0048 follow-up: the stagger counts DECISIONS (one per frame) instead of the device frame count, which an extra
+	// SubmitCommandLists in a frame (a BURST_FRAMES screenshot, saveTextureToMemory) bumps twice - that froze the parity.
+	// It also lets the scene PREDICT this frame's skip before the decision (GG_DelayedShadowFarGroupWillSkip).
+	uint64_t seq = 0;
 };
 static DelayedShadowCascadeState delayedShadowState;
+bool gg_terrain_lod_hold = true;                  // GGMAX BR-0048 follow-up, see wiRenderer.h
+std::atomic<uint32_t> gg_terrain_caster_change{ 0 };
+std::atomic<uint64_t> gg_terrain_lod_held{ 0 };
+bool gg_ds_terrain_instrument = false;
+static std::atomic<uint64_t> gg_ds_terrain_refresh{ 0 }, gg_ds_stale_frames{ 0 }, gg_ds_stale_chunks{ 0 }, gg_ds_skip_frames{ 0 };
+static wi::unordered_map<wi::ecs::Entity, uint16_t> gg_ds_far_lod;   // instrument: terrain lod at the last far refresh
 // GGMAX 3.165 instrument (Lee 2026-11-07: Delayed Shadows did nothing in Terrain Bake mode): per decision, which reason
 // forced a full refresh / why no decision ran; per DrawShadowmaps, whether the delayed path was live. GG_DelayedShadowStats.
 static std::atomic<uint64_t> gg_ds_decided{ 0 }, gg_ds_forceall{ 0 }, gg_ds_staggered{ 0 }, gg_ds_draw_calls{ 0 }, gg_ds_draw_delayed{ 0 }, gg_ds_draw_fullclear{ 0 };
@@ -7215,6 +7225,10 @@ void UpdatePerFrameData(
 					DelayedShadowCascadeState& st = delayedShadowState;
 					const uint64_t fc = device->GetFrameCount();
 					st.decisionFrame = fc;
+					st.seq++; // GGMAX BR-0048 follow-up: the stagger's own clock (one tick per decision)
+					// GGMAX BR-0048 follow-up: a terrain chunk's drawn DETAIL mesh changed this frame (wiTerrain.cpp) - it cannot
+					// be held back like a LOD step (a retired detail mesh is deleted), so the far cascades refresh with it.
+					const bool ggTerrainChanged = gg_terrain_caster_change.exchange(0) != 0;
 					const wi::ecs::Entity lightEnt = vis.scene->lights.GetEntity(lightIndex);
 
 					const bool gg_fr[6] = { !st.valid, st.lightEntity != lightEnt, st.dedicatedCount != gg_dedicated_count,
@@ -7255,13 +7269,19 @@ void UpdatePerFrameData(
 						// always self-consistent while still ~halving (interval 2) or ~quartering (interval
 						// 4 = "Laptop") the staggered cascades' cost. Cascades 1..N always move as one group,
 						// so raising the interval never re-introduces the cross-cascade desync flicker.
-						const int frame = (int)fc;
 						const int interval = delayedShadowCascadeInterval < 2 ? 2 : delayedShadowCascadeInterval;
-						if ((frame % interval) != 0)
+						if ((st.seq % (uint64_t)interval) != 0) // GGMAX BR-0048 follow-up: st.seq, was (int)fc
 						{
-							// 1.59: dedicated slots (0..N-1, animated characters) and sun cascade 0
-							// (slot N) refresh every frame; only sun cascades 1.. stagger.
-							for (uint32_t c = gg_dedicated_count + 1; c < cascade_count; ++c) st.update[c] = false;
+							if (ggTerrainChanged && gg_terrain_lod_hold)
+							{
+								gg_ds_terrain_refresh.fetch_add(1); // the whole far group refreshes (keeps the cascade-blend sync)
+							}
+							else
+							{
+								// 1.59: dedicated slots (0..N-1, animated characters) and sun cascade 0
+								// (slot N) refresh every frame; only sun cascades 1.. stagger.
+								for (uint32_t c = gg_dedicated_count + 1; c < cascade_count; ++c) st.update[c] = false;
+							}
 						}
 						//camera translation override (64 world units, DX11): a real move
 						//refreshes stale cascades immediately
@@ -7275,6 +7295,40 @@ void UpdatePerFrameData(
 							const float dz = eye.z - st.cachedEye[c].z;
 							if (dx * dx + dy * dy + dz * dz > 64.0f * 64.0f) st.update[c] = true;
 						}
+					}
+
+					// GGMAX BR-0048 follow-up instrument (on once the harness reads DELAYED_SHADOW_STATS): on a decision that does
+					// NOT refresh the far group, count shadow-casting terrain chunks inside a far cascade whose drawn LOD differs from
+					// the LOD the far cascades last cast them with = the one-frame blotch Lee saw. Refresh decisions record the LOD.
+					if (gg_ds_terrain_instrument && cascade_count > gg_dedicated_count + 1)
+					{
+						const uint32_t ggC1 = gg_dedicated_count + 1;
+						const bool ggFarRefresh = st.update[ggC1];
+						const Scene& ggSc = *vis.scene;
+						if (ggFarRefresh) gg_ds_far_lod.clear(); else gg_ds_skip_frames.fetch_add(1);
+						uint32_t ggStale = 0;
+						const size_t ggN = std::min(ggSc.objects.GetCount(), ggSc.aabb_objects.size());
+						for (size_t i = 0; i < ggN; ++i)
+						{
+							const ObjectComponent& o = ggSc.objects[i];
+							if (!(o.GetFilterMask() & FILTER_TERRAIN) || !o.IsCastingShadow())
+								continue;
+							bool ggInFar = false;
+							for (uint32_t c = ggC1; c < cascade_count && !ggInFar; ++c)
+								ggInFar = shcams[c].frustum.CheckBoxFast(ggSc.aabb_objects[i]);
+							if (!ggInFar)
+								continue;
+							const wi::ecs::Entity e = ggSc.objects.GetEntity(i);
+							if (ggFarRefresh)
+								gg_ds_far_lod[e] = o.lod;
+							else
+							{
+								auto it = gg_ds_far_lod.find(e);
+								if (it != gg_ds_far_lod.end() && it->second != o.lod)
+									ggStale++;
+							}
+						}
+						if (ggStale > 0) { gg_ds_stale_frames.fetch_add(1); gg_ds_stale_chunks.fetch_add(ggStale); }
 					}
 
 					XMFLOAT3 eyeNow;
@@ -22678,14 +22732,28 @@ bool IsShadowsEnabled()
 	return SHADOWS_ENABLED;
 }
 //GGMAX delayed shadow cascades
+// GGMAX BR-0048 follow-up: will this frame's coming decision skip the far sun cascades? (the next decision's seq parity)
+bool GG_DelayedShadowFarGroupWillSkip()
+{
+	if (!delayedShadowCascadesEnabled || !delayedShadowState.valid)
+		return false;
+	// review 2026-11-25 (2 of 2): only while decisions are RUNNING - one ran last frame. With Shadows Off (or the sun not
+	// casting / static) no decision runs, seq freezes and the parity answer would hold every terrain LOD for good.
+	GraphicsDevice* ggDev = wi::graphics::GetDevice();
+	if (ggDev == nullptr || delayedShadowState.decisionFrame == ~0ull || ggDev->GetFrameCount() != delayedShadowState.decisionFrame + 1)
+		return false;
+	const int interval = delayedShadowCascadeInterval < 2 ? 2 : delayedShadowCascadeInterval;
+	return ((delayedShadowState.seq + 1) % (uint64_t)interval) != 0;
+}
 // GGMAX 3.165 instrument: harness DELAYED_SHADOW_STATS [reset]
 std::string GG_DelayedShadowStats(bool reset)
 {
-	char buf[1024];
+	char buf[2048];
 	_snprintf(buf, sizeof(buf),
 		"enabled=%d interval=%d | decisions %llu, forceAll %llu (!valid %llu, light %llu, dedicated %llu, RECT %llu, atlas %llu, LOCAL FULL CLEAR %llu) | "
 		"no decision: disabled %llu, cascades>MAX %llu, cascades<=dedicated %llu, already decided %llu | DrawShadowmaps %llu, delayed path %llu (of them full clear %llu) | "
-		"last changed sun rect %d,%d %dx%d (%llu changes) | localShadowCaching=%d",
+		"last changed sun rect %d,%d %dx%d (%llu changes) | localShadowCaching=%d | "
+		"BR-0048 terrain: lod_hold=%d lod_held=%llu terrain_refresh=%llu | instrument: skip decisions %llu, STALE frames %llu (chunks %llu)",
 		delayedShadowCascadesEnabled ? 1 : 0, delayedShadowCascadeInterval,
 		(unsigned long long)gg_ds_decided.load(), (unsigned long long)gg_ds_forceall.load(),
 		(unsigned long long)gg_ds_force_reason[0].load(), (unsigned long long)gg_ds_force_reason[1].load(), (unsigned long long)gg_ds_force_reason[2].load(),
@@ -22694,12 +22762,16 @@ std::string GG_DelayedShadowStats(bool reset)
 		(unsigned long long)gg_ds_nodecide_reason[2].load(), (unsigned long long)gg_ds_nodecide_reason[3].load(),
 		(unsigned long long)gg_ds_draw_calls.load(), (unsigned long long)gg_ds_draw_delayed.load(), (unsigned long long)gg_ds_draw_fullclear.load(),
 		gg_ds_last_rect[0].load(), gg_ds_last_rect[1].load(), gg_ds_last_rect[2].load(), gg_ds_last_rect[3].load(),
-		(unsigned long long)gg_ds_rect_changes.load(), localShadowCachingEnabled ? 1 : 0);
+		(unsigned long long)gg_ds_rect_changes.load(), localShadowCachingEnabled ? 1 : 0,
+		gg_terrain_lod_hold ? 1 : 0, (unsigned long long)gg_terrain_lod_held.load(), (unsigned long long)gg_ds_terrain_refresh.load(),
+		(unsigned long long)gg_ds_skip_frames.load(), (unsigned long long)gg_ds_stale_frames.load(), (unsigned long long)gg_ds_stale_chunks.load());
 	buf[sizeof(buf) - 1] = 0;
+	gg_ds_terrain_instrument = true; // GGMAX BR-0048 follow-up: the first read switches the stale counter on
 	if (reset)
 	{
 		gg_ds_decided = 0; gg_ds_forceall = 0; gg_ds_staggered = 0; gg_ds_draw_calls = 0; gg_ds_draw_delayed = 0; gg_ds_draw_fullclear = 0;
 		gg_ds_rect_changes = 0;
+		gg_terrain_lod_held = 0; gg_ds_terrain_refresh = 0; gg_ds_skip_frames = 0; gg_ds_stale_frames = 0; gg_ds_stale_chunks = 0;
 		for (auto& a : gg_ds_force_reason) a = 0;
 		for (auto& a : gg_ds_nodecide_reason) a = 0;
 	}

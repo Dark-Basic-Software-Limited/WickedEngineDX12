@@ -148,6 +148,19 @@ namespace wi::renderer
 	// GGMAX BR-0048: true (default) = terrain chunks cast SUN shadows at their drawn LOD even with SHADOW_LOD_OVERRIDE on;
 	// false = the per-cascade override LOD like every other object (A/B only, harness SET_TERRAINSHADOWLOD).
 	extern bool gg_terrain_shadow_view_lod;
+	// GGMAX BR-0048 follow-up (Lee 2026-11-25: ONE frame of the old blotch at a distant LOD pop): with Delayed Shadows the
+	// far sun cascades (1..N) refresh only every 2nd decision (4th on Laptop) and keep last frame's depth in between, so
+	// a terrain chunk whose drawn LOD stepped on a skip frame was drawn against its OLD LOD's shadow for that frame.
+	// true (default) = a shadow-casting terrain chunk's LOD step waits for the next far-cascade refresh (wiScene.cpp LOD
+	// select; at most 1 frame on desktop), and a detail-mesh change (wiTerrain.cpp) refreshes the far cascades that frame.
+	// false = before (A/B only, harness SET_TERRAINLODHOLD).
+	extern bool gg_terrain_lod_hold;
+	extern std::atomic<uint32_t> gg_terrain_caster_change;   // set by wiTerrain when a chunk's drawn detail mesh changes
+	extern std::atomic<uint64_t> gg_terrain_lod_held;        // instrument: LOD steps held one frame (since reset)
+	extern bool gg_ds_terrain_instrument;                    // harness: count stale terrain LODs on skip frames
+	// true when this frame's coming Delayed Shadows decision will SKIP the far sun cascades (stagger parity only - a
+	// forced refresh (camera move > 64 units, rect/atlas change) can still refresh them; holding then costs one frame of LOD).
+	bool GG_DelayedShadowFarGroupWillSkip();
 	// GGMAX (BR-0052 review): instrument - debug env-probe range boxes drawn / global-probe boxes skipped, last debug draw.
 	extern uint32_t gg_dbg_probe_boxes_drawn;
 	extern uint32_t gg_dbg_probe_boxes_global_skipped;

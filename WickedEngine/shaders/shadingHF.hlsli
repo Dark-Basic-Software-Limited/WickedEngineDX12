@@ -807,8 +807,15 @@ inline uint AlphaToCoverage(half alpha, half alphaTest, half dithering, float4 s
 	else if (GetCamera().sample_count > 1)
 	{
 		// Multisampled transparency:
-		//	alphaTest is not made, pure alpha is used for sample mask
 		//	dithering is modifying final alpha
+		// GGMAX BR-0050: DX11 parity - an alpha-tested material ("Alpha Clipping") is a HARD clip at its threshold
+		// with MSAA on as well. Stock Wicked skipped alphaTest here (pure alpha became the sample mask), so cut-outs
+		// grew semi-transparent fringes and the Alpha Clipping value did nothing. DX11 always clip()ped (objects and
+		// grass). Without an alpha test (alphaTest 0) pure alpha still drives the sample mask, as before.
+		if (alphaTest > 0)
+		{
+			alpha = (alpha >= alphaTest) ? 1 : 0;
+		}
 		alpha -= dithering;
 	}
 	else

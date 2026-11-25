@@ -6453,7 +6453,19 @@ void UpdateVisibility(Visibility& vis)
 						localShadowRefreshCursor = (localShadowRefreshCursor + 1) % (uint32_t)cur.size();
 						const wi::ecs::Entity ggRefresh = cur[localShadowRefreshCursor].ent;
 						if (perLightLayout && gg_IsLightUnseen(ggRefresh))
-							continue; // not parked: the floor only guards against undetected change, nothing to catch up
+						{
+							// BR-0034 part A follow-up (review 2026-11-25, Lee OK): PARK it. The floor exists to catch change the
+							// detector cannot see (bone-only animation, terrain edits, layer-mask hiding), and an unseen lamp can
+							// collect any amount of it - parked, it gets one complete catch-up render when its light is seen
+							// again (the catch-up below, at most 4 lamps a frame), instead of waiting for the floor's cursor.
+							// ONE new park per floor turn (the turn is spent on it, as the floor spent it before part A): parking
+							// every unseen lamp passed would make each look-away-and-back cost a catch-up render per lamp
+							// (the round-8 burst concern). Already parked -> pass over at no cost.
+							if (std::find(ggUnseenStale.begin(), ggUnseenStale.end(), ggRefresh) != ggUnseenStale.end())
+								continue;
+							gg_MarkUnseenStale(ggRefresh);
+							break;
+						}
 						if (!gg_IsLocalShadowDirty(ggRefresh))
 							localShadowDirty.push_back(ggRefresh);
 						break;

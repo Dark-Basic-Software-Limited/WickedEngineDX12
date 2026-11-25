@@ -148,6 +148,9 @@ namespace wi::renderer
 	// GGMAX BR-0048: true (default) = terrain chunks cast SUN shadows at their drawn LOD even with SHADOW_LOD_OVERRIDE on;
 	// false = the per-cascade override LOD like every other object (A/B only, harness SET_TERRAINSHADOWLOD).
 	extern bool gg_terrain_shadow_view_lod;
+	// GGMAX (BR-0052 review): instrument - debug env-probe range boxes drawn / global-probe boxes skipped, last debug draw.
+	extern uint32_t gg_dbg_probe_boxes_drawn;
+	extern uint32_t gg_dbg_probe_boxes_global_skipped;
 	// GGMAX 3.108: sun shadows of SHADOW_DISTANCE_FADE objects dissolve with their distance fade
 	// (false = stock hard cut, for A/B); per-frame count of casters inside their fade band.
 	extern bool gg_shadow_distance_fade;

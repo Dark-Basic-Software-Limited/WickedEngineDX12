@@ -4490,6 +4490,8 @@ static uint32_t gg_SunShadowBiasLevel(int resolution)
 // CACHED for many frames, and a camera-dependent LOD baked into them would go stale as the camera moves (review).
 // Harness SET_TERRAINSHADOWLOD 0|1 A/Bs it.
 bool gg_terrain_shadow_view_lod = true;
+uint32_t gg_dbg_probe_boxes_drawn = 0;          // GGMAX (BR-0052 review): instrument, see wiRenderer.h
+uint32_t gg_dbg_probe_boxes_global_skipped = 0;
 static inline bool gg_ShadowLODOverrideFor(bool shadow_lod_override, const ObjectComponent& object)
 {
 	return shadow_lod_override && !(gg_terrain_shadow_view_lod && (object.GetFilterMask() & FILTER_TERRAIN));
@@ -11650,6 +11652,7 @@ void DrawDebugWorld(
 		device->BindVertexBuffers(vbs, 0, arraysize(vbs), strides, nullptr, cmd);
 		device->BindIndexBuffer(&wirecubeIB, IndexBufferFormat::UINT16, 0, cmd);
 
+		uint32_t ggBoxesDrawn = 0, ggBoxesGlobal = 0; // GGMAX (BR-0052 review): instrument
 		for (size_t i = 0; i < scene.probes.GetCount(); ++i)
 		{
 			const EnvironmentProbeComponent& probe = scene.probes[i];
@@ -11657,6 +11660,14 @@ void DrawDebugWorld(
 
 			if (!scene.transforms.Contains(entity))
 			{
+				continue;
+			}
+			// GGMAX (BR-0052 review, Lee 2026-11-25): hide the GLOBAL probe's box, as the DX11 fork does under GGREDUCED
+			// ("hide extremely large ones - the global env probe"). GG's global probe is scaled 50000, so its range
+			// (RunProbeUpdateSystem: max scale x 2) is 100000; local probe boxes still draw.
+			if (probe.range >= 100000.0f)
+			{
+				ggBoxesGlobal++;
 				continue;
 			}
 
@@ -11668,7 +11679,10 @@ void DrawDebugWorld(
 			device->BindDynamicConstantBuffer(sb, CB_GETBINDSLOT(MiscCB), cmd);
 
 			device->DrawIndexed(24, 0, 0, cmd);
+			ggBoxesDrawn++;
 		}
+		gg_dbg_probe_boxes_drawn = ggBoxesDrawn;
+		gg_dbg_probe_boxes_global_skipped = ggBoxesGlobal;
 
 		device->EventEnd(cmd);
 	}
